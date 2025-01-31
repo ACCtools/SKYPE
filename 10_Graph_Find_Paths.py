@@ -9,6 +9,7 @@ from collections import Counter
 from datetime import datetime
 
 import networkx as nx
+from functools import partial
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
 from tqdm import tqdm
@@ -31,6 +32,9 @@ CTG_TELDIR = 13
 CHROMOSOME_COUNT = 23
 K = 1e3
 graph_num = 1000
+
+def dbg():
+    print("hi")
 
 def import_data(file_path : str) -> dict :
     graph_file = open(file_path, "r")
@@ -75,14 +79,25 @@ def import_data2(file_path : str) -> list :
 #                 local_path_list.append(path)
 #     return local_path_list
 
-def process_pair(args):
-    st, nd, G = args
+def process_pair(args, G, in_edge, out_edge):
+    st, nd = args
     local_path_list = []
+
     for st_b, nd_b in [(1, 0), (1, 1)]:
-        # G_new = G.deepcopy()
-        # 그래프 수정 (st_b, st), (nd_b, nd) => 나머지 전부 없애기
+        for i, j in [(st_b, st), (nd_b, nd)]:
+            G.add_node((i, j))
+
+            for edges in in_edge[(i, j)]:
+                G.add_weighted_edges_from(edges)
+            for edges in out_edge[(i, j)]:
+                G.add_weighted_edges_from(edges)
+
         if nx.has_path(G, (st_b, st), (nd_b, nd)):
             local_path_list.append(nx.shortest_path(G, source=(st_b, st), target=(nd_b, nd), weight='weight'))
+
+        for i, j in [(st_b, st), (nd_b, nd)]:
+            G.remove_node((i, j))
+    
     return local_path_list
 
 def main():
@@ -102,24 +117,34 @@ def main():
 
     graph_adjacency = import_data(graph_data)
     contig_data = import_data2(PREPROCESSED_PAF_FILE_PATH)
-    print(len(contig_data))
+    total_contig_count = len(contig_data)
+
+    in_edge = {}
+    out_edge = {}
+    for i in range(total_contig_count, total_contig_count+2*CHROMOSOME_COUNT):
+        in_edge[(0, i)] = []
+        in_edge[(1, i)] = []
+        out_edge[(0, i)] = []
+        out_edge[(1, i)] = []
 
     G = nx.DiGraph()
-    for i in range(len(contig_data) + CHROMOSOME_COUNT*2):
+    for i in range(len(contig_data)):
         G.add_node((0, i)) # Backward 방향으로 가는 i번째 노드
         G.add_node((1, i)) # Forward 방향으로 가는 i번째 노드 
-
     cnt = 0
+    
     for node in graph_adjacency:
         for edge in graph_adjacency[node]:
-            if cnt==0:
-                cnt+=1
-                
-            G.add_weighted_edges_from([(node, tuple([edge[0], edge[1]]), edge[2])])
+            chk = 1
+            if edge[1]>=total_contig_count:
+                in_edge[(edge[0], edge[1])].append([(node, tuple([edge[0], edge[1]]), edge[2])])
+            elif node[1]>=total_contig_count:
+                out_edge[node].append([(node, tuple([edge[0], edge[1]]), edge[2])])
+            else:
+                G.add_weighted_edges_from([(node, tuple([edge[0], edge[1]]), edge[2])])
 
     chr_corr = {}
     chr_rev_corr = {}
-    total_contig_count = len(contig_data)
     for i in range(1, CHROMOSOME_COUNT):
         chr_corr['chr'+str(i)+'f'] = total_contig_count + i - 1
         chr_rev_corr[total_contig_count + i - 1] = 'chr'+str(i)+'f'
@@ -143,39 +168,20 @@ def main():
         for j in range(nodes_in_each_contig[i][0], nodes_in_each_contig[i][1]+1):
             result[i].append(j)
 
-    total_contig_count = len(contig_data)
-
     tar_node_list = list(range(total_contig_count, total_contig_count + CHROMOSOME_COUNT*2))
-    # with open('data/HCC1954.telo.csv', 'r') as f:
-    #     for l in f:
-    #         ctg, tel_dir = l[:-1].split(',')
-    #         tar_ind = 0
-    #         if result[ctg]:
-    #             tar_node_list.append(result[ctg][tar_ind])
-    #         else:
-    #             print(f'Contig : {ctg} is gone!')
-
-    # test = [('15', '1'), ('16', '6'), ('6', '4'), ('1', '8'), ('11', '5'), ('21', '12'), ('4', '6'), ('19', '21'), ('2', '20')]
-    # args_list = []
-    # for s, t in test:
-    #     for j in ('f', 'b'):
-    #         for k in ('f', 'b'):
-    #             args_list.append((chr_corr['chr'+s+j], chr_corr['chr'+t+k], G))
     args_list = []
     for i in tar_node_list:
         for j in tar_node_list:
             if i < j:
-                args_list.append((i, j, G))
+                args_list.append((i, j))
 
     # Use ProcessPoolExecutor for multiprocessing
     path_list = []
     path_counter = Counter()
-    with ProcessPoolExecutor(max_workers=100) as executor:
-        futures = [executor.submit(process_pair, args) for args in args_list]
-        # Collect results using tqdm for progress bar
-        for future in tqdm(as_completed(futures), total=len(futures)):
-            want_to_print = future.result()
-            for path in want_to_print:
+
+    for arg in tqdm(args_list):
+        want_to_print = process_pair(arg, G=G, in_edge=in_edge, out_edge=out_edge)
+        for path in want_to_print:
                 path_compress= (path[0][1], path[-1][1])
                 path_counter[(path[0][1], path[-1][1])]+=1
                 """
@@ -201,6 +207,38 @@ def main():
 
                 f.close()
                 g.close()
+
+    # with ProcessPoolExecutor(max_workers=100) as executor:
+    #     futures = [executor.submit(partial(process_pair, G=G, in_edge=in_edge, out_edge=out_edge), args) for args in args_list]
+    #     # Collect results using tqdm for progress bar
+    #     for future in tqdm(as_completed(futures), total=len(futures)):
+    #         want_to_print = future.result()
+    #         for path in want_to_print:
+    #             path_compress= (path[0][1], path[-1][1])
+    #             path_counter[(path[0][1], path[-1][1])]+=1
+    #             """
+    #             first_chr = contig_data[path[0][1]][CHR_NAM]
+    #             second_chr = contig_data[path[-1][1]][CHR_NAM]
+    #             """
+    #             folder_name = f"{PREFIX}/{chr_rev_corr[path_compress[0]]}_{chr_rev_corr[path_compress[1]]}"
+    #             file_name = folder_name + f"/{path_counter[path_compress]}.paf"
+    #             file_name2 = folder_name + f"/{path_counter[path_compress]}.index.txt"
+    #             """
+    #             if chr_counter['chr1'] >= 5*1e6 and chr_counter['chrX']>=5*1e6:
+    #                 print(file_name)
+    #             """
+    #             os.makedirs(folder_name, exist_ok=True)
+    #             f = open(file_name, "wt")
+    #             g = open(file_name2, "wt")
+    #             for nodes in path:
+    #                 try:
+    #                     f.write("\t".join(map(str, contig_data[nodes[1]])))
+    #                 except:
+    #                     f.write(chr_rev_corr[nodes[1]]+"\n")
+    #                 g.write(" ".join(map(str, nodes))+"\n")
+
+    #             f.close()
+    #             g.close()
 
     # Save the path_list to a file
     # with open('path_list.pkl', 'wb') as f:

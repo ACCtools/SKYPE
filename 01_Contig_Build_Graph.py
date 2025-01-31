@@ -79,6 +79,9 @@ def telo_distance_checker(node: tuple, telo: tuple) -> int :
         return min(abs(telo[CHR_STR] - node[CHR_STR]), abs(telo[CHR_END] - node[CHR_END]))
 
 def initial_graph_build(contig_data : list, telo_data : dict) -> list :
+    '''
+    Initialize
+    '''
     contig_data_size = len(contig_data)
 
     chr_corr = {}
@@ -94,7 +97,7 @@ def initial_graph_build(contig_data : list, telo_data : dict) -> list :
         chr_rev_corr[total_contig_count + CHROMOSOME_COUNT + i - 1] = 'chr'+str(i)+'b'
     chr_corr['chrXb'] = total_contig_count + 2*CHROMOSOME_COUNT - 1
     chr_rev_corr[total_contig_count + 2*CHROMOSOME_COUNT - 1] = 'chrXb'
-    print(chr_corr)
+
     adjacency = [[[] for _ in range(total_contig_count+CHROMOSOME_COUNT*2)], [[] for _ in range(total_contig_count+CHROMOSOME_COUNT*2)]]
     curr_contig_name = 0
     last_node = 0
@@ -102,6 +105,9 @@ def initial_graph_build(contig_data : list, telo_data : dict) -> list :
     st = 0
     ed = INF
     contig_data.append((0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, ))
+    '''
+    Algorithm
+    '''
     for i in range(0, total_contig_count):       
         if curr_contig_name != 0 and curr_contig_name != contig_data[i][CTG_NAM]:
             if ed<st:
@@ -119,7 +125,6 @@ def initial_graph_build(contig_data : list, telo_data : dict) -> list :
                     dest = contig_data[st][CHR_NAM]+contig_data[st][CTG_TELDIR][0]
                 if len(contig_data[st][CTG_TELDIR]) > 1:
                     st+=1
-                # 이건 이거 맞을걸
                 adjacency[DIR_FOR][chr_corr[dest]].append([DIR_FOR, st, 0])
                 adjacency[DIR_BAK][chr_corr[dest]].append([DIR_BAK, st, 0])
                 adjacency[DIR_FOR][chr_corr[dest]].append([DIR_BAK, st, 0])
@@ -193,9 +198,6 @@ def initial_graph_build(contig_data : list, telo_data : dict) -> list :
             adjacency[DIR_FOR][i].append([DIR_BAK, telo_connect_node, telo_dist])
             adjacency[DIR_BAK][i].append([DIR_BAK, telo_connect_node, telo_dist])
             adjacency[DIR_BAK][i].append([DIR_FOR, telo_connect_node, telo_dist])
-    # for j in range(1, len(contig_data)):
-    #         adjacency[DIR_FOR][j-1].append([DIR_FOR, j, 0])
-    #         adjacency[DIR_BAK][j].append([DIR_BAK, j-1, 0])
     contig_data = contig_data[:-1]
 
     return adjacency
@@ -543,9 +545,6 @@ def main():
 
     contig_data = import_data(PREPROCESSED_PAF_FILE_PATH)
 
-    for i in range(len(contig_data)):
-        if contig_data[i][CTG_TELCHR] != '0':
-            print(i, contig_data[i])
 
     contig_adjacency = initial_graph_build(contig_data, telo_dict)
 
@@ -561,7 +560,7 @@ def main():
     optimized_adjacency = edge_optimization(contig_data, contig_adjacency)
 
     cnt = 0
-    print(len(contig_data))
+    print("Number of Nodes:", len(contig_data))
     with open(PREPROCESSED_PAF_FILE_PATH + ".np.graph.txt", "wt") as f:
         for i in range(2):
             for j in range(len(contig_data)+CHROMOSOME_COUNT*2):
@@ -570,7 +569,7 @@ def main():
                     f.write(f"{k}, ")
                     cnt+=1
                 f.write("\n")
-    print(cnt)
+    print("Number of Edges:", cnt)
 
     cnt = 0
     with open(PREPROCESSED_PAF_FILE_PATH + ".op.graph.txt", "wt") as g:
