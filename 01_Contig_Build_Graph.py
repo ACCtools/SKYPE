@@ -104,71 +104,190 @@ def initial_graph_build(contig_data : list, telo_data : dict) -> list :
     telo_detect = False
     st = 0
     ed = INF
-    contig_data.append((0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, ))
+    
     '''
     Algorithm
     '''
-    for i in range(0, total_contig_count):       
-        if curr_contig_name != 0 and curr_contig_name != contig_data[i][CTG_NAM]:
-            if ed<st:
-                print(curr_contig_name)
-                print(st, ed)
-                print("WTF")
-                exit()
-            if st == 0:
-                st = last_node[CTG_STRND]
-            # st 노드 위로는 다 날려야 함, st와 잇기
-            else:
-                if contig_data[st][CTG_TELCHR] == 'chrY':
-                    dest = 'chrX'+contig_data[st][CTG_TELDIR][0]
+    ''' 
+    Same Direction
+    adjacency[DIR_FOR][chr_corr[dest]].append([DIR_FOR, front_telo_bound, 0])
+    adjacency[DIR_FOR][front_telo_bound].append([DIR_FOR, chr_corr[dest], 0])
+    adjacency[DIR_BAK][chr_corr[dest]].append([DIR_BAK, front_telo_bound, 0])
+    adjacency[DIR_BAK][front_telo_bound].append([DIR_BAK, chr_corr[dest], 0])
+    '''
+    ''' 
+    Opposite Direction
+    adjacency[DIR_FOR][chr_corr[dest]].append([DIR_BAK, front_telo_bound, 0])
+    adjacency[DIR_FOR][front_telo_bound].append([DIR_BAK, chr_corr[dest], 0])
+    adjacency[DIR_BAK][chr_corr[dest]].append([DIR_FOR, front_telo_bound, 0])
+    adjacency[DIR_BAK][front_telo_bound].append([DIR_FOR, chr_corr[dest], 0])
+    '''
+    contig_data.append((0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, ))
+    curr_contig_st = 0
+    curr_contig_ed = contig_data[curr_contig_st][CTG_ENDND]
+    while curr_contig_st<len(contig_data):
+        # front of contig
+        st = curr_contig_st
+        ed = curr_contig_ed
+        front_telo_bound = curr_contig_st
+        end_telo_bound = curr_contig_ed
+        while contig_data[front_telo_bound][CTG_TELCHR] != '0':
+            front_telo_bound+=1
+        front_telo_bound-=1
+        while contig_data[end_telo_bound][CTG_TELCHR] != '0':
+            end_telo_bound-=1
+        end_telo_bound+=1
+        if front_telo_bound > curr_contig_st:
+            # Check if first telomere node is 'Nin' -> Else: escape
+            if len(contig_data[curr_contig_st][CTG_TELDIR])==1:
+                st = curr_contig_st
+            # If boundary node is 'Nin'
+            elif len(contig_data[front_telo_bound][CTG_TELDIR])>1:
+                # Next node is connected with telomere node.
+                front_telo_bound+=1
+                dest = contig_data[front_telo_bound][CHR_NAM]
+                if contig_data[front_telo_bound][CTG_DIR] == '+':
+                    dest += 'f'
+                        adjacency[DIR_FOR][chr_corr[dest]].append([DIR_FOR, front_telo_bound, 0])
+                        adjacency[DIR_FOR][front_telo_bound].append([DIR_FOR, chr_corr[dest], 0])
+                        adjacency[DIR_BAK][chr_corr[dest]].append([DIR_BAK, front_telo_bound, 0])
+                        adjacency[DIR_BAK][front_telo_bound].append([DIR_BAK, chr_corr[dest], 0])
                 else:
-                    dest = contig_data[st][CHR_NAM]+contig_data[st][CTG_TELDIR][0]
-                if len(contig_data[st][CTG_TELDIR]) > 1:
-                    st+=1
-                adjacency[DIR_FOR][chr_corr[dest]].append([DIR_FOR, st, 0])
-                adjacency[DIR_BAK][chr_corr[dest]].append([DIR_BAK, st, 0])
-                adjacency[DIR_FOR][chr_corr[dest]].append([DIR_BAK, st, 0])
-                adjacency[DIR_BAK][chr_corr[dest]].append([DIR_FOR, st, 0])
-                adjacency[DIR_FOR][st].append([DIR_FOR, chr_corr[dest], 0])
-                adjacency[DIR_BAK][st].append([DIR_BAK, chr_corr[dest], 0])
-                adjacency[DIR_FOR][st].append([DIR_BAK, chr_corr[dest], 0])
-                adjacency[DIR_BAK][st].append([DIR_FOR, chr_corr[dest], 0])
-            if ed == INF:
-                ed = last_node[CTG_ENDND]+1
+                    dest += 'b'
+                    adjacency[DIR_FOR][chr_corr[dest]].append([DIR_BAK, front_telo_bound, 0])
+                    adjacency[DIR_FOR][front_telo_bound].append([DIR_BAK, chr_corr[dest], 0])
+                    adjacency[DIR_BAK][chr_corr[dest]].append([DIR_FOR, front_telo_bound, 0])
+                    adjacency[DIR_BAK][front_telo_bound].append([DIR_FOR, chr_corr[dest], 0])
+                st = front_telo_bound
+            # If boundary node is not "Nin"
             else:
-                if contig_data[ed][CTG_TELCHR] == 'chrY':
-                    dest = 'chrX'+contig_data[ed][CTG_TELDIR][0]
+                if contig_data[front_telo_bound][CTG_TELDIR] == 'f':
+                    if contig_data[front_telo_bound][CTG_DIR]=='+':
+                        # boundary node is connected with telomere node.
+                        dest = contig_data[front_telo_bound][CHR_NAM]+'f'
+                        adjacency[DIR_FOR][chr_corr[dest]].append([DIR_FOR, front_telo_bound, 0])
+                        adjacency[DIR_FOR][front_telo_bound].append([DIR_FOR, chr_corr[dest], 0])
+                        adjacency[DIR_BAK][chr_corr[dest]].append([DIR_BAK, front_telo_bound, 0])
+                        adjacency[DIR_BAK][front_telo_bound].append([DIR_BAK, chr_corr[dest], 0])
+                    else:
+                        # Treat as "Nin" Case
+                        front_telo_bound+=1
+                        dest = contig_data[front_telo_bound][CHR_NAM]
+                        if contig_data[front_telo_bound][CTG_DIR] == '+':
+                            dest += 'f'
+                            adjacency[DIR_FOR][chr_corr[dest]].append([DIR_FOR, front_telo_bound, 0])
+                            adjacency[DIR_FOR][front_telo_bound].append([DIR_FOR, chr_corr[dest], 0])
+                            adjacency[DIR_BAK][chr_corr[dest]].append([DIR_BAK, front_telo_bound, 0])
+                            adjacency[DIR_BAK][front_telo_bound].append([DIR_BAK, chr_corr[dest], 0])
+                        else:
+                            dest += 'b'
+                            adjacency[DIR_FOR][chr_corr[dest]].append([DIR_BAK, front_telo_bound, 0])
+                            adjacency[DIR_FOR][front_telo_bound].append([DIR_BAK, chr_corr[dest], 0])
+                            adjacency[DIR_BAK][chr_corr[dest]].append([DIR_FOR, front_telo_bound, 0])
+                            adjacency[DIR_BAK][front_telo_bound].append([DIR_FOR, chr_corr[dest], 0])
                 else:
-                    dest = contig_data[ed][CHR_NAM]+contig_data[ed][CTG_TELDIR][0]
-                if len(contig_data[ed][CTG_TELDIR]) > 1:
-                    ed-=1     
-                adjacency[DIR_FOR][chr_corr[dest]].append([DIR_FOR, ed, 0])
-                adjacency[DIR_BAK][chr_corr[dest]].append([DIR_BAK, ed, 0])
-                adjacency[DIR_FOR][chr_corr[dest]].append([DIR_BAK, ed, 0])
-                adjacency[DIR_BAK][chr_corr[dest]].append([DIR_FOR, ed, 0])
-                adjacency[DIR_FOR][ed].append([DIR_FOR, chr_corr[dest], 0])
-                adjacency[DIR_BAK][ed].append([DIR_BAK, chr_corr[dest], 0])
-                adjacency[DIR_FOR][ed].append([DIR_BAK, chr_corr[dest], 0])
-                adjacency[DIR_BAK][ed].append([DIR_FOR, chr_corr[dest], 0])
-                ed+=1
-            if ed==2572:
-                print(st, ed)
-            for j in range(st+1, ed):
+                    if contig_data[front_telo_bound][CTG_DIR]=='-':
+                        dest = contig_data[front_telo_bound][CHR_NAM]+'b'
+                        adjacency[DIR_FOR][chr_corr[dest]].append([DIR_BAK, front_telo_bound, 0])
+                        adjacency[DIR_FOR][front_telo_bound].append([DIR_BAK, chr_corr[dest], 0])
+                        adjacency[DIR_BAK][chr_corr[dest]].append([DIR_FOR, front_telo_bound, 0])
+                        adjacency[DIR_BAK][front_telo_bound].append([DIR_FOR, chr_corr[dest], 0])
+                    else:
+                        front_telo_bound+=1
+                        dest = contig_data[front_telo_bound][CHR_NAM]
+                        if contig_data[front_telo_bound][CTG_DIR] == '+':
+                            dest += 'f'
+                            adjacency[DIR_FOR][chr_corr[dest]].append([DIR_FOR, front_telo_bound, 0])
+                            adjacency[DIR_FOR][front_telo_bound].append([DIR_FOR, chr_corr[dest], 0])
+                            adjacency[DIR_BAK][chr_corr[dest]].append([DIR_BAK, front_telo_bound, 0])
+                            adjacency[DIR_BAK][front_telo_bound].append([DIR_BAK, chr_corr[dest], 0])
+                        else:
+                            dest += 'b'
+                            adjacency[DIR_FOR][chr_corr[dest]].append([DIR_BAK, front_telo_bound, 0])
+                            adjacency[DIR_FOR][front_telo_bound].append([DIR_BAK, chr_corr[dest], 0])
+                            adjacency[DIR_BAK][chr_corr[dest]].append([DIR_FOR, front_telo_bound, 0])
+                            adjacency[DIR_BAK][front_telo_bound].append([DIR_FOR, chr_corr[dest], 0])
+                st = front_telo_bound
+
+        if end_telo_bound < curr_contig_ed:
+             # Check if first telomere node is 'Nin' -> Else: escape
+            if len(contig_data[curr_contig_ed][CTG_TELDIR])==1:
+                ed = curr_contig_ed
+            # If boundary node is 'Nin'
+            elif len(contig_data[end_telo_bound][CTG_TELDIR])>1:
+                # Next node is connected with telomere node.
+                end_telo_bound-=1
+                dest = contig_data[end_telo_bound][CHR_NAM]
+                if contig_data[end_telo_bound][CTG_DIR] == '+':
+                    dest += 'b'
+                    adjacency[DIR_FOR][chr_corr[dest]].append([DIR_FOR, front_telo_bound, 0])
+                    adjacency[DIR_FOR][front_telo_bound].append([DIR_FOR, chr_corr[dest], 0])
+                    adjacency[DIR_BAK][chr_corr[dest]].append([DIR_BAK, front_telo_bound, 0])
+                    adjacency[DIR_BAK][front_telo_bound].append([DIR_BAK, chr_corr[dest], 0])
+                else:
+                    dest += 'f'
+                    adjacency[DIR_FOR][chr_corr[dest]].append([DIR_BAK, front_telo_bound, 0])
+                    adjacency[DIR_FOR][front_telo_bound].append([DIR_BAK, chr_corr[dest], 0])
+                    adjacency[DIR_BAK][chr_corr[dest]].append([DIR_FOR, front_telo_bound, 0])
+                    adjacency[DIR_BAK][front_telo_bound].append([DIR_FOR, chr_corr[dest], 0])
+                ed = end_telo_bound
+            # If boundary node is not "Nin"
+            else:
+                if contig_data[end_telo_bound][CTG_TELDIR] == 'b':
+                    if contig_data[end_telo_bound][CTG_DIR]=='+':
+                        # boundary node is connected with telomere node.
+                        dest = contig_data[front_telo_bound][CHR_NAM]+'b'
+                        adjacency[DIR_FOR][chr_corr[dest]].append([DIR_FOR, front_telo_bound, 0])
+                        adjacency[DIR_FOR][front_telo_bound].append([DIR_FOR, chr_corr[dest], 0])
+                        adjacency[DIR_BAK][chr_corr[dest]].append([DIR_BAK, front_telo_bound, 0])
+                        adjacency[DIR_BAK][front_telo_bound].append([DIR_BAK, chr_corr[dest], 0])
+                    else:
+                        # Treat as "Nin" Case
+                        end_telo_bound+=1
+                        dest = contig_data[end_telo_bound][CHR_NAM]
+                        if contig_data[end_telo_bound][CTG_DIR] == '+':
+                            dest += 'b'
+                            adjacency[DIR_FOR][chr_corr[dest]].append([DIR_FOR, front_telo_bound, 0])
+                            adjacency[DIR_FOR][front_telo_bound].append([DIR_FOR, chr_corr[dest], 0])
+                            adjacency[DIR_BAK][chr_corr[dest]].append([DIR_BAK, front_telo_bound, 0])
+                            adjacency[DIR_BAK][front_telo_bound].append([DIR_BAK, chr_corr[dest], 0])
+                        else:
+                            dest += 'f'
+                            adjacency[DIR_FOR][chr_corr[dest]].append([DIR_BAK, front_telo_bound, 0])
+                            adjacency[DIR_FOR][front_telo_bound].append([DIR_BAK, chr_corr[dest], 0])
+                            adjacency[DIR_BAK][chr_corr[dest]].append([DIR_FOR, front_telo_bound, 0])
+                            adjacency[DIR_BAK][front_telo_bound].append([DIR_FOR, chr_corr[dest], 0])
+                else:
+                    if contig_data[end_telo_bound][CTG_DIR]=='-':
+                        dest = contig_data[end_telo_bound][CHR_NAM]+'f'
+                        adjacency[DIR_FOR][chr_corr[dest]].append([DIR_BAK, front_telo_bound, 0])
+                        adjacency[DIR_FOR][front_telo_bound].append([DIR_BAK, chr_corr[dest], 0])
+                        adjacency[DIR_BAK][chr_corr[dest]].append([DIR_FOR, front_telo_bound, 0])
+                        adjacency[DIR_BAK][front_telo_bound].append([DIR_FOR, chr_corr[dest], 0])
+                    else:
+                        end_telo_bound+=1
+                        dest = contig_data[end_telo_bound][CHR_NAM]
+                        if contig_data[end_telo_bound][CTG_DIR] == '+':
+                            dest += 'b'
+                            adjacency[DIR_FOR][chr_corr[dest]].append([DIR_FOR, front_telo_bound, 0])
+                            adjacency[DIR_FOR][front_telo_bound].append([DIR_FOR, chr_corr[dest], 0])
+                            adjacency[DIR_BAK][chr_corr[dest]].append([DIR_BAK, front_telo_bound, 0])
+                            adjacency[DIR_BAK][front_telo_bound].append([DIR_BAK, chr_corr[dest], 0])
+                        else:
+                            dest += 'f'
+                            adjacency[DIR_FOR][chr_corr[dest]].append([DIR_BAK, front_telo_bound, 0])
+                            adjacency[DIR_FOR][front_telo_bound].append([DIR_BAK, chr_corr[dest], 0])
+                            adjacency[DIR_BAK][chr_corr[dest]].append([DIR_FOR, front_telo_bound, 0])
+                            adjacency[DIR_BAK][front_telo_bound].append([DIR_FOR, chr_corr[dest], 0])
+                ed = end_telo_bound
+        for j in range(st+1, ed):
                 adjacency[DIR_FOR][j-1].append([DIR_FOR, j, 0])
                 adjacency[DIR_BAK][j].append([DIR_BAK, j-1, 0])
-            st = 0
-            ed = INF
-        if contig_data[i][CTG_TELCHR] != '0':
-            if contig_data[i][CTG_TELDIR][0]=='f' and contig_data[i][CTG_DIR] == '+':
-                st = max(st, i)
-            elif contig_data[i][CTG_TELDIR][0]=='f' and contig_data[i][CTG_DIR] == '-':
-                ed = min(ed, i)
-            elif contig_data[i][CTG_TELDIR][0]=='b' and contig_data[i][CTG_DIR] == '+':
-                ed = min(ed, i)
-            else:
-                st = max(st, i)
-        curr_contig_name = contig_data[i][CTG_NAM]
-        last_node = contig_data[i]
+        curr_contig_st = curr_contig_ed + 1
+        curr_contig_ed = contig_data[curr_contig_st][CTG_ENDND]
+    '''
+    If telomere node has 0 connection, connect with closest node with same chromosome type.
+    '''
     end_node_list = set()
     for i in contig_data:
         end_node_list.add((i[CTG_STRND], i[CTG_ENDND])) 
