@@ -208,7 +208,7 @@ def main():
                 f.close()
                 g.close()
 
-    # with ProcessPoolExecutor(max_workers=100) as executor:
+    # with ProcessPoolExecutor(max_workers=16) as executor:
     #     futures = [executor.submit(partial(process_pair, G=G, in_edge=in_edge, out_edge=out_edge), args) for args in args_list]
     #     # Collect results using tqdm for progress bar
     #     for future in tqdm(as_completed(futures), total=len(futures)):
@@ -244,7 +244,7 @@ def main():
     # with open('path_list.pkl', 'wb') as f:
     #     pickle.dump(path_list, f)
 
-    print(f"Completed processing. Total paths found: {len(path_list)}")
+    print(f"Completed processing.")
 
 if __name__ == "__main__":
     main()
