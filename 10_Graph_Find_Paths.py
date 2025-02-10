@@ -83,7 +83,7 @@ def process_pair(args, G, in_edge, out_edge):
     st, nd = args
     local_path_list = []
 
-    for st_b, nd_b in [(1, 0), (1, 1)]:
+    for st_b, nd_b in [(1, 1)]:
         for i, j in [(st_b, st), (nd_b, nd)]:
             G.add_node((i, j))
 
