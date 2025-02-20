@@ -1,6 +1,7 @@
 
 import ast
 import pickle
+import sys
 import os
 import argparse
 
@@ -23,15 +24,23 @@ CHR_NAM = 5
 CHR_LEN = 6
 CHR_STR = 7
 CHR_END = 8
-CTG_TYP = 9
-CTG_STRND = 10
-CTG_ENDND = 11
-CTG_TELCHR = 12
-CTG_TELDIR = 13
+CTG_MAPQ = 9
+CTG_TYP = 10
+CTG_STRND = 11
+CTG_ENDND = 12
+CTG_TELCHR = 13
+CTG_TELDIR = 14
+CTG_TELCON = 15
+CTG_RPTCHR = 16
+CTG_RPTCASE = 17
+CTG_CENSAT = 18
+CTG_MAINFLOWDIR = 19
+CTG_MAINFLOWCHR = 20
+
 
 CHROMOSOME_COUNT = 23
 K = 1e3
-graph_num = 1000
+graph_num = 100
 
 def dbg():
     print("hi")
@@ -57,7 +66,9 @@ def import_data2(file_path : str) -> list :
     contig_data = []
     for curr_contig in paf_file:
         temp_list = curr_contig.split("\t")
-        int_induce_idx = [1, 2, 3, 6, 7, 8, 9, 10, 11]
+        int_induce_idx = [CTG_LEN, CTG_STR, CTG_END, \
+                          CHR_LEN, CHR_STR, CHR_END, \
+                          CTG_MAPQ, CTG_TYP, CTG_STRND, CTG_ENDND,]
         for i in int_induce_idx:
             temp_list[i] = int(temp_list[i])
         contig_data.append(tuple(temp_list))
@@ -92,8 +103,15 @@ def process_pair(args, G, in_edge, out_edge):
             for edges in out_edge[(i, j)]:
                 G.add_weighted_edges_from(edges)
 
+        # if nx.has_path(G, (st_b, st), (nd_b, nd)):
+        #     local_path_list.append(nx.shortest_path(G, source=(st_b, st), target=(nd_b, nd), weight='weight'))
         if nx.has_path(G, (st_b, st), (nd_b, nd)):
-            local_path_list.append(nx.shortest_path(G, source=(st_b, st), target=(nd_b, nd), weight='weight'))
+            i = 0
+            for path in nx.shortest_simple_paths(G, source=(st_b, st), target=(nd_b, nd), weight='weight'):
+                i+=1
+                if i > graph_num:
+                    break
+                local_path_list.append(path)
 
         for i, j in [(st_b, st), (nd_b, nd)]:
             G.remove_node((i, j))
@@ -172,48 +190,17 @@ def main():
     args_list = []
     for i in tar_node_list:
         for j in tar_node_list:
-            if i < j:
-                args_list.append((i, j))
+            if set((chr_rev_corr[i][:-1], chr_rev_corr[j][:-1])) == {'chr1', 'chr5'}:
+                if i < j:
+                    args_list.append((i, j))
 
     # Use ProcessPoolExecutor for multiprocessing
     path_list = []
     path_counter = Counter()
 
-    for arg in tqdm(args_list):
-        want_to_print = process_pair(arg, G=G, in_edge=in_edge, out_edge=out_edge)
-        for path in want_to_print:
-                path_compress= (path[0][1], path[-1][1])
-                path_counter[(path[0][1], path[-1][1])]+=1
-                """
-                first_chr = contig_data[path[0][1]][CHR_NAM]
-                second_chr = contig_data[path[-1][1]][CHR_NAM]
-                """
-                folder_name = f"{PREFIX}/{chr_rev_corr[path_compress[0]]}_{chr_rev_corr[path_compress[1]]}"
-                file_name = folder_name + f"/{path_counter[path_compress]}.paf"
-                file_name2 = folder_name + f"/{path_counter[path_compress]}.index.txt"
-                """
-                if chr_counter['chr1'] >= 5*1e6 and chr_counter['chrX']>=5*1e6:
-                    print(file_name)
-                """
-                os.makedirs(folder_name, exist_ok=True)
-                f = open(file_name, "wt")
-                g = open(file_name2, "wt")
-                for nodes in path:
-                    try:
-                        f.write("\t".join(map(str, contig_data[nodes[1]])))
-                    except:
-                        f.write(chr_rev_corr[nodes[1]]+"\n")
-                    g.write(" ".join(map(str, nodes))+"\n")
-
-                f.close()
-                g.close()
-
-    # with ProcessPoolExecutor(max_workers=16) as executor:
-    #     futures = [executor.submit(partial(process_pair, G=G, in_edge=in_edge, out_edge=out_edge), args) for args in args_list]
-    #     # Collect results using tqdm for progress bar
-    #     for future in tqdm(as_completed(futures), total=len(futures)):
-    #         want_to_print = future.result()
-    #         for path in want_to_print:
+    # for arg in tqdm(args_list):
+    #     want_to_print = process_pair(arg, G=G, in_edge=in_edge, out_edge=out_edge)
+    #     for path in want_to_print:
     #             path_compress= (path[0][1], path[-1][1])
     #             path_counter[(path[0][1], path[-1][1])]+=1
     #             """
@@ -239,6 +226,38 @@ def main():
 
     #             f.close()
     #             g.close()
+
+    with ProcessPoolExecutor(max_workers=16) as executor:
+        futures = [executor.submit(partial(process_pair, G=G, in_edge=in_edge, out_edge=out_edge), args) for args in args_list]
+        # Collect results using tqdm for progress bar
+        for future in tqdm(as_completed(futures), total=len(futures), disable=not sys.stdout.isatty()):
+            want_to_print = future.result()
+            for path in want_to_print:
+                path_compress= (path[0][1], path[-1][1])
+                path_counter[(path[0][1], path[-1][1])]+=1
+                """
+                first_chr = contig_data[path[0][1]][CHR_NAM]
+                second_chr = contig_data[path[-1][1]][CHR_NAM]
+                """
+                folder_name = f"{PREFIX}/{chr_rev_corr[path_compress[0]]}_{chr_rev_corr[path_compress[1]]}"
+                file_name = folder_name + f"/{path_counter[path_compress]}.paf"
+                file_name2 = folder_name + f"/{path_counter[path_compress]}.index.txt"
+                """
+                if chr_counter['chr1'] >= 5*1e6 and chr_counter['chrX']>=5*1e6:
+                    print(file_name)
+                """
+                os.makedirs(folder_name, exist_ok=True)
+                f = open(file_name, "wt")
+                g = open(file_name2, "wt")
+                for nodes in path:
+                    try:
+                        f.write("\t".join(map(str, contig_data[nodes[1]])))
+                    except:
+                        f.write(chr_rev_corr[nodes[1]]+"\n")
+                    g.write(" ".join(map(str, nodes))+"\n")
+
+                f.close()
+                g.close()
 
     # Save the path_list to a file
     # with open('path_list.pkl', 'wb') as f:

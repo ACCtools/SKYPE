@@ -13,19 +13,30 @@ CHR_NAM = 5
 CHR_LEN = 6
 CHR_STR = 7
 CHR_END = 8
-CTG_TYP = 9
-CTG_STRND = 10
-CTG_ENDND = 11
-CTG_TELCHR = 12
-CTG_TELDIR = 13
+CTG_MAPQ = 9
+CTG_TYP = 10
+CTG_STRND = 11
+CTG_ENDND = 12
+CTG_TELCHR = 13
+CTG_TELDIR = 14
+CTG_TELCON = 15
+CTG_RPTCHR = 16
+CTG_RPTCASE = 17
+CTG_CENSAT = 18
+CTG_MAINFLOWDIR = 19
+CTG_MAINFLOWCHR = 20
+
 DIR_FOR = 1
 DIR_BAK = 0
+
 K = 1000
 INF = 1000000000
 BUFFER = 10000000
 CHROMOSOME_COUNT = 23
 TELOMERE_EXPANSION = 5 * K
-K = 1000
+
+FORCE_TELOMERE_THRESHOLD = 10*K
+TELOMERE_CLUSTER_THRESHOLD = 500*K
 
 def dbg():
     print("hi")
@@ -56,7 +67,9 @@ def import_data(file_path : str) -> list :
     contig_data = []
     for curr_contig in paf_file:
         temp_list = curr_contig.rstrip().split("\t")
-        int_induce_idx = [1, 2, 3, 6, 7, 8, 9, 10, 11,]
+        int_induce_idx = [CTG_LEN, CTG_STR, CTG_END, \
+                          CHR_LEN, CHR_STR, CHR_END, \
+                          CTG_MAPQ, CTG_TYP, CTG_STRND, CTG_ENDND,]
         for i in int_induce_idx:
             temp_list[i] = int(temp_list[i])
         contig_data.append(tuple(temp_list))
@@ -93,7 +106,6 @@ def initial_graph_build(contig_data : list, telo_data : dict) -> list :
     Initialize
     '''
     contig_data_size = len(contig_data)
-    report_case = {'A':[], 'B':[], 'C':[], 'ESC':[], 'ALL_TELO_NON_ESC':[]}
     chr_corr = {}
     chr_rev_corr = {}
     total_contig_count = len(contig_data)
@@ -111,208 +123,67 @@ def initial_graph_build(contig_data : list, telo_data : dict) -> list :
     chr_rev_corr[total_contig_count + 2*CHROMOSOME_COUNT - 1] = 'chrXb'
 
     adjacency = [[[] for _ in range(total_contig_count+CHROMOSOME_COUNT*2)], [[] for _ in range(total_contig_count+CHROMOSOME_COUNT*2)]]
-    non_using_node = []
-    curr_contig_name = 0
-    last_node = 0
-    telo_detect = False
-    st = 0
-    ed = INF
-    
     '''
     Algorithm
     '''
-    contig_data.append((0, 0, 0, 0, 0, 0, 0, 0, 0, 0, '0', '0', '0', '0', ))
     curr_contig_st = 0
-    curr_contig_ed = contig_data[curr_contig_st][CTG_ENDND]
     while curr_contig_st<total_contig_count:
-        # front of contig
-        front_telo_bound = curr_contig_st
-        end_telo_bound = curr_contig_ed
-        while contig_data[front_telo_bound][CTG_TELCHR] != '0' and front_telo_bound<=curr_contig_ed:
-            front_telo_bound+=1
-        while contig_data[end_telo_bound][CTG_TELCHR] != '0' and end_telo_bound>=curr_contig_st:
-            end_telo_bound-=1
-        st = curr_contig_st
-        ed = curr_contig_ed
-        escape = False
-        if front_telo_bound == curr_contig_ed+1:
-            if len(contig_data[curr_contig_st][CTG_TELDIR])==1 \
-            and (contig_data[curr_contig_st][CTG_TELDIR] + contig_data[curr_contig_st][CTG_DIR] in ("b+", "f-")):
-                escape = True
-            elif len(contig_data[curr_contig_ed][CTG_TELDIR])==1 \
-            and (contig_data[curr_contig_ed][CTG_TELDIR] + contig_data[curr_contig_ed][CTG_DIR] in ("b-", "f+")):
-                escape = True
-        else:
-            escape = True
-        if escape:
-            if front_telo_bound > curr_contig_st:
-                front_telo_bound-=1
-                # Check if first telomere node is 'Nin' -> Else: escape
-                if len(contig_data[curr_contig_st][CTG_TELDIR])==1 \
-                and (contig_data[curr_contig_st][CTG_TELDIR] + contig_data[curr_contig_st][CTG_DIR] in ("b+", "f-")):
-                    report_case['ESC'].append(curr_contig_st)
-                    st = curr_contig_st
-                # If boundary node is 'Nin'
-                elif len(contig_data[front_telo_bound][CTG_TELDIR])>1:
-                    # Next node is connected with telomere node.
-                    front_telo_bound+=1
-                    if front_telo_bound <= curr_contig_ed:
-                        dest = contig_data[front_telo_bound][CHR_NAM]
-                        if contig_data[front_telo_bound][CTG_DIR] == '+':
-                            dest += 'f'
-                            adjacency[DIR_FOR][chr_corr[dest]].append([DIR_FOR, front_telo_bound, 0])
-                            adjacency[DIR_BAK][front_telo_bound].append([DIR_FOR, chr_corr[dest], 0])
-                            report_case['A'].append([dest, front_telo_bound])
-                        else:
-                            dest += 'b'
-                            adjacency[DIR_FOR][chr_corr[dest]].append([DIR_FOR, front_telo_bound, 0])
-                            adjacency[DIR_BAK][front_telo_bound].append([DIR_FOR, chr_corr[dest], 0])
-                            report_case['A'].append([dest, front_telo_bound])
-                    st = front_telo_bound
-                # If boundary node is not "Nin"
-                else:
-                    if contig_data[front_telo_bound][CTG_TELDIR] == 'f':
-                        if contig_data[front_telo_bound][CTG_DIR]=='+':
-                            # boundary node is connected with telomere node.
-                            dest = contig_data[front_telo_bound][CHR_NAM]+'f'
-                            adjacency[DIR_FOR][chr_corr[dest]].append([DIR_FOR, front_telo_bound, 0])
-                            adjacency[DIR_BAK][front_telo_bound].append([DIR_FOR, chr_corr[dest], 0])
-                            report_case['B'].append([dest, front_telo_bound])
-                        else:
-                            # Treat as "Nin" Case
-                            front_telo_bound+=1
-                            if front_telo_bound <= curr_contig_ed:
-                                dest = contig_data[front_telo_bound][CHR_NAM]
-                                if contig_data[front_telo_bound][CTG_DIR] == '+':
-                                    dest += 'f'
-                                    adjacency[DIR_FOR][chr_corr[dest]].append([DIR_FOR, front_telo_bound, 0])
-                                    adjacency[DIR_BAK][front_telo_bound].append([DIR_FOR, chr_corr[dest], 0])
-                                    report_case['C'].append([dest, front_telo_bound])
-                                else:
-                                    dest += 'b'
-                                    adjacency[DIR_FOR][chr_corr[dest]].append([DIR_FOR, front_telo_bound, 0])
-                                    adjacency[DIR_BAK][front_telo_bound].append([DIR_FOR, chr_corr[dest], 0])
-                                    report_case['C'].append([dest, front_telo_bound])
-                    else:
-                        if contig_data[front_telo_bound][CTG_DIR]=='-':
-                            dest = contig_data[front_telo_bound][CHR_NAM]+'b'
-                            adjacency[DIR_FOR][chr_corr[dest]].append([DIR_FOR, front_telo_bound, 0])
-                            adjacency[DIR_BAK][front_telo_bound].append([DIR_FOR, chr_corr[dest], 0])
-                            report_case['B'].append([dest, front_telo_bound])
-                        else:
-                            front_telo_bound+=1
-                            if front_telo_bound <= curr_contig_ed:
-                                dest = contig_data[front_telo_bound][CHR_NAM]
-                                if contig_data[front_telo_bound][CTG_DIR] == '+':
-                                    dest += 'f'
-                                    adjacency[DIR_FOR][chr_corr[dest]].append([DIR_FOR, front_telo_bound, 0])
-                                    adjacency[DIR_BAK][front_telo_bound].append([DIR_FOR, chr_corr[dest], 0])
-                                    report_case['C'].append([dest, front_telo_bound])
-                                else:
-                                    dest += 'b'
-                                    adjacency[DIR_FOR][chr_corr[dest]].append([DIR_FOR, front_telo_bound, 0])
-                                    adjacency[DIR_BAK][front_telo_bound].append([DIR_FOR, chr_corr[dest], 0])
-                                    report_case['C'].append([dest, front_telo_bound])
-                    st = front_telo_bound
-
-            if end_telo_bound < curr_contig_ed:
-                end_telo_bound+=1
-                # Check if first telomere node is 'Nin' -> Else: escape
-                if len(contig_data[curr_contig_ed][CTG_TELDIR])==1 \
-                and (contig_data[curr_contig_ed][CTG_TELDIR] + contig_data[curr_contig_ed][CTG_DIR] in ("b-", "f+")):
-                    report_case['ESC'].append(curr_contig_ed)
-                    ed = curr_contig_ed
-                # If boundary node is 'Nin'
-                elif len(contig_data[end_telo_bound][CTG_TELDIR])>1:
-                    # Next node is connected with telomere node.
-                    end_telo_bound-=1
-                    if end_telo_bound>=curr_contig_st:
-                        dest = contig_data[end_telo_bound][CHR_NAM]
-                        if contig_data[end_telo_bound][CTG_DIR] == '+':
-                            dest += 'b'
-                            adjacency[DIR_FOR][end_telo_bound].append([DIR_FOR, chr_corr[dest], 0])
-                            adjacency[DIR_FOR][chr_corr[dest]].append([DIR_BAK, end_telo_bound, 0])
-                            report_case['A'].append([dest, end_telo_bound])
-                        else:
-                            dest += 'f'
-                            adjacency[DIR_FOR][end_telo_bound].append([DIR_FOR, chr_corr[dest], 0])
-                            adjacency[DIR_FOR][chr_corr[dest]].append([DIR_BAK, end_telo_bound, 0])
-                            report_case['A'].append([dest, end_telo_bound])
-                    ed = end_telo_bound
-                # If boundary node is not "Nin"
-                else:
-                    if contig_data[end_telo_bound][CTG_TELDIR] == 'b':
-                        if contig_data[end_telo_bound][CTG_DIR]=='+':
-                            # boundary node is connected with telomere node.
-                            dest = contig_data[end_telo_bound][CHR_NAM]+'b'
-                            adjacency[DIR_FOR][end_telo_bound].append([DIR_FOR, chr_corr[dest], 0])
-                            adjacency[DIR_FOR][chr_corr[dest]].append([DIR_BAK, end_telo_bound, 0])
-                            report_case['B'].append([dest, end_telo_bound])
-                        else:
-                            # Treat as "Nin" Case
-                            end_telo_bound+=1
-                            if end_telo_bound>=curr_contig_st:
-                                dest = contig_data[end_telo_bound][CHR_NAM]
-                                if contig_data[end_telo_bound][CTG_DIR] == '+':
-                                    dest += 'b'
-                                    adjacency[DIR_FOR][end_telo_bound].append([DIR_FOR, chr_corr[dest], 0])
-                                    adjacency[DIR_FOR][chr_corr[dest]].append([DIR_BAK, end_telo_bound, 0])
-                                    report_case['C'].append([dest, end_telo_bound])
-                                else:
-                                    dest += 'f'
-                                    adjacency[DIR_FOR][end_telo_bound].append([DIR_FOR, chr_corr[dest], 0])
-                                    adjacency[DIR_FOR][chr_corr[dest]].append([DIR_BAK, end_telo_bound, 0])
-                                    report_case['C'].append([dest, end_telo_bound])
-                    else:
-                        if contig_data[end_telo_bound][CTG_DIR]=='-':
-                            dest = contig_data[end_telo_bound][CHR_NAM]+'f'
-                            adjacency[DIR_FOR][end_telo_bound].append([DIR_FOR, chr_corr[dest], 0])
-                            adjacency[DIR_FOR][chr_corr[dest]].append([DIR_BAK, end_telo_bound, 0])
-                            report_case['B'].append([dest, end_telo_bound])
-                        else:
-                            end_telo_bound+=1
-                            if end_telo_bound>=curr_contig_st:
-                                dest = contig_data[end_telo_bound][CHR_NAM]
-                                if contig_data[end_telo_bound][CTG_DIR] == '+':
-                                    dest += 'b'
-                                    adjacency[DIR_FOR][end_telo_bound].append([DIR_FOR, chr_corr[dest], 0])
-                                    adjacency[DIR_FOR][chr_corr[dest]].append([DIR_BAK, end_telo_bound, 0])
-                                    report_case['C'].append([dest, end_telo_bound])
-                                else:
-                                    dest += 'f'
-                                    adjacency[DIR_FOR][end_telo_bound].append([DIR_FOR, chr_corr[dest], 0])
-                                    adjacency[DIR_FOR][chr_corr[dest]].append([DIR_BAK, end_telo_bound, 0])
-                                    report_case['C'].append([dest, end_telo_bound])
-                    ed = end_telo_bound
-            for j in range(st+1, ed+1):
-                adjacency[DIR_FOR][j-1].append([DIR_FOR, j, 0])
-                adjacency[DIR_BAK][j].append([DIR_BAK, j-1, 0])
-            for j in range(curr_contig_st, st):
-                non_using_node.append(j)
-            for j in range(ed+1, curr_contig_ed+1):
-                non_using_node.append(j)
-
-        else:
-            report_case['ALL_TELO_NON_ESC'].append(curr_contig_st)
-        curr_contig_st = curr_contig_ed + 1
         curr_contig_ed = contig_data[curr_contig_st][CTG_ENDND]
+        for j in range(curr_contig_st+1, curr_contig_ed+1):
+            adjacency[DIR_FOR][j-1].append([DIR_FOR, j, 0])
+            adjacency[DIR_BAK][j].append([DIR_BAK, j-1, 0])
+        if curr_contig_st != curr_contig_ed:
+            if contig_data[curr_contig_st][CTG_TELCON] != '0':
+                dest = chr_corr[contig_data[curr_contig_st][CTG_TELCON]]
+                adjacency[DIR_FOR][dest].append([DIR_FOR, curr_contig_st, 0])
+                adjacency[DIR_FOR][curr_contig_st].append([DIR_FOR, dest, 0])
+                adjacency[DIR_BAK][curr_contig_st].append([DIR_FOR, dest, 0])
+            if contig_data[curr_contig_ed][CTG_TELCON] != '0':
+                dest = chr_corr[contig_data[curr_contig_ed][CTG_TELCON]]
+                adjacency[DIR_FOR][curr_contig_ed].append([DIR_FOR, dest, 0])
+                adjacency[DIR_BAK][curr_contig_ed].append([DIR_FOR, dest, 0])
+                adjacency[DIR_FOR][dest].append([DIR_BAK, curr_contig_ed, 0])
+        else:
+            if contig_data[curr_contig_st][CTG_TELCON] != '0':
+                if contig_data[curr_contig_st][CTG_TELCON][-1]=='f':
+                    dest = chr_corr[contig_data[curr_contig_st][CTG_TELCON]]
+                    adjacency[DIR_FOR][dest].append([DIR_FOR, curr_contig_st, 0])
+                    adjacency[DIR_BAK][curr_contig_st].append([DIR_FOR, dest, 0])
+                    adjacency[DIR_FOR][curr_contig_st].append([DIR_FOR, dest, 0])
+                else:
+                    dest = chr_corr[contig_data[curr_contig_ed][CTG_TELCON]]
+                    adjacency[DIR_FOR][curr_contig_ed].append([DIR_FOR, dest, 0])
+                    adjacency[DIR_BAK][curr_contig_ed].append([DIR_FOR, dest, 0])
+                    adjacency[DIR_FOR][dest].append([DIR_BAK, curr_contig_ed, 0])
+
+
+
+        curr_contig_st = curr_contig_ed + 1
     '''
     If telomere node has 0 connection, connect with closest node with same chromosome type.
     '''
-    non_using_set = set(non_using_node)
     end_node_list = set()
-    contig_data = contig_data[:-1]
     for i in contig_data:
         end_node_list.add((i[CTG_STRND], i[CTG_ENDND])) 
     for i in range(contig_data_size, contig_data_size + CHROMOSOME_COUNT*2):
         curr_telo_set = set()
+        now_telo = chr_rev_corr[i]
+        flag = False
         for j in range(2):
             for _ in adjacency[j][i]:
+                # 10K 이내면 없애기
+                if i < contig_data_size + CHROMOSOME_COUNT:
+                    if contig_data[_[1]][CHR_STR] < telo_data[now_telo][0]+FORCE_TELOMERE_THRESHOLD:
+                        flag = True
+                else:
+                    if contig_data[_[1]][CHR_END] > telo_data[now_telo][1]-FORCE_TELOMERE_THRESHOLD:
+                        flag = True
                 curr_telo_set.add(_[1])
+        if flag:
+            continue
         telo_dist = INF
         telo_connect_node = 0
         telo_dir = 0
-        now_telo = chr_rev_corr[i]
         temp_contig = (0, 0, 0, 0, 0, 0, 0, telo_data[now_telo][0], telo_data[now_telo][1])
         #우리가 연결하는 텔로미어 노드
         if now_telo[-1]=='f':
@@ -320,7 +191,6 @@ def initial_graph_build(contig_data : list, telo_data : dict) -> list :
                 # 텔로미어와 겹치지 않으며, 배제된 노드가 아니고, 중복이 아니며, + 방향이고, 거리가 갱신가능한 경우
                 if contig_data[st][CHR_NAM] == now_telo[0:-1] \
                 and contig_data[st][CTG_TELDIR] == '0' \
-                and st not in non_using_set \
                 and st not in curr_telo_set \
                 and telo_dist > telo_distance_checker(contig_data[st], temp_contig) \
                 and contig_data[st][CTG_DIR]=='+':
@@ -329,7 +199,6 @@ def initial_graph_build(contig_data : list, telo_data : dict) -> list :
                     telo_dir = '+'
                 if contig_data[ed][CHR_NAM] == now_telo[0:-1] \
                 and contig_data[ed][CTG_TELDIR] == '0' \
-                and ed not in non_using_set \
                 and ed not in curr_telo_set \
                 and telo_dist > telo_distance_checker(contig_data[ed], temp_contig) \
                 and contig_data[ed][CTG_DIR]=='-':
@@ -346,7 +215,6 @@ def initial_graph_build(contig_data : list, telo_data : dict) -> list :
             for st, ed in end_node_list:
                 if contig_data[st][CHR_NAM] == now_telo[0:-1] \
                 and contig_data[st][CTG_TELDIR] == '0' \
-                and st not in non_using_set \
                 and st not in curr_telo_set \
                 and telo_dist > telo_distance_checker(contig_data[st], temp_contig) \
                 and contig_data[st][CTG_DIR]=='-':
@@ -355,7 +223,6 @@ def initial_graph_build(contig_data : list, telo_data : dict) -> list :
                     telo_dir = '-'
                 if contig_data[ed][CHR_NAM] == now_telo[0:-1] \
                 and contig_data[ed][CTG_TELDIR] == '0' \
-                and ed not in non_using_set \
                 and ed not in curr_telo_set \
                 and telo_dist > telo_distance_checker(contig_data[ed], temp_contig) \
                 and contig_data[ed][CTG_DIR]=='+':
@@ -365,42 +232,39 @@ def initial_graph_build(contig_data : list, telo_data : dict) -> list :
             if telo_dir == '+':
                 adjacency[DIR_FOR][i].append([DIR_BAK, telo_connect_node, telo_dist])
                 adjacency[DIR_FOR][telo_connect_node].append([DIR_FOR, i, telo_dist])
+                adjacency[DIR_BAK][telo_connect_node].append([DIR_FOR, i, telo_dist])
             else:
                 adjacency[DIR_FOR][i].append([DIR_FOR, telo_connect_node, telo_dist])
                 adjacency[DIR_BAK][telo_connect_node].append([DIR_FOR, i, telo_dist])
+                adjacency[DIR_FOR][telo_connect_node].append([DIR_FOR, i, telo_dist])
+    return adjacency
 
-    return [adjacency, report_case, non_using_node]
-
-def node_label(contig_data : list, telo_non_using_node: set) -> list :
+def node_label(contig_data : list) -> list :
     total_contig_count = len(contig_data)
     label = [0 for _ in range(total_contig_count)]
     st = 0
     ed = contig_data[st][CTG_ENDND]
     while st<total_contig_count:
         ed = contig_data[st][CTG_ENDND]
-        ref_length_counter = Counter()
-        for i in range(st, ed+1):
-            ref_length_counter[(contig_data[i][CTG_DIR], contig_data[i][CHR_NAM])]\
-            +=contig_data[i][CTG_END]-contig_data[i][CTG_STR]
-        max_count = 0
-        max_chr = (0, 0)
-        for i in ref_length_counter:
-            if ref_length_counter[i]>max_count:
-                max_count = ref_length_counter[i]
-                max_chr = i
+        max_chr = (contig_data[st][CTG_MAINFLOWDIR], contig_data[st][CTG_MAINFLOWCHR])
         combo = 0
+        ref_combo = 0
         maxcombo=0
+        max_ref_combo = 0
         for i in range(st, ed+1):
-            if (contig_data[i][CTG_DIR], contig_data[i][CTG_NAM]) == max_chr:
+            if (contig_data[i][CTG_DIR], contig_data[i][CHR_NAM]) == max_chr:
                 combo+=1
+                ref_combo += contig_data[i][CHR_END] - contig_data[i][CHR_STR]
             else:
                 combo=0
-            if combo>maxcombo:
+                ref_combo = 0
+            if ref_combo>max_ref_combo:
                 maxcombo = combo
+                max_ref_combo = ref_combo
                 st_idx = i-maxcombo+1
                 ed_idx = i
         if st_idx==ed_idx:
-            label[st_idx] = "6"
+            label[st_idx] = "6"     
         else:
             contig_start = contig_data[st_idx]
             contig_end = contig_data[ed_idx]
@@ -438,18 +302,9 @@ def node_label(contig_data : list, telo_non_using_node: set) -> list :
                             label[i] = "6-4"
         st = ed+1
     for i in range(0, total_contig_count) :
-        if i in telo_non_using_node:
-            continue
         contig_start = contig_data[contig_data[i][CTG_STRND]]
         contig_end = contig_data[contig_data[i][CTG_ENDND]]
-        for j in range(contig_data[i][CTG_STRND], contig_data[i][CTG_ENDND]+1):
-            if j not in telo_non_using_node:
-                contig_start = contig_data[j]
-                break
-        for j in range(contig_data[i][CTG_ENDND], contig_data[i][CTG_STRND]-1, -1):
-            if j not in telo_non_using_node:
-                contig_end = contig_data[j]
-                break
+
         # Contig's start and end node is labeled as "linkable"
 
         if contig_data[i] == contig_start or contig_data[i] == contig_end:
@@ -589,13 +444,6 @@ def node_label(contig_data : list, telo_non_using_node: set) -> list :
                     if contig_start[CHR_STR] >= contig_data[i][CHR_END] \
                     and contig_data[i][CHR_STR] >= predicted_end : 
                         label[i] = "3-2-2"
-    f = open("type 6.txt", "wt")
-    d = {}
-    for i in range(total_contig_count):
-        if label[i]!=0 and label[i][0]=='6':
-            d[contig_data[i][CTG_NAM]] = 1
-            print(contig_data[i][CTG_NAM], i, label[i], file=f)
-    f.close()
                 
     return label
 
@@ -622,9 +470,9 @@ def graph_build(contig_data : list, contig_adjacency : list, linkability_label :
                         elif contig_data[j][CHR_END] < contig_data[i][CHR_END]:
                             dir1 = "dec"
                         if contig_data[i][CHR_STR] <= contig_data[j][CHR_STR]:
-                            dir2 = "dec"
-                        elif contig_data[j][CHR_STR] < contig_data[i][CHR_STR]:
                             dir2 = "inc"
+                        elif contig_data[j][CHR_STR] < contig_data[i][CHR_STR]:
+                            dir2 = "dec"
                         # if both end have consistency
                         if dir1 == dir2:
                             if dir1 == "inc":
@@ -721,6 +569,58 @@ def graph_build(contig_data : list, contig_adjacency : list, linkability_label :
                                 else:
                                     if gap_contig_adjacency[DIR_BAK][j][0][2]>dist:
                                         gap_contig_adjacency[DIR_BAK][j][0] = [DIR_FOR, i, dist]
+                        else:
+                            if contig_data[j][CTG_DIR]=='+' and contig_data[i][CTG_DIR]=='+':
+                                if len(gap_contig_adjacency[DIR_FOR][j][0])==0:
+                                    gap_contig_adjacency[DIR_FOR][j][0] = [DIR_FOR, i, dist]
+                                else:
+                                    if gap_contig_adjacency[DIR_FOR][j][0][2]>dist:
+                                        gap_contig_adjacency[DIR_FOR][j][0] = [DIR_FOR, i, dist]
+
+                                if len(gap_contig_adjacency[DIR_BAK][i][0])==0:
+                                    gap_contig_adjacency[DIR_BAK][i][0] = [DIR_BAK, j, dist]
+                                else:
+                                    if gap_contig_adjacency[DIR_BAK][i][0][2]>dist:
+                                        gap_contig_adjacency[DIR_BAK][i][0] = [DIR_BAK, j, dist]
+                            
+                            elif contig_data[j][CTG_DIR]=='-' and contig_data[i][CTG_DIR]=='-':
+                                if len(gap_contig_adjacency[DIR_FOR][i][0])==0:
+                                    gap_contig_adjacency[DIR_FOR][i][0] = [DIR_FOR, j, dist]
+                                else:
+                                    if gap_contig_adjacency[DIR_FOR][i][0][2]>dist:
+                                        gap_contig_adjacency[DIR_FOR][i][0] = [DIR_FOR, j, dist]
+
+                                if len(gap_contig_adjacency[DIR_BAK][j][0])==0:
+                                    gap_contig_adjacency[DIR_BAK][j][0] = [DIR_BAK, i, dist]
+                                else:
+                                    if gap_contig_adjacency[DIR_BAK][j][0][2]>dist:
+                                        gap_contig_adjacency[DIR_BAK][j][0] = [DIR_BAK, i, dist]
+                            
+                            elif contig_data[j][CTG_DIR]=='+' and contig_data[i][CTG_DIR]=='-':
+                                if len(gap_contig_adjacency[DIR_FOR][j][0])==0:
+                                    gap_contig_adjacency[DIR_FOR][j][0] = [DIR_BAK, i, dist]
+                                else:
+                                    if gap_contig_adjacency[DIR_FOR][j][0][2]>dist:
+                                        gap_contig_adjacency[DIR_FOR][j][0] = [DIR_BAK, i, dist]
+
+                                if len(gap_contig_adjacency[DIR_FOR][i][0])==0:
+                                    gap_contig_adjacency[DIR_FOR][i][0] = [DIR_BAK, j, dist]
+                                else:
+                                    if gap_contig_adjacency[DIR_FOR][i][0][2]>dist:
+                                        gap_contig_adjacency[DIR_FOR][i][0] = [DIR_BAK, j, dist]
+                            
+                            elif contig_data[j][CTG_DIR]=='-' and contig_data[i][CTG_DIR]=='+':
+                                if len(gap_contig_adjacency[DIR_BAK][j][0])==0:
+                                    gap_contig_adjacency[DIR_BAK][j][0] = [DIR_FOR, i, dist]
+                                else:
+                                    if gap_contig_adjacency[DIR_BAK][j][0][2]>dist:
+                                        gap_contig_adjacency[DIR_BAK][j][0] = [DIR_FOR, i, dist]
+
+                                if len(gap_contig_adjacency[DIR_BAK][i][0])==0:
+                                    gap_contig_adjacency[DIR_BAK][i][0] = [DIR_FOR, j, dist]
+                                else:
+                                    if gap_contig_adjacency[DIR_BAK][i][0][2]>dist:
+                                        gap_contig_adjacency[DIR_BAK][i][0] = [DIR_FOR, j, dist]
     for i in range(2):
         for j in range(total_contig_count):
             for k in range(2):
@@ -800,7 +700,7 @@ def edge_optimization(contig_data : list, contig_adjacency : list, telo_dict : d
             now_edge = [-1, 0, 0]
             for edge in optimized_adjacency[j][i]:
                 if telo_name[-1]=='f':
-                    if contig_data[edge[1]][CHR_STR]<=10*K:
+                    if contig_data[edge[1]][CHR_STR]<=TELOMERE_CLUSTER_THRESHOLD:
                         if now_edge[0]<0:
                             now_edge = edge
                         else:
@@ -812,7 +712,7 @@ def edge_optimization(contig_data : list, contig_adjacency : list, telo_dict : d
                     else:
                         using_edge.append(edge)
                 else:
-                    if contig_data[edge[1]][CHR_END]>=telo_range[1]-10*K:
+                    if contig_data[edge[1]][CHR_END]>=telo_range[1]-TELOMERE_CLUSTER_THRESHOLD:
                         if now_edge[0]<0:
                             now_edge = edge
                         else:
@@ -865,22 +765,10 @@ def main():
 
     contig_data = import_data(PREPROCESSED_PAF_FILE_PATH)
 
+    contig_adjacency = initial_graph_build(contig_data, telo_dict)
 
-    contig_adjacency, report_case, telo_non_using_node = initial_graph_build(contig_data, telo_dict)
+    label = node_label(contig_data)
 
-    for _ in report_case:
-        print(_, report_case[_])
-
-    contig_data = contig_data[0:-1]
-
-    label = node_label(contig_data, telo_non_using_node)
-    with open("new_linkable.txt", "wt") as f:
-        for i in range(len(label)):
-            if label[i]=='5-1':
-                print(contig_data[i], file=f)
-
-    a = pd.Series(label)
-    print(a.value_counts())
 
     contig_adjacency = graph_build(contig_data, contig_adjacency, label)
 
@@ -889,7 +777,6 @@ def main():
     chr_corr = {}
     chr_rev_corr = {}
     total_contig_count = len(contig_data)
-    print(total_contig_count)
     for i in range(1, CHROMOSOME_COUNT):
         chr_corr['chr'+str(i)+'f'] = total_contig_count + i - 1
         chr_rev_corr[total_contig_count + i - 1] = 'chr'+str(i)+'f'
