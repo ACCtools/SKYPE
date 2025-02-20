@@ -17,7 +17,7 @@ TOTAL_THREAD=128
 
 def get_paf_run(paf_loc):
     paf_base = os.path.splitext(paf_loc)[0]
-    result = subprocess.run(['./PanDepth/bin/pandepth', '-w', str(DEPTH_WINDOW),'-t', str(DEPTH_THREAD), '-i', paf_loc, '-o', paf_base],
+    result = subprocess.run(['./PanDepth/bin/pandepth', '-w', str(int(DEPTH_WINDOW)),'-t', str(DEPTH_THREAD), '-i', paf_loc, '-o', paf_base],
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, capture_output=False)
     
     if result.returncode != 0:

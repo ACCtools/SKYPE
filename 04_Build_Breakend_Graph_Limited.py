@@ -820,7 +820,7 @@ with ProcessPoolExecutor(max_workers=128) as executor:
     futures = [executor.submit(run_graph, tar) for tar in tar_ind_list]
     
     # 제출된 작업들이 완료될 때까지 진행 상황을 tqdm으로 표시합니다.
-    for future in tqdm(as_completed(futures), total=len(futures), desc='Build breakend graph construct', disable=not sys.stdout.isatty()):
+    for future in tqdm(as_completed(futures), total=len(futures), desc='Build breakend construct graph', disable=not sys.stdout.isatty()):
         cnt_list.append(future.result())
 
 cancer_prefix = os.path.basename(PREPROCESSED_PAF_FILE_PATH).split('.')[0]
