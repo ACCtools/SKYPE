@@ -560,7 +560,6 @@ def connect_path(folder_path, index_file_path, cnt, contig_data, G):
             print(contig_data[s], file=g)
             print(tuple(bnd_index_path[i-1][0:2]), file=h)
             if contig_data[s][CTG_NAM] != contig_data[e][CTG_NAM]:
-                assert(contig_data[s][CHR_NAM]==contig_data[e][CHR_NAM])
                 if nx.has_path(G, source=(DIR_OUT, s), target=(DIR_IN, e)):
                     path = nx.shortest_path(G, source=(DIR_OUT, s), target=(DIR_IN, e), weight='weight')
                     for node in path[1:-1]:
