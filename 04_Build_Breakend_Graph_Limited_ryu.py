@@ -296,6 +296,9 @@ def extract_nclose_node(contig_data : list, bnd_contig : set, repeat_contig_name
 
                 assert(contig_data[st][CTG_NAM] == contig_data[st][CTG_NAM])   
                 if contig_data[st][CTG_CENSAT] != '0' and contig_data[ed][CTG_CENSAT] != '0' and contig_data[st][CTG_NAM] in div_repeat_paf:
+                    if st==4785 and ed == 4786:
+                        print(contig_data[st])
+                        print(contig_data[ed])
                     s = e+1
                     continue
 
@@ -924,6 +927,7 @@ telo_contig = extract_telomere_connect_contig(contig_data, graph_adjacency)
 # Type 1, 2, 4에 대해서 
 nclose_nodes, nclose_start_compress, nclose_end_compress, vctg_dict = \
     extract_nclose_node(contig_data, bnd_contig, rpt_con, rpt_censat_con, repeat_censat_data, ORIGNAL_PAF_LOC_LIST)
+# exit(1)
 
 virtual_ordinary_contig = make_virtual_ord_ctg(contig_data, vctg_dict)
 with open(f"{PREFIX}/virtual_ordinary_contig.txt", "wt") as f:
@@ -1291,7 +1295,8 @@ def run_graph(data):
 tar_ind_list = []
 for i in range(contig_data_size, contig_data_size + 2*CHROMOSOME_COUNT):
     for j in range(i, contig_data_size + 2*CHROMOSOME_COUNT):
-        tar_ind_list.append((i, j))
+        if {chr_rev_corr[i], chr_rev_corr[j]} == {'chr5f', 'chr17f'}:
+            tar_ind_list.append((i, j))
 
         
 # cnt_list = process_map(run_graph, tar_ind_list, max_workers=48, chunksize=1)
