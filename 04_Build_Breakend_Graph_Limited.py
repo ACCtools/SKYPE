@@ -45,14 +45,16 @@ BUFFER = 10000000
 CHROMOSOME_COUNT = 23
 K = 1000
 CHUKJI_LIMIT = 50*K
+BND_CONTIG_BOUND = 0.1
 
 CHR_CHANGE_LIMIT = 7
 DIR_CHANGE_LIMIT = 1
 PATH_MAJOR_COMPONENT = 3
 NCLOSE_COMPRESS_LIMIT = 50*K
+NCLOSE_MERGE_LIMIT = 1*K
 ALL_REPEAT_NCLOSE_COMPRESS_LIMIT = 500*K
 PATH_COMPRESS_LIMIT = 50*K
-IGNORE_PATH_LIMIT = 10*K
+IGNORE_PATH_LIMIT = 50*K
 
 CENSAT_COMPRESSABLE_THRESHOLD = 1000*K
 
@@ -76,6 +78,7 @@ def import_data2(file_path : str) -> list :
     paf_file = open(file_path, "r")
     contig_data = []
     for curr_contig in paf_file:
+        curr_contig = curr_contig.rstrip()
         temp_list = curr_contig.split("\t")
         int_induce_idx = [CTG_LEN, CTG_STR, CTG_END, \
                           CHR_LEN, CHR_STR, CHR_END, \
@@ -85,7 +88,7 @@ def import_data2(file_path : str) -> list :
         contig_data.append(tuple(temp_list))
     return contig_data
 
-def import_original_paf(file_path : str) -> list:
+def div_orignial_paf(file_path : str) -> list:
     not_using_contig = set()
     with open(file_path, "r") as paf_file:
         for curr_contig in paf_file:
@@ -163,7 +166,7 @@ def extract_all_repeat_contig(contig_data : list, ctg_index : int) -> set:
 def check_censat_contig(all_repeat_censat_con : set, ORIGNAL_PAF_LOC_LIST : list):
     div_repeat_paf = set()
     for i in ORIGNAL_PAF_LOC_LIST:
-        div_repeat_paf = div_repeat_paf |  import_original_paf(i)
+        div_repeat_paf |= div_orignial_paf(i)
     return all_repeat_censat_con & div_repeat_paf
     
 def extract_bnd_contig(contig_data : list) -> set:
@@ -188,54 +191,121 @@ def extract_bnd_contig(contig_data : list) -> set:
         s = e+1
     return bnd_contig
 
+def calculate_single_contig_ref_ratio(contig_data : list) -> float:
+    total_ref_len = 0
+    if contig_data[0][CTG_DIR] == '+':
+        estimated_ref_len = contig_data[-1][CHR_END] - contig_data[0][CHR_STR]
+    else:
+        estimated_ref_len = contig_data[0][CHR_END] - contig_data[-1][CHR_STR]
+    for node in contig_data:
+        total_ref_len += node[CHR_END] - node[CHR_STR]
+    return estimated_ref_len/total_ref_len, total_ref_len
+
+
 def extract_nclose_node(contig_data : list, bnd_contig : set, repeat_contig_name : set, \
-                        censat_contig_name : set, repeat_censat_data : dict) -> dict:
+                        censat_contig_name : set, repeat_censat_data : dict, ORIGNAL_PAF_LOC_LIST : list) -> dict:
     s = 0
     bnd_idx = 0
+    fake_bnd = {}
     contig_data_size = len(contig_data)
     nclose_compress = defaultdict(list)
+    nclose_start_compress = defaultdict(lambda : defaultdict(list))
+    nclose_end_compress = defaultdict(lambda : defaultdict(list))
     censat_nclose_compress = set()
     nclose_dict = {}
+
+    div_repeat_paf = set()
+    for i in ORIGNAL_PAF_LOC_LIST:
+        div_repeat_paf |= div_orignial_paf(i)
+
     while s<contig_data_size:
         e = contig_data[s][CTG_ENDND]
         contig_s = contig_data[s]
+        contig_e = contig_data[e]
         st = s
         ed = e
 
         if contig_data[s][CTG_NAM] in bnd_contig and contig_data[s][CTG_NAM] not in censat_contig_name:
             if contig_data[s][CTG_TYP] in (1, 2):
                 st_chr = [contig_data[s][CTG_DIR], contig_data[s][CHR_NAM]]
+                org_st_chr = tuple(st_chr)
                 ed_chr = [contig_data[e][CTG_DIR], contig_data[e][CHR_NAM]]
-                while [contig_data[st][CTG_DIR], contig_data[st][CHR_NAM]] == st_chr:
+                org_ed_chr = tuple(ed_chr)
+                while st < e and [contig_data[st][CTG_DIR], contig_data[st][CHR_NAM]] == st_chr:
                     st+=1
                 st-=1
-                while [contig_data[ed][CTG_DIR], contig_data[ed][CHR_NAM]] == ed_chr:
+                while ed > s and [contig_data[ed][CTG_DIR], contig_data[ed][CHR_NAM]] == ed_chr:
                     ed-=1
                 ed+=1
-                flag = True
-                
-                if st_chr[0] == ed_chr[0]:
-                    st_chr[0] = ed_chr[0] = '+'
-                else:
-                    if st_chr[1] < ed_chr[1]:
-                        st_chr[0] = '+'
-                        ed_chr[0] = '-'
-                    elif st_chr[1] > ed_chr[1]:
-                        st_chr[0] = '-'
-                        ed_chr[0] = '+'
-                    else:
-                        if (contig_data[st][CHR_STR], contig_data[st][CHR_END]) < (contig_data[ed][CHR_STR], contig_data[ed][CHR_END]):
-                            st_chr[0] = '+'
-                            ed_chr[0] = '-'
+
+                assert(contig_data[st][CTG_NAM] == contig_data[st][CTG_NAM])
+
+                if st + 1 < ed:
+                    flags = [contig_data[ed-1][CTG_DIR], contig_data[ed-1][CHR_NAM]] == st_chr
+                    flage = [contig_data[st+1][CTG_DIR], contig_data[st+1][CHR_NAM]] == ed_chr
+                        
+                    if flags and flage:
+                        ratio_s, len_s = calculate_single_contig_ref_ratio(contig_data[s:ed])
+                        ratio_e, len_e = calculate_single_contig_ref_ratio(contig_data[st+1:e+1])
+                        if abs(ratio_s-1) < BND_CONTIG_BOUND and abs(ratio_e-1) < BND_CONTIG_BOUND:
+                            if len_s > len_e:
+                                fake_bnd[contig_s[CTG_NAM]] = (s, ed-1)
+                                st = ed-1
+                            else:
+                                fake_bnd[contig_e[CTG_NAM]] = (st+1, e)
+                                ed = st+1
+                        elif abs(ratio_s-1) < BND_CONTIG_BOUND:
+                            fake_bnd[contig_s[CTG_NAM]] = (s, ed-1)
+                            st = ed-1
+                        elif abs(ratio_e-1) < BND_CONTIG_BOUND:
+                            fake_bnd[contig_e[CTG_NAM]] = (st+1, e)
+                            ed = st+1
                         else:
-                            st_chr[0] = '-'
-                            ed_chr[0] = '+'
+                            if len_s > len_e:
+                                st = ed-1
+                            else:
+                                ed = st+1
+                    elif flags:
+                        ratio_s, len_s = calculate_single_contig_ref_ratio(contig_data[s:ed])
+                        if abs(ratio_s-1) < BND_CONTIG_BOUND:
+                            fake_bnd[contig_data[s][CTG_NAM]] = (s, ed-1)
+                        st = ed-1
+                    elif flage:
+                        ratio_e, len_e = calculate_single_contig_ref_ratio(contig_data[st+1:e+1])
+                        if abs(ratio_e-1) < BND_CONTIG_BOUND:
+                            fake_bnd[contig_data[s][CTG_NAM]] = (st+1, e)
+                        ed = st+1
+                    
+                flag = True
+                # if st_chr[0] == ed_chr[0]:
+                #     st_chr[0] = ed_chr[0] = '+'
+                # else:
+                #     if chr2int(st_chr[1]) < chr2int(ed_chr[1]):
+                #         st_chr[0] = '+'
+                #         ed_chr[0] = '+' #
+                #     elif chr2int(st_chr[1]) > chr2int(ed_chr[1]):
+                #         st_chr[0] = '+' #
+                #         ed_chr[0] = '+'
+                #     else:
+                #         if (contig_data[st][CHR_STR], contig_data[st][CHR_END]) < (contig_data[ed][CHR_STR], contig_data[ed][CHR_END]):
+                #             st_chr[0] = '+'
+                #             ed_chr[0] = '+' #
+                #         else:
+                #             st_chr[0] = '+' #
+                #             ed_chr[0] = '+'
+
+                assert(contig_data[st][CTG_NAM] == contig_data[st][CTG_NAM])
+                if contig_data[st][CTG_CENSAT] != '0' and contig_data[ed][CTG_CENSAT] != '0' and contig_data[st][CTG_NAM] in div_repeat_paf:
+                    s = e+1
+                    continue
+
+                st_chr[0] = ed_chr[0] = '='
 
                 st_chr = tuple(st_chr)
                 ed_chr = tuple(ed_chr)
                 upd_contig_name = contig_data[st][CTG_NAM]  
                 is_curr_ctg_repeat = upd_contig_name in repeat_contig_name
-                if st_chr[1] < ed_chr[1]: 
+                if chr2int(st_chr[1]) < chr2int(ed_chr[1]): 
                     for i in nclose_compress[(st_chr, ed_chr)]:
                         if is_curr_ctg_repeat and i[0] in repeat_contig_name:
                             compress_limit = ALL_REPEAT_NCLOSE_COMPRESS_LIMIT
@@ -256,18 +326,29 @@ def extract_nclose_node(contig_data : list, bnd_contig : set, repeat_contig_name
                                     censat_st_chr[1] = contig_data[st][CHR_NAM] + "." + str(cnt)
                                     break
                                 cnt+=1
+                        if contig_e[CTG_CENSAT] != '0':
                             cnt = 0
                             for censat_ref_range in repeat_censat_data[contig_data[ed][CHR_NAM]]:
                                 if inclusive_checker(censat_ref_range, (contig_data[ed][CHR_STR], contig_data[ed][CHR_END])):
                                     censat_ed_chr[1] = contig_data[ed][CHR_NAM] + "." + str(cnt)
                                     break
                                 cnt+=1
-                        if contig_s[CTG_CENSAT] == '0' \
-                           or censat_st_chr[1] == 0 \
+                        if censat_st_chr[1] == 0 \
                            or censat_ed_chr[1] == 0 :
                             temp_list = [upd_contig_name, 
                                         [contig_data[st][CHR_STR], contig_data[st][CHR_END]], 
-                                        [contig_data[ed][CHR_STR], contig_data[ed][CHR_END]]]
+                                        [contig_data[ed][CHR_STR], contig_data[ed][CHR_END]], st, ed]
+                            for i in nclose_compress[(st_chr, ed_chr)]:
+                                dummy_list = [0,0,0,0,0,0,0,]
+                                flag = False
+                                if distance_checker(contig_data[st], dummy_list+i[1]) < NCLOSE_MERGE_LIMIT:
+                                    flag = True
+                                    nclose_start_compress[(st_chr, ed_chr)][i[0]].append(contig_data[s][CTG_NAM])
+                                if distance_checker(contig_data[ed], dummy_list+i[2]) < NCLOSE_MERGE_LIMIT:
+                                    flag = True
+                                    nclose_end_compress[(st_chr, ed_chr)][i[0]].append(contig_data[s][CTG_NAM])
+                                if flag:
+                                    break
                             nclose_compress[(st_chr, ed_chr)].append(temp_list)
                             nclose_dict[contig_data[s][CTG_NAM]] = (st, ed)
                         else:
@@ -276,10 +357,21 @@ def extract_nclose_node(contig_data : list, bnd_contig : set, repeat_contig_name
                                 censat_nclose_compress.add(key)
                                 temp_list = [upd_contig_name, 
                                         [contig_data[st][CHR_STR], contig_data[st][CHR_END]], 
-                                        [contig_data[ed][CHR_STR], contig_data[ed][CHR_END]]]
+                                        [contig_data[ed][CHR_STR], contig_data[ed][CHR_END]], st, ed]
+                                for i in nclose_compress[(st_chr, ed_chr)]:
+                                    dummy_list = [0,0,0,0,0,0,0,]
+                                    flag = False
+                                    if distance_checker(contig_data[st], dummy_list+i[1]) < NCLOSE_MERGE_LIMIT:
+                                        flag = True
+                                        nclose_start_compress[(st_chr, ed_chr)][i[0]].append(contig_data[s][CTG_NAM])
+                                    if distance_checker(contig_data[ed], dummy_list+i[2]) < NCLOSE_MERGE_LIMIT:
+                                        flag = True
+                                        nclose_end_compress[(st_chr, ed_chr)][i[0]].append(contig_data[s][CTG_NAM])
+                                    if flag:
+                                        break
                                 nclose_compress[(st_chr, ed_chr)].append(temp_list)
                                 nclose_dict[contig_data[s][CTG_NAM]] = (st, ed)
-                elif st_chr[1] > ed_chr[1]:
+                elif chr2int(st_chr[1]) > chr2int(ed_chr[1]):
                     for i in nclose_compress[(ed_chr, st_chr)]:
                         if is_curr_ctg_repeat and i[0] in repeat_contig_name:
                             compress_limit = ALL_REPEAT_NCLOSE_COMPRESS_LIMIT
@@ -300,18 +392,29 @@ def extract_nclose_node(contig_data : list, bnd_contig : set, repeat_contig_name
                                     censat_st_chr[1] = contig_data[st][CHR_NAM] + "." + str(cnt)
                                     break
                                 cnt+=1
+                        if contig_e[CTG_CENSAT] != '0':
                             cnt = 0
                             for censat_ref_range in repeat_censat_data[contig_data[ed][CHR_NAM]]:
                                 if inclusive_checker(censat_ref_range, (contig_data[ed][CHR_STR], contig_data[ed][CHR_END])):
                                     censat_ed_chr[1] = contig_data[ed][CHR_NAM] + "." + str(cnt)
                                     break
                                 cnt+=1
-                        if contig_s[CTG_CENSAT] == '0' \
-                           or censat_st_chr[1] == 0 \
+                        if censat_st_chr[1] == 0 \
                            or censat_ed_chr[1] == 0 :
                             temp_list = [upd_contig_name,
                                     [contig_data[ed][CHR_STR], contig_data[ed][CHR_END]], 
-                                    [contig_data[st][CHR_STR], contig_data[st][CHR_END]]]
+                                    [contig_data[st][CHR_STR], contig_data[st][CHR_END]], ed, st]
+                            for i in nclose_compress[(ed_chr, st_chr)]:
+                                dummy_list = [0,0,0,0,0,0,0,]
+                                flag = False
+                                if distance_checker(contig_data[ed], dummy_list+i[1]) < NCLOSE_MERGE_LIMIT:
+                                    nclose_start_compress[(ed_chr, st_chr)][i[0]].append(contig_data[s][CTG_NAM])
+                                    flag = True
+                                if distance_checker(contig_data[st], dummy_list+i[2]) < NCLOSE_MERGE_LIMIT:
+                                    nclose_end_compress[(ed_chr, st_chr)][i[0]].append(contig_data[s][CTG_NAM])
+                                    flag = True
+                                if flag:
+                                    break
                             nclose_compress[(ed_chr, st_chr)].append(temp_list)
                             nclose_dict[contig_data[s][CTG_NAM]] = (st, ed)
                         else:
@@ -320,7 +423,18 @@ def extract_nclose_node(contig_data : list, bnd_contig : set, repeat_contig_name
                                 censat_nclose_compress.add(key)
                                 temp_list = [upd_contig_name,
                                     [contig_data[ed][CHR_STR], contig_data[ed][CHR_END]], 
-                                    [contig_data[st][CHR_STR], contig_data[st][CHR_END]]]
+                                    [contig_data[st][CHR_STR], contig_data[st][CHR_END]], ed, st]
+                                for i in nclose_compress[(ed_chr, st_chr)]:
+                                    dummy_list = [0,0,0,0,0,0,0,]
+                                    flag = False
+                                    if distance_checker(contig_data[ed], dummy_list+i[1]) < NCLOSE_MERGE_LIMIT:
+                                        nclose_start_compress[(ed_chr, st_chr)][i[0]].append(contig_data[s][CTG_NAM])
+                                        flag = True
+                                    if distance_checker(contig_data[st], dummy_list+i[2]) < NCLOSE_MERGE_LIMIT:
+                                        nclose_end_compress[(ed_chr, st_chr)][i[0]].append(contig_data[s][CTG_NAM])
+                                        flag = True
+                                    if flag:
+                                        break
                                 nclose_compress[(ed_chr, st_chr)].append(temp_list)
                                 nclose_dict[contig_data[s][CTG_NAM]] = (st, ed)
                 else:
@@ -345,29 +459,71 @@ def extract_nclose_node(contig_data : list, bnd_contig : set, repeat_contig_name
                                         censat_st_chr[1] = contig_data[st][CHR_NAM] + "." + str(cnt)
                                         break
                                     cnt+=1
+                            if contig_e[CTG_CENSAT] != '0':
                                 cnt = 0
                                 for censat_ref_range in repeat_censat_data[contig_data[ed][CHR_NAM]]:
                                     if inclusive_checker(censat_ref_range, (contig_data[ed][CHR_STR], contig_data[ed][CHR_END])):
                                         censat_ed_chr[1] = contig_data[ed][CHR_NAM] + "." + str(cnt)
                                         break
                                     cnt+=1
-                            if contig_s[CTG_CENSAT] == '0' \
-                            or censat_st_chr[1] == 0 \
+                            if censat_st_chr[1] == 0 \
                             or censat_ed_chr[1] == 0 :
-                                temp_list = [upd_contig_name,
-                                        [contig_data[ed][CHR_STR], contig_data[ed][CHR_END]], 
-                                        [contig_data[st][CHR_STR], contig_data[st][CHR_END]]]
-                                nclose_compress[(ed_chr, st_chr)].append(temp_list)
-                                nclose_dict[contig_data[s][CTG_NAM]] = (st, ed)
+                                temp_list = [upd_contig_name, 
+                                        [contig_data[st][CHR_STR], contig_data[st][CHR_END]], 
+                                        [contig_data[ed][CHR_STR], contig_data[ed][CHR_END]], st, ed]
+                                for i in nclose_compress[(st_chr, ed_chr)]:
+                                    dummy_list = [0,0,0,0,0,0,0,]
+                                    flag = False
+                                    if i[3] < i[4]:
+                                        if distance_checker(contig_data[st], dummy_list+i[1]) < NCLOSE_MERGE_LIMIT:
+                                            flag = True
+                                            nclose_start_compress[(st_chr, ed_chr)][i[0]].append(contig_data[s][CTG_NAM])
+                                        if distance_checker(contig_data[ed], dummy_list+i[2]) < NCLOSE_MERGE_LIMIT:
+                                            flag = True
+                                            nclose_end_compress[(st_chr, ed_chr)][i[0]].append(contig_data[s][CTG_NAM])
+                                        if flag:
+                                            break
+                                    else:
+                                        if distance_checker(contig_data[st], dummy_list+i[2]) < NCLOSE_MERGE_LIMIT:
+                                            flag = True
+                                            nclose_start_compress[(st_chr, ed_chr)][i[0]].append(contig_data[s][CTG_NAM])
+                                        if distance_checker(contig_data[ed], dummy_list+i[1]) < NCLOSE_MERGE_LIMIT:
+                                            flag = True
+                                            nclose_end_compress[(st_chr, ed_chr)][i[0]].append(contig_data[s][CTG_NAM])
+                                        if flag:
+                                            break
+                                nclose_compress[(st_chr, ed_chr)].append(temp_list)
+                                nclose_dict[contig_data[s][CTG_NAM]] = (st, ed)      
                             else:
                                 key = (tuple(censat_st_chr), tuple(censat_ed_chr))
                                 if key not in censat_nclose_compress:
                                     censat_nclose_compress.add(key)
-                                    temp_list = [upd_contig_name,
-                                        [contig_data[ed][CHR_STR], contig_data[ed][CHR_END]], 
-                                        [contig_data[st][CHR_STR], contig_data[st][CHR_END]]]
-                                    nclose_compress[(ed_chr, st_chr)].append(temp_list)
-                                    nclose_dict[contig_data[s][CTG_NAM]] = (st, ed)
+                                    temp_list = [upd_contig_name, 
+                                        [contig_data[st][CHR_STR], contig_data[st][CHR_END]], 
+                                        [contig_data[ed][CHR_STR], contig_data[ed][CHR_END]], st, ed]
+                                    for i in nclose_compress[(st_chr, ed_chr)]:
+                                        dummy_list = [0,0,0,0,0,0,0,]
+                                        flag = False
+                                        if i[3] < i[4]:
+                                            if distance_checker(contig_data[st], dummy_list+i[1]) < NCLOSE_MERGE_LIMIT:
+                                                flag = True
+                                                nclose_start_compress[(st_chr, ed_chr)][i[0]].append(contig_data[s][CTG_NAM])
+                                            if distance_checker(contig_data[ed], dummy_list+i[2]) < NCLOSE_MERGE_LIMIT:
+                                                flag = True
+                                                nclose_end_compress[(st_chr, ed_chr)][i[0]].append(contig_data[s][CTG_NAM])
+                                            if flag:
+                                                break
+                                        else:
+                                            if distance_checker(contig_data[st], dummy_list+i[2]) < NCLOSE_MERGE_LIMIT:
+                                                flag = True
+                                                nclose_start_compress[(st_chr, ed_chr)][i[0]].append(contig_data[s][CTG_NAM])
+                                            if distance_checker(contig_data[ed], dummy_list+i[1]) < NCLOSE_MERGE_LIMIT:
+                                                flag = True
+                                                nclose_end_compress[(st_chr, ed_chr)][i[0]].append(contig_data[s][CTG_NAM])
+                                            if flag:
+                                                break
+                                    nclose_compress[(st_chr, ed_chr)].append(temp_list)
+                                    nclose_dict[contig_data[s][CTG_NAM]] = (st, ed)  
                     else:
                         for i in nclose_compress[(ed_chr, st_chr)]:
                             if is_curr_ctg_repeat and i[0] in repeat_contig_name:
@@ -389,30 +545,67 @@ def extract_nclose_node(contig_data : list, bnd_contig : set, repeat_contig_name
                                         censat_st_chr[1] = contig_data[st][CHR_NAM] + "." + str(cnt)
                                         break
                                     cnt+=1
+                            if contig_e[CTG_CENSAT] != '0':
                                 cnt = 0
                                 for censat_ref_range in repeat_censat_data[contig_data[ed][CHR_NAM]]:
                                     if inclusive_checker(censat_ref_range, (contig_data[ed][CHR_STR], contig_data[ed][CHR_END])):
                                         censat_ed_chr[1] = contig_data[ed][CHR_NAM] + "." + str(cnt)
                                         break
                                     cnt+=1
-                            if contig_s[CTG_CENSAT] == '0' \
-                            or censat_st_chr[1] == 0 \
+                            if censat_st_chr[1] == 0 \
                             or censat_ed_chr[1] == 0 :
                                 temp_list = [upd_contig_name,
                                         [contig_data[ed][CHR_STR], contig_data[ed][CHR_END]], 
-                                        [contig_data[st][CHR_STR], contig_data[st][CHR_END]]]
+                                        [contig_data[st][CHR_STR], contig_data[st][CHR_END]], ed, st]
+                                for i in nclose_compress[(ed_chr, st_chr)]:
+                                    dummy_list = [0,0,0,0,0,0,0,]
+                                    flag = False
+                                    if i[3] > i[4]:
+                                        if distance_checker(contig_data[st], dummy_list+i[2]) < NCLOSE_MERGE_LIMIT:
+                                            nclose_start_compress[(st_chr, ed_chr)][i[0]].append(contig_data[s][CTG_NAM])
+                                            flag = True
+                                        if distance_checker(contig_data[ed], dummy_list+i[1]) < NCLOSE_MERGE_LIMIT:
+                                            nclose_end_compress[(st_chr, ed_chr)][i[0]].append(contig_data[s][CTG_NAM])
+                                            flag = True
+                                    else:
+                                        if distance_checker(contig_data[st], dummy_list+i[1]) < NCLOSE_MERGE_LIMIT:
+                                            nclose_start_compress[(st_chr, ed_chr)][i[0]].append(contig_data[s][CTG_NAM])
+                                            flag = True
+                                        if distance_checker(contig_data[ed], dummy_list+i[2]) < NCLOSE_MERGE_LIMIT:
+                                            nclose_end_compress[(st_chr, ed_chr)][i[0]].append(contig_data[s][CTG_NAM])
+                                            flag = True
+                                    if flag:
+                                        break
                                 nclose_compress[(ed_chr, st_chr)].append(temp_list)
-                                nclose_dict[contig_data[s][CTG_NAM]] = (st, ed)
+                                nclose_dict[contig_data[s][CTG_NAM]] = (st, ed)     
                             else:
                                 key = (tuple(censat_st_chr), tuple(censat_ed_chr))
                                 if key not in censat_nclose_compress:
                                     censat_nclose_compress.add(key)
                                     temp_list = [upd_contig_name,
                                         [contig_data[ed][CHR_STR], contig_data[ed][CHR_END]], 
-                                        [contig_data[st][CHR_STR], contig_data[st][CHR_END]]]
+                                        [contig_data[st][CHR_STR], contig_data[st][CHR_END]], ed, st]
+                                    for i in nclose_compress[(ed_chr, st_chr)]:
+                                        dummy_list = [0,0,0,0,0,0,0,]
+                                        flag = False
+                                        if i[3] > i[4]:
+                                            if distance_checker(contig_data[st], dummy_list+i[2]) < NCLOSE_MERGE_LIMIT:
+                                                nclose_start_compress[(st_chr, ed_chr)][i[0]].append(contig_data[s][CTG_NAM])
+                                                flag = True
+                                            if distance_checker(contig_data[ed], dummy_list+i[1]) < NCLOSE_MERGE_LIMIT:
+                                                nclose_end_compress[(st_chr, ed_chr)][i[0]].append(contig_data[s][CTG_NAM])
+                                                flag = True
+                                        else:
+                                            if distance_checker(contig_data[st], dummy_list+i[1]) < NCLOSE_MERGE_LIMIT:
+                                                nclose_start_compress[(st_chr, ed_chr)][i[0]].append(contig_data[s][CTG_NAM])
+                                                flag = True
+                                            if distance_checker(contig_data[ed], dummy_list+i[2]) < NCLOSE_MERGE_LIMIT:
+                                                nclose_end_compress[(st_chr, ed_chr)][i[0]].append(contig_data[s][CTG_NAM])
+                                                flag = True
+                                        if flag:
+                                            break
                                     nclose_compress[(ed_chr, st_chr)].append(temp_list)
-                                    nclose_dict[contig_data[s][CTG_NAM]] = (st, ed)
-
+                                    nclose_dict[contig_data[s][CTG_NAM]] = (st, ed)         
 
             else:
                 max_chr = (contig_data[st][CTG_MAINFLOWDIR], contig_data[st][CTG_MAINFLOWCHR])
@@ -437,7 +630,28 @@ def extract_nclose_node(contig_data : list, bnd_contig : set, repeat_contig_name
                 else:
                     nclose_dict[contig_data[s][CTG_NAM]] = (st, ed)
         s = e+1
-    return nclose_dict
+    return nclose_dict, nclose_start_compress, nclose_end_compress, fake_bnd
+
+def make_virtual_ord_ctg(contig_data, fake_bnd):
+    contig_data_size = len(contig_data)
+    s = 0
+    virtual_ctg = []
+    idx = 0
+    while s < contig_data_size:
+        e = contig_data[s][CTG_ENDND]
+        curr_ctg = contig_data[s][CTG_NAM]
+        if curr_ctg in fake_bnd.keys():
+            vctg_rng = fake_bnd[curr_ctg]
+            for i in range(vctg_rng[0], vctg_rng[1] +1):
+                temp_list = list(contig_data[i])
+                temp_list[CTG_NAM] = temp_list[CTG_NAM] + "_v"
+                temp_list[CTG_TYP] = 3
+                temp_list[CTG_STRND] = idx + contig_data_size
+                temp_list[CTG_ENDND] = idx + vctg_rng[1] - vctg_rng[0] + contig_data_size
+                virtual_ctg.append(temp_list)
+            idx+=vctg_rng[1] - vctg_rng[0]+1
+        s = e+1
+    return virtual_ctg
 
 def extract_telomere_connect_contig(contig_data : list, graph_adjacency : dict) -> dict:
     chr_corr = {}
@@ -663,9 +877,9 @@ parser.add_argument("--orignal_paf_loc", nargs='+',
 
 args = parser.parse_args()
 
-#t = "python 04_Build_Breakend_Graph_Limited.py 20_acc_pipe/Caki-1.p/Caki-1.p.aln.paf.ppc.paf public_data/chm13v2.0.fa.fai public_data/chm13v2.0_censat_v2.1.m.bed 20_acc_pipe/Caki-1.p/Caki-1.p.aln.paf.ppc.paf.op.graph.txt 30_skype_pipe/Caki-1_19_29_19 --orignal_paf_loc 20_acc_pipe/Caki-1.p/Caki-1.p.paf 20_acc_pipe/Caki-1.a/Caki-1.a.paf"
-#t = t.split(" ")
-#args = parser.parse_args(t[2:])
+# t = "python 04_Build_Breakend_Graph_Limited.py 20_acc_pipe/OZ.p/OZ.p.aln.paf.ppc.paf public_data/chm13v2.0.fa.fai public_data/chm13v2.0_censat_v2.1.m.bed 20_acc_pipe/OZ.p/OZ.p.aln.paf.ppc.paf.op.graph.txt 30_skype_pipe/OZ_03_49_27 --orignal_paf_loc 20_acc_pipe/OZ.p/OZ.p.paf 20_acc_pipe/OZ.a/OZ.a.paf"
+# t = t.split(" ")
+# args = parser.parse_args(t[2:])
 
 graph_data = args.graph_file_txt
 PREPROCESSED_PAF_FILE_PATH = args.ppc_paf_file_path
@@ -708,31 +922,98 @@ bnd_contig = extract_bnd_contig(contig_data)
 telo_contig = extract_telomere_connect_contig(contig_data, graph_adjacency)
 
 # Type 1, 2, 4에 대해서 
-nclose_nodes = extract_nclose_node(contig_data, bnd_contig, rpt_con, rpt_censat_con, repeat_censat_data)
+nclose_nodes, nclose_start_compress, nclose_end_compress, vctg_dict = \
+    extract_nclose_node(contig_data, bnd_contig, rpt_con, rpt_censat_con, repeat_censat_data, ORIGNAL_PAF_LOC_LIST)
+
+
+virtual_ordinary_contig = make_virtual_ord_ctg(contig_data, vctg_dict)
+with open(f"{PREFIX}/virtual_ordinary_contig.txt", "wt") as f:
+    for i in virtual_ordinary_contig:
+        for j in i:
+            print(j, end = "\t", file=f)
+        print("", file = f)
+
 
 nclose_type = defaultdict(list)
 for i in nclose_nodes:
     pair =nclose_nodes[i]
     contig_a = contig_data[pair[0]]
     contig_b = contig_data[pair[1]]
-    if chr2int(contig_a[CHR_NAM]) < chr2int(contig_b[CHR_NAM]):
+    if chr2int(contig_a[CHR_NAM]) <= chr2int(contig_b[CHR_NAM]):
         nclose_type[(contig_a[CHR_NAM], contig_b[CHR_NAM])].append(pair)
+
     else:
         nclose_type[(contig_b[CHR_NAM], contig_a[CHR_NAM])].append((pair[1], pair[0]))
+
+
+st_compress = dict()
+for ddict in nclose_start_compress.values():
+    for ctg1, ctg2_list in ddict.items():
+        pair = nclose_nodes[ctg1]
+        ctg1_idx = 0
+        contig_a = contig_data[pair[0]]
+        contig_b = contig_data[pair[1]]
+        if chr2int(contig_a[CHR_NAM]) <= chr2int(contig_b[CHR_NAM]):
+            st_compress[pair[0]] = pair[0]
+            ctg1_idx = pair[0]
+        else:
+            st_compress[pair[1]] = pair[1]
+            ctg1_idx = pair[1]
+        for ctg2 in ctg2_list:
+            pair = nclose_nodes[ctg2]
+            contig_a = contig_data[pair[0]]
+            contig_b = contig_data[pair[1]]
+            if chr2int(contig_a[CHR_NAM]) <= chr2int(contig_b[CHR_NAM]):
+                st_compress[pair[0]] = ctg1_idx
+            else:
+                st_compress[pair[1]] = ctg1_idx
+
+ed_compress = dict()
+for ddict in nclose_end_compress.values():
+    for ctg1, ctg2_list in ddict.items():
+        pair = nclose_nodes[ctg1]
+        ctg1_idx = 0
+        contig_a = contig_data[pair[0]]
+        contig_b = contig_data[pair[1]]
+        if chr2int(contig_a[CHR_NAM]) <= chr2int(contig_b[CHR_NAM]):
+            ed_compress[pair[1]] = pair[1]
+            ctg1_idx = pair[1]
+        else:
+            ed_compress[pair[0]] = pair[0]
+            ctg1_idx = pair[0]
+        for ctg2 in ctg2_list:
+            pair = nclose_nodes[ctg2]
+            contig_a = contig_data[pair[1]]
+            contig_b = contig_data[pair[0]]
+            if chr2int(contig_a[CHR_NAM]) <= chr2int(contig_b[CHR_NAM]):
+                ed_compress[pair[1]] = ctg1_idx
+            else:
+                ed_compress[pair[0]] = ctg1_idx
+
 
 with open(f"{PREFIX}/nclose_nodes_list.txt", "wt") as f:
     for i in nclose_type:
         print(f"{i[0]}, {i[1]}, {len(nclose_type[i])}", file=f)
+        st_flag = False
+        ed_flag = False
+        if (('=', i[0]), ('=', i[1])) in nclose_start_compress:
+            st_flag = True
+        if (('=', i[0]), ('=', i[1])) in nclose_start_compress:
+            ed_flag = True
         for pair in nclose_type[i]:
             contig_a = contig_data[pair[0]]
             contig_b = contig_data[pair[1]]
-            list_a = [contig_a[CTG_NAM], contig_a[CHR_STR], contig_a[CHR_END]]
-            list_b = [contig_b[CTG_NAM], contig_b[CHR_STR], contig_b[CHR_END]]
+            if st_flag:
+                if contig_a[CTG_NAM] in nclose_start_compress[(('=', i[0]), ('=', i[1]))]:
+                    pass
+            list_a = [contig_a[CTG_NAM], contig_a[CTG_DIR], contig_a[CHR_STR], contig_a[CHR_END]]
+            list_b = [contig_b[CTG_NAM], contig_b[CTG_DIR], contig_b[CHR_STR], contig_b[CHR_END]]
             if contig_a[CTG_NAM] in rpt_con:
                 print(list_a, list_b, "all_repeat", file=f)
             else:
                 print(list_a, list_b, file=f)
         print("", file=f)
+
 
 with open(f"{PREFIX}/telomere_connected_list.txt", "wt") as f:
     for i in telo_contig:
@@ -740,6 +1021,19 @@ with open(f"{PREFIX}/telomere_connected_list.txt", "wt") as f:
         for j in telo_contig[i]:
             print(contig_data[j[1]], file=f)
         print("", file=f)
+# print("start_compress")
+# for i in st_compress:
+#     print(contig_data[i][:CHR_END+1])
+#     print(contig_data[st_compress[i]][:CHR_END+1])
+# print("end_compress")
+# for i in ed_compress:
+#      print(contig_data[i][:CHR_END+1])
+#      print(contig_data[ed_compress[i]][:CHR_END+1])
+
+#exit(1)
+
+for i in nclose_start_compress:
+    pass
 
 
 bnd_graph_adjacency = initialize_bnd_graph(contig_data, nclose_nodes, telo_contig)
@@ -870,6 +1164,24 @@ def run_graph(data):
                         path_counter[contig_data[path[path_len-2][1]][CHR_NAM]]+=\
                         contig_data[path[path_len-2][1]][CHR_END] - contig_data[path[path_len-2][1]][CHR_STR]
                     contig_set =  set()
+                    contig_set.add(path[path_len-2][1])
+                    nclose_st_cluster_set = set()
+                    nclose_ed_cluster_set = set()
+                    cluster_overlap_flag = False
+                    for node in range(1, path_len-1):
+                        if path[node][1] in st_compress.keys() and st_compress[path[node][1]] in nclose_st_cluster_set:
+                            cluster_overlap_flag = True
+                            break
+                        elif path[node][1] in st_compress.keys():
+                            nclose_st_cluster_set.add(st_compress[path[node][1]])
+                        if path[node][1] in ed_compress.keys() and ed_compress[path[node][1]] in nclose_ed_cluster_set:
+                            cluster_overlap_flag = True
+                            break
+                        elif path[node][1] in ed_compress.keys():
+                            nclose_ed_cluster_set.add(ed_compress[path[node][1]])
+                    if cluster_overlap_flag:
+                        continue
+                                
                     contig_overuse_flag = False
                     for node in range(1, path_len-2):
                         if path[node][1] in contig_set:
@@ -920,9 +1232,19 @@ def run_graph(data):
                     
                     flag = True
                     flagflag = False
+                    rank = []
                     for i in range(min(PATH_MAJOR_COMPONENT, len(ack))):
                         if ack[i][0] in (src[0][:-1], tar[:-1]):
+                            rank.append(i)
+                    if len(rank)==2:
+                        flagflag = True
+                    elif len(rank)==1:
+                        if rank[0]<=1:
                             flagflag = True
+                        else:
+                            flagflag = False
+                    else:
+                        flagflag = False
                     flag = flagflag
                     if (longest_chr[1]+second_chr[1])/total_path_ref_len < 0.5:
                         flag=False
@@ -952,6 +1274,7 @@ def run_graph(data):
                                     print(nodes, file=g)
                                 else:
                                     f.write("\t".join(map(str, contig_data[nodes[1]])))
+                                    f.write("\n")
                                     g.write("\t".join(map(str, nodes))+"\n")
                             print(ack, file=f)
                             print(ack, file=g)

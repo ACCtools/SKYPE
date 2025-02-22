@@ -2,6 +2,7 @@ import os
 import sys
 import argparse
 import pandas as pd
+import copy
 
 from collections import defaultdict
 from collections import Counter
@@ -555,6 +556,7 @@ def preprocess_repeat(contig_data : list) -> list:
         curr_contig_st = curr_contig_ed+1
     return repeat_preprocessed_contig
 
+
 def main():
     parser = argparse.ArgumentParser(description="Process file paths for telomere analysis.")
 
@@ -576,7 +578,7 @@ def main():
     # 인자 파싱
     args = parser.parse_args()
 
-    # t = "python 00_Contig_Preprocessing.py 20_acc_pipe/HuH-28.p/HuH-28.p.aln.paf public_data/chm13v2.0_telomere.bed public_data/chm13v2.0.fa.fai public_data/chm13v2.0_repeat.m.bed --alt 20_acc_pipe/HuH-28.a/HuH-28.a.aln.paf".split()
+    # t = "python 00_Contig_Preprocessing.py 20_acc_pipe/OZ.p/OZ.p.aln.paf public_data/chm13v2.0_telomere.bed public_data/chm13v2.0.fa.fai public_data/chm13v2.0_repeat.m.bed public_data/chm13v2.0_censat_v2.1.m.bed --alt 20_acc_pipe/OZ.a/OZ.a.aln.paf".split()
     # args = parser.parse_args(t[2:])
 
     PAF_FILE_PATH = []

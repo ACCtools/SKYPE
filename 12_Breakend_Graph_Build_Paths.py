@@ -102,7 +102,7 @@ def inclusive_checker(contig_node : tuple, telomere_node : tuple) -> bool :
     else:
         return False
     
-def chr_correlation_maker():
+def chr_correlation_maker(contig_data):
     chr_corr = {}
     chr_rev_corr = {}
     contig_data_size = len(contig_data)
