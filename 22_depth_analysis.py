@@ -7,7 +7,6 @@ import glob
 
 from tqdm import tqdm
 from scipy.optimize import nnls
-from fnnls import fnnls
 
 ABS_MAX_COVERAGE_RATIO = 6
 
