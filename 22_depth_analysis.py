@@ -7,7 +7,9 @@ import glob
 
 from tqdm import tqdm
 from scipy.optimize import nnls
+from fnnls import fnnls
 
+ABS_MAX_COVERAGE_RATIO = 6
 
 def chr2int(x):
     chrXY2int = {'chrX' : 24, 'chrY' : 25}
@@ -44,6 +46,7 @@ main_stat_loc = sys.argv[1]
 
 df = pd.read_csv(main_stat_loc, compression='gzip', comment='#', sep='\t', names=['chr', 'st', 'nd', 'length', 'covsite', 'totaldepth', 'cov', 'meandepth'])
 df = df.query('chr != "chrM"')
+med_meandepth = np.median(df['meandepth'])
 
 chr_st_list = []
 chr_filt_st_list = []
@@ -51,6 +54,8 @@ chr_filt_st_list = []
 for l in df.itertuples(index=False):
     chr_st_list.append((l.chr, l.st))
     flag = True
+    if l.meandepth > ABS_MAX_COVERAGE_RATIO * med_meandepth:
+        flag = False
     for i in bed_data:
         if l.chr == i:
             for j in bed_data[i]:
@@ -102,12 +107,16 @@ for folder_path in tqdm(chr_chr_folder_path, desc='Parse coverage from gz files'
         vec_list.append(v)
 
 
-A = np.vstack(filter_vec_list)
+A = np.vstack(filter_vec_list).T
 B = main_filter_vec
 
-weights, loss = nnls(A.T, B)
+weights, loss = nnls(A, B)
 
-print(f'RMSE : {loss}')
+error = np.linalg.norm(A @ weights - B)
+b_norm = np.linalg.norm(B)
+
+print(f'Error : {round(error, 4)}')
+print(f'Norm error : {round(error / b_norm, 4)}')
 
 A = np.vstack(vec_list)
 B = main_vec
@@ -182,7 +191,7 @@ plt.savefig(f"{sys.argv[2]}/total_cov.png")
 # ----------------------------
 
 # weight가 높은 순으로 상위 50개 구성요소의 인덱스 (가상 염색체)
-top_indices = np.argsort(weights)[-40:]
+top_indices = np.argsort(weights)[-50:]
 top_indices = top_indices[::-1]  # 내림차순 정렬
 
 # 각 구성요소의 contribution profile: weight * 해당 A 행

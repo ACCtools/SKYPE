@@ -141,78 +141,13 @@ def extract_bnd_contig(contig_data : list) -> set:
     return bnd_contig
 
 
-def extract_nclose_node(contig_data : list, bnd_contig : set) -> list:
-    s = 0
-    contig_data_size = len(contig_data)
-    nclose_compress = defaultdict(list)
+def extract_nclose_node(nclose_path: str) -> list:
     nclose_list = []
-    while s<contig_data_size:
-        e = contig_data[s][CTG_ENDND]
-        st = s
-        ed = e
-        if contig_data[s][CTG_NAM] in bnd_contig:
-            curr_contig_nam = contig_data[s][CTG_NAM]
-            if contig_data[s][CTG_TYP] in (1, 2):
-                st_chr = (contig_data[s][CTG_DIR], contig_data[s][CHR_NAM])
-                ed_chr = (contig_data[e][CTG_DIR], contig_data[e][CHR_NAM])
-                while (contig_data[st][CTG_DIR], contig_data[st][CHR_NAM]) == st_chr:
-                    st+=1
-                st-=1
-                while (contig_data[ed][CTG_DIR], contig_data[ed][CHR_NAM]) == ed_chr:
-                    ed-=1
-                ed+=1
-                flag = True
-                if st_chr <= ed_chr : 
-                    for i in nclose_compress[(st_chr, ed_chr)]:
-                        dist_st = abs(contig_data[st][CHR_STR] - i[0][0]) + abs(contig_data[st][CHR_END] - i[0][1])
-                        dist_ed = abs(contig_data[ed][CHR_STR] - i[1][0]) + abs(contig_data[ed][CHR_END] - i[1][1])
-                        if dist_st < NCLOSE_COMPRESS_LIMIT and dist_ed < NCLOSE_COMPRESS_LIMIT:
-                            flag = False
-                            break
-                    if flag:
-                        temp_list = [[contig_data[st][CHR_STR], contig_data[st][CHR_END]], \
-                                     [contig_data[ed][CHR_STR], contig_data[ed][CHR_END]]]
-                        nclose_compress[(st_chr, ed_chr)].append(temp_list)
-                        nclose_list.append(ed)
-                        nclose_list.append(st)
-                else:
-                    for i in nclose_compress[(ed_chr, st_chr)]:
-                        dist_st = abs(contig_data[st][CHR_STR] - i[1][0]) + abs(contig_data[st][CHR_END] - i[1][1])
-                        dist_ed = abs(contig_data[ed][CHR_STR] - i[0][0]) + abs(contig_data[ed][CHR_END] - i[0][1])
-                        if dist_st < NCLOSE_COMPRESS_LIMIT and dist_ed < NCLOSE_COMPRESS_LIMIT:
-                            flag = False
-                            break
-                    if flag:
-                        temp_list = [[contig_data[ed][CHR_STR], contig_data[ed][CHR_END]], \
-                                     [contig_data[st][CHR_STR], contig_data[st][CHR_END]]]
-                        nclose_compress[(ed_chr, st_chr)].append(temp_list)
-                        nclose_list.append(ed)
-                        nclose_list.append(st)
-            else:
-                max_chr = (contig_data[st][CTG_MAINFLOWDIR], contig_data[st][CTG_MAINFLOWCHR])
-                combo = 0
-                ref_combo = 0
-                maxcombo=0
-                max_ref_combo = 0
-                for i in range(st, ed+1):
-                    if (contig_data[i][CTG_DIR], contig_data[i][CHR_NAM]) == max_chr:
-                        combo+=1
-                        ref_combo += contig_data[i][CHR_END] - contig_data[i][CHR_STR]
-                    else:
-                        combo=0
-                        ref_combo = 0
-                    if ref_combo>max_ref_combo:
-                        maxcombo = combo
-                        max_ref_combo = ref_combo
-                        st_idx = i-maxcombo+1
-                        ed_idx = i
-                if max_chr != (contig_data[s][CTG_DIR], contig_data[s][CHR_NAM]):
-                    for i in (st, st_idx, ed_idx, ed):
-                        nclose_list.append(i)
-                else:
-                    nclose_list.append(ed)
-                    nclose_list.append(st)
-        s = e+1
+    with open(nclose_path, "r") as f:
+        for line in f:
+            line = line.split()
+            nclose_list.append(int(line[1]))
+            nclose_list.append(int(line[2]))
     return nclose_list
 
 def initial_graph_build(contig_data : list) -> list :
@@ -497,9 +432,10 @@ def connect_nclose_telo(contig_data : list, using_node : list, type_3_graph : di
     for telo_node_idx in telo_nodes:
         for type_3_idx in using_node:
             telo_node = contig_data[telo_node_idx]
+            telo_node_len = telo_node[CTG_ENDND] - telo_node[CTG_STRND] + 1
             type_3 = contig_data[type_3_idx]
             type_3_dir = type_3[CTG_DIR]
-            if telo_node_idx == type_3_idx:
+            if telo_node_idx == type_3_idx and telo_node_len > 1:
                 if telo_node_idx == telo_node[CTG_STRND]:
                     full_bnd_graph[(DIR_OUT, telo_node_idx)].append([DIR_FOR, telo_node_idx+1, 0])
                     full_bnd_graph[(DIR_BAK, telo_node_idx+1)].append([DIR_IN, telo_node_idx, 0])
@@ -600,8 +536,14 @@ def main():
     PREPROCESSED_PAF_FILE_PATH = args.ppc_paf_file_path
 
     BREAKEND_GRAPH_PATH_FILE_PREFIX = args.prefix
+
+    NCLOSE_FILE_PATH = f"{args.prefix}/nclose_nodes_index.txt"
+
+    VIRTUAL_TYPE_3_PATH = f"{args.prefix}/virtual_ordinary_contig.txt"
     
     contig_data = import_data2(PREPROCESSED_PAF_FILE_PATH)
+    virtual_type_3_data = import_data2(VIRTUAL_TYPE_3_PATH)
+    #contig_data += virtual_type_3_data
     contig_data_size = len(contig_data)
     
     init_graph_adjacency = initial_graph_build(contig_data)
@@ -614,7 +556,7 @@ def main():
                 print((dir, node), ":", ord_graph_adjacency[dir][node], file=f)
     opt_ord_graph_adjacency = edge_optimization(contig_data, ord_graph_adjacency)
     type_3_graph = defaultdict(list)
-    with open(f"{BREAKEND_GRAPH_PATH_FILE_PREFIX}/bnd_connect_graph.txt", "wt") as f:
+    with open(f"{BREAKEND_GRAPH_PATH_FILE_PREFIX}/opt_bnd_connect_graph.txt", "wt") as f:
         for dir in range(2):
             for node in range(contig_data_size):
                 print((dir, node), ":", opt_ord_graph_adjacency[dir][node], file=f)
@@ -627,7 +569,7 @@ def main():
 
     telo_contig = extract_telomere_connect_contig(contig_data, graph_adjacency)
 
-    nclose_nodes = extract_nclose_node(contig_data, bnd_contig)
+    nclose_nodes = extract_nclose_node(NCLOSE_FILE_PATH)
 
     bnd_connected_graph = connect_nclose_telo(contig_data, using_node, type_3_graph, nclose_nodes, telo_contig)
     node_cnt = 0
@@ -643,6 +585,10 @@ def main():
     #print(f"Node : {node_cnt}, Edge: {edge_cnt}")
 
     G = nx.DiGraph()
+    
+    for node in telo_contig + nclose_nodes:
+        G.add_node((DIR_IN, node))
+        G.add_node((DIR_OUT, node))
 
     for node in bnd_connected_graph:
         G.add_node(node)

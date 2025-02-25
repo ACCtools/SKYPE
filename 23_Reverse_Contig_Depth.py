@@ -80,30 +80,32 @@ s = 0
 while s<contig_data_size:
     e = contig_data[s][CTG_ENDND]
     if contig_data[s][CTG_TYP] == 4:
-        ctg_rat = calculate_single_contig_ref_ratio(contig_data[s:e+1])
-        ref_chr_dir = (contig_data[s][CTG_DIR], contig_data[s][CHR_NAM])
-        cover_section = dict()
+        if contig_data[s][CTG_DIR]=='+':
+            ref_range = (contig_data[s][CHR_STR], contig_data[e][CHR_END])
+        else:
+            ref_range = 
+        points = defaultdict(int)
+        ranges = []
         for i in range(s, e+1):
-            curr_node = contig_data[i]
-            if (curr_node[CTG_DIR], curr_node[CHR_NAM]) == ref_chr_dir:
-                curr_node_sec = [curr_node[CHR_STR], curr_node[CHR_END]]
-                del_sec = []
-                add_sec = []
-                if len(cover_section.keys()) == 0:
-                    cover_section[tuple(curr_node_sec)] = 1
-                else:
-                    for sec in cover_section:
-                        if distance_checker(sec[:2], curr_node_sec)==0:
-                            del_sec.append(sec)
-                            overlap_sec = [max(sec[0], curr_node_sec[0]), min(sec[1], curr_node_sec[1])]
-                            left_non_overlap = [min(sec[0], curr_node_sec[0]), max(sec[0], curr_node_sec[0])]
-                            right_non_overlap = [min(sec[1], curr_node_sec[1]), max(sec[1], curr_node_sec[1])]
-                            if left_non_overlap[1] - left_non_overlap[0] > 0:
-                                add_sec.append(left_non_overlap)
-                            if right_non_overlap[1] - right_non_overlap[0] > 0:
-
-
-                    cover_section.add((, 1))
+            if contig_data[i][CHR_NAM] == contig_data[s][CHR_NAM]:
+                ranges.append((contig_data[i][CHR_STR], contig_data[i][CHR_END]))
+    
+        # 구간의 시작점과 끝점 기록
+        for start, end in ranges:
+            points[start] += 1
+            points[end] -= 1
+        
+        # 정렬된 키 기준으로 등장 횟수 계산
+        sorted_keys = sorted(points.keys())
+        result = []
+        count = 0
+        
+        for i in range(len(sorted_keys) - 1):
+            count += points[sorted_keys[i]]
+            result.append(((sorted_keys[i], sorted_keys[i+1]), count))
+        
+        
+            
             
                     
 

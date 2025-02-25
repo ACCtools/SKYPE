@@ -764,6 +764,7 @@ def main():
         telo_dict[i[0]+i[-1]] = i[1:3]
 
     contig_data = import_data(PREPROCESSED_PAF_FILE_PATH)
+    contig_data_size = len(contig_data)
 
     contig_adjacency = initial_graph_build(contig_data, telo_dict)
 
@@ -789,7 +790,6 @@ def main():
     chr_rev_corr[total_contig_count + 2*CHROMOSOME_COUNT - 1] = 'chrXb'
 
     cnt = 0
-    print("Number of Nodes:", len(contig_data))
     with open(PREPROCESSED_PAF_FILE_PATH + ".np.graph.txt", "wt") as f:
         for i in range(2):
             for j in range(len(contig_data)+CHROMOSOME_COUNT*2):
@@ -798,7 +798,6 @@ def main():
                     f.write(f"{k}, ")
                     cnt+=1
                 f.write("\n")
-    print("Number of Edges:", cnt)
 
     cnt = 0
     with open(PREPROCESSED_PAF_FILE_PATH + ".op.graph.txt", "wt") as g:

@@ -361,8 +361,12 @@ def form_virtual_contig(chr_len, chr_str, chr_end, chr_name, vcnt):
 
 def form_normal_contig(node, paf_file):
     paf_idx = int(node[CTG_GLOBALIDX].split('.')[0])
-    node_idx = int(node[CTG_GLOBALIDX].split('.')[1])
-    new_contig = list(node[:9]) + list(paf_file[paf_idx][node_idx][9:])
+    if paf_idx < 2:
+        node_idx = int(node[CTG_GLOBALIDX].split('.')[1])
+        new_contig = paf_file[paf_idx][node_idx]
+    else:
+        N = node[CHR_END] - node[CHR_STR]
+        new_contig = list(node[:9]) + [N, N, 0, 'tp:A:P', 'cs:Z:'+f":{N}"]
     return new_contig
 
 def form_adjusted_contig(node, paf_data):
@@ -523,23 +527,21 @@ def fill_path(args):
                         next_contig_rc = node_dir_transform(next_contig)
                     else:
                         next_contig_rc = copy.deepcopy(next_contig)
-
                     curr_contig_data = [curr_contig_rc[CHR_STR], curr_contig_rc[CHR_END],
                                         curr_contig_rc[CTG_STR], curr_contig_rc[CTG_END],
                                         curr_contig[9], curr_contig[10],
                                         curr_contig[13][5:]]
-                
-                    next_paf_idx = int(next_contig[CTG_GLOBALIDX].split('.')[0])
-                    next_node_idx = int(next_contig[CTG_GLOBALIDX].split('.')[1])
-                    next_contig_origin = paf_file[next_paf_idx][next_node_idx]
+
+                    next_contig_origin = form_normal_contig(next_contig, paf_file)
+                    
                     next_contig_data = [next_contig_rc[CHR_STR], next_contig_rc[CHR_END],
                                         next_contig_rc[CTG_STR], next_contig_rc[CTG_END],
                                         next_contig_origin[9], next_contig_origin[10],
                                         next_contig_origin[13][5:]]
 
-
+                    
                     curr_paf, next_paf = adjust_paf_overlap(curr_contig_data, next_contig_data)
-
+                    
                     curr_result = form_adjusted_contig(curr_contig, curr_paf)
                     if curr_contig[CTG_DIR]=='-': 
                         curr_result = node_dir_transform(curr_result)
@@ -550,9 +552,7 @@ def fill_path(args):
                     path_contig.append(next_result)
                     
             else:
-                next_paf_idx = int(next_contig[CTG_GLOBALIDX].split('.')[0])
-                next_node_idx = int(next_contig[CTG_GLOBALIDX].split('.')[1])
-                next_contig_origin = paf_file[next_paf_idx][next_node_idx]
+                next_contig_origin = form_normal_contig(next_contig, paf_file)
                 path_contig.append(next_contig_origin)
 
         for i in path_contig:

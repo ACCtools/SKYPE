@@ -49,12 +49,16 @@ BND_CONTIG_BOUND = 0.1
 
 CHR_CHANGE_LIMIT = 7
 DIR_CHANGE_LIMIT = 1
+CENSAT_VISIT_LIMIT = 2
+
+
 PATH_MAJOR_COMPONENT = 3
 NCLOSE_COMPRESS_LIMIT = 50*K
 NCLOSE_MERGE_LIMIT = 1*K
 ALL_REPEAT_NCLOSE_COMPRESS_LIMIT = 500*K
 PATH_COMPRESS_LIMIT = 50*K
 IGNORE_PATH_LIMIT = 50*K
+NON_REPEAT_NOISE_RATIO=0.1
 
 CENSAT_COMPRESSABLE_THRESHOLD = 1000*K
 
@@ -146,28 +150,31 @@ def inclusive_checker(tuple_a : tuple, tuple_b : tuple) -> bool :
     else:
         return False
 
-def extract_all_repeat_contig(contig_data : list, ctg_index : int) -> set:
+def extract_all_repeat_contig(contig_data : list, ctg_index : int, baseline : float = 0) -> set:
     contig_data_size = len(contig_data)
     rpt_con = set()
     s = 0
     while s<contig_data_size:
         e = contig_data[s][CTG_ENDND]
         flag = True
+        total_ref_len = 0
+        non_rpt_ref_len = 0
         for i in range(s, e+1):
+            total_ref_len += contig_data[i][CHR_END] - contig_data[i][CHR_STR]
             if contig_data[i][ctg_index] == '0':
-                flag = False
+                non_rpt_ref_len += contig_data[i][CHR_END] - contig_data[i][CHR_STR]
             # if (i == s or i == e) and contig_data[i][ctg_index] == 'r':
             #     flag = False
-        if flag:
+        if non_rpt_ref_len == 0 or baseline > non_rpt_ref_len/total_ref_len:
             rpt_con.add(contig_data[s][CTG_NAM])
         s = e+1
     return rpt_con
 
 def check_censat_contig(all_repeat_censat_con : set, ORIGNAL_PAF_LOC_LIST : list):
-    div_repeat_paf = set()
+    div_repeat_paf_name = set()
     for i in ORIGNAL_PAF_LOC_LIST:
-        div_repeat_paf.update(div_orignial_paf(i))
-    return all_repeat_censat_con & div_repeat_paf
+        div_repeat_paf_name.update(div_orignial_paf(i))
+    return all_repeat_censat_con & div_repeat_paf_name
     
 def extract_bnd_contig(contig_data : list) -> set:
     s = 0
@@ -203,9 +210,8 @@ def calculate_single_contig_ref_ratio(contig_data : list) -> float:
 
 
 def extract_nclose_node(contig_data : list, bnd_contig : set, repeat_contig_name : set, \
-                        censat_contig_name : set, repeat_censat_data : dict, ORIGNAL_PAF_LOC_LIST : list) -> dict:
+                        censat_contig_name : set, repeat_censat_data : dict, ORIGNAL_PAF_LOC_LIST : list, telo_set : set) -> dict:
     s = 0
-    bnd_idx = 0
     fake_bnd = {}
     contig_data_size = len(contig_data)
     nclose_compress = defaultdict(list)
@@ -213,10 +219,11 @@ def extract_nclose_node(contig_data : list, bnd_contig : set, repeat_contig_name
     nclose_end_compress = defaultdict(lambda : defaultdict(list))
     censat_nclose_compress = set()
     nclose_dict = {}
+    all_nclose_compress = defaultdict(list)
 
-    div_repeat_paf = set()
+    div_repeat_paf_name = set()
     for i in ORIGNAL_PAF_LOC_LIST:
-        div_repeat_paf.update(div_orignial_paf(i))
+        div_repeat_paf_name.update(div_orignial_paf(i))
 
     while s<contig_data_size:
         e = contig_data[s][CTG_ENDND]
@@ -225,7 +232,7 @@ def extract_nclose_node(contig_data : list, bnd_contig : set, repeat_contig_name
         st = s
         ed = e
 
-        if contig_data[s][CTG_NAM] in bnd_contig and contig_data[s][CTG_NAM] not in censat_contig_name:
+        if contig_data[s][CTG_NAM] in bnd_contig:
             if contig_data[s][CTG_TYP] in (1, 2):
                 st_chr = [contig_data[s][CTG_DIR], contig_data[s][CHR_NAM]]
                 org_st_chr = tuple(st_chr)
@@ -275,6 +282,21 @@ def extract_nclose_node(contig_data : list, bnd_contig : set, repeat_contig_name
                         if abs(ratio_e-1) < BND_CONTIG_BOUND:
                             fake_bnd[contig_data[s][CTG_NAM]] = (st+1, e)
                         ed = st+1
+                # if contig_data[s][CTG_NAM] == 'ptg000209l':
+                #     print(contig_data[s][CTG_NAM] in div_repeat_paf_name)
+                #     print(contig_data[s][CTG_NAM] in repeat_contig_name)
+                #     print(st not in telo_set)
+                #     print(ed not in telo_set)
+
+                all_nclose_compress[(st_chr[1], ed_chr[1])].append((st, ed))
+
+                
+                if contig_data[s][CTG_NAM] in div_repeat_paf_name \
+                   and contig_data[s][CTG_NAM] in repeat_contig_name \
+                   and st not in telo_set \
+                   and ed not in telo_set :
+                    s = e+1
+                    continue
                     
                 flag = True
                 # if st_chr[0] == ed_chr[0]:
@@ -294,12 +316,11 @@ def extract_nclose_node(contig_data : list, bnd_contig : set, repeat_contig_name
                 #             st_chr[0] = '+' #
                 #             ed_chr[0] = '+'
 
-                assert(contig_data[st][CTG_NAM] == contig_data[st][CTG_NAM])   
-                if contig_data[st][CTG_CENSAT] != '0' and contig_data[ed][CTG_CENSAT] != '0' and contig_data[st][CTG_NAM] in div_repeat_paf:
-                    s = e+1
-                    continue
-
-                st_chr[0] = ed_chr[0] = '='
+                assert(contig_data[st][CTG_NAM] == contig_data[st][CTG_NAM])
+                # if contig_data[st][CTG_CENSAT] != '0' and contig_data[ed][CTG_CENSAT] != '0' and contig_data[st][CTG_NAM] in div_repeat_paf_name:
+                #     s = e+1
+                #     continue
+                st_chr[0] = ed_chr[0] = '='  
 
                 st_chr = tuple(st_chr)
                 ed_chr = tuple(ed_chr)
@@ -630,7 +651,7 @@ def extract_nclose_node(contig_data : list, bnd_contig : set, repeat_contig_name
                 else:
                     nclose_dict[contig_data[s][CTG_NAM]] = (st, ed)
         s = e+1
-    return nclose_dict, nclose_start_compress, nclose_end_compress, fake_bnd
+    return nclose_dict, nclose_start_compress, nclose_end_compress, fake_bnd, all_nclose_compress
 
 def make_virtual_ord_ctg(contig_data, fake_bnd):
     contig_data_size = len(contig_data)
@@ -644,7 +665,7 @@ def make_virtual_ord_ctg(contig_data, fake_bnd):
             vctg_rng = fake_bnd[curr_ctg]
             for i in range(vctg_rng[0], vctg_rng[1] +1):
                 temp_list = list(contig_data[i])
-                temp_list[CTG_NAM] = temp_list[CTG_NAM] + "_v"
+                temp_list[CTG_NAM] = temp_list[CTG_NAM][:-1] + "1l"
                 temp_list[CTG_TYP] = 3
                 temp_list[CTG_STRND] = idx + contig_data_size
                 temp_list[CTG_ENDND] = idx + vctg_rng[1] - vctg_rng[0] + contig_data_size
@@ -866,7 +887,7 @@ parser.add_argument("reference_fai_path",
                         help="Path to the chromosome information file.")
 
 parser.add_argument("censat_bed_path", 
-                        help="Path to the censat repeat information file.")
+                    help="Path to the censat repeat information file.")
 
 parser.add_argument("graph_file_txt", 
                     help="Path to the graph text file.")
@@ -877,7 +898,7 @@ parser.add_argument("--orignal_paf_loc", nargs='+',
 
 args = parser.parse_args()
 
-# t = "python 04_Build_Breakend_Graph_Limited.py 20_acc_pipe/OZ.p/OZ.p.aln.paf.ppc.paf public_data/chm13v2.0.fa.fai public_data/chm13v2.0_censat_v2.1.m.bed 20_acc_pipe/OZ.p/OZ.p.aln.paf.ppc.paf.op.graph.txt 30_skype_pipe/OZ_03_49_27 --orignal_paf_loc 20_acc_pipe/OZ.p/OZ.p.paf 20_acc_pipe/OZ.a/OZ.a.paf"
+# t = "python 04_Build_Breakend_Graph_Limited.py 20_acc_pipe/OZ.p/OZ.p.aln.paf.ppc.paf public_data/chm13v2.0.fa.fai public_data/chm13v2.0_censat_v2.1.m.bed 20_acc_pipe/OZ.p/OZ.p.aln.paf.ppc.paf.op.graph.txt 30_skype_pipe/OZ_23_31_14 --orignal_paf_loc 20_acc_pipe/OZ.p/OZ.p.paf 20_acc_pipe/OZ.a/OZ.a.paf"
 # t = t.split(" ")
 # args = parser.parse_args(t[2:])
 
@@ -912,18 +933,25 @@ chr_rev_corr[contig_data_size + 2*CHROMOSOME_COUNT - 1] = 'chrXb'
 
 graph_adjacency = import_data(graph_data)
 
-rpt_con = extract_all_repeat_contig(contig_data, CTG_RPTCASE)
+telo_contig = extract_telomere_connect_contig(contig_data, graph_adjacency)
+
+telo_set = set()
+
+for i in telo_contig:
+    for j in telo_contig[i]:
+        telo_set.add(j[1])
+
+rpt_con = extract_all_repeat_contig(contig_data, CTG_RPTCASE, NON_REPEAT_NOISE_RATIO)
 rpt_censat_con = extract_all_repeat_contig(contig_data, CTG_CENSAT)
 rpt_censat_con = check_censat_contig(rpt_censat_con, ORIGNAL_PAF_LOC_LIST)
 repeat_censat_data = import_repeat_data(CENSAT_PATH)
 
 bnd_contig = extract_bnd_contig(contig_data)
 
-telo_contig = extract_telomere_connect_contig(contig_data, graph_adjacency)
 
 # Type 1, 2, 4에 대해서 
-nclose_nodes, nclose_start_compress, nclose_end_compress, vctg_dict = \
-    extract_nclose_node(contig_data, bnd_contig, rpt_con, rpt_censat_con, repeat_censat_data, ORIGNAL_PAF_LOC_LIST)
+nclose_nodes, nclose_start_compress, nclose_end_compress, vctg_dict, all_nclose_comp = \
+    extract_nclose_node(contig_data, bnd_contig, rpt_con, rpt_censat_con, repeat_censat_data, ORIGNAL_PAF_LOC_LIST, telo_set)
 
 virtual_ordinary_contig = make_virtual_ord_ctg(contig_data, vctg_dict)
 with open(f"{PREFIX}/virtual_ordinary_contig.txt", "wt") as f:
@@ -940,10 +968,35 @@ for i in nclose_nodes:
     contig_b = contig_data[pair[1]]
     if chr2int(contig_a[CHR_NAM]) <= chr2int(contig_b[CHR_NAM]):
         nclose_type[(contig_a[CHR_NAM], contig_b[CHR_NAM])].append(pair)
-
     else:
         nclose_type[(contig_b[CHR_NAM], contig_a[CHR_NAM])].append((pair[1], pair[0]))
 
+all_nclose_type = defaultdict(list)
+
+for i in all_nclose_comp:
+    pairs = all_nclose_comp[i]
+    for pair in pairs:
+        contig_a = contig_data[pair[0]]
+        contig_b = contig_data[pair[1]]
+        if chr2int(contig_a[CHR_NAM]) <= chr2int(contig_b[CHR_NAM]):
+            all_nclose_type[(contig_a[CHR_NAM], contig_b[CHR_NAM])].append(pair)
+
+    else:
+        all_nclose_type[(contig_b[CHR_NAM], contig_a[CHR_NAM])].append((pair[1], pair[0]))
+
+with open(f"{PREFIX}/all_nclose_nodes_list.txt", "wt") as f:
+    for i in all_nclose_type:
+        print(f"{i[0]}, {i[1]}, {len(all_nclose_type[i])}", file=f)
+        for pair in all_nclose_type[i]:
+            contig_a = contig_data[pair[0]]
+            contig_b = contig_data[pair[1]]
+            list_a = [contig_a[CTG_NAM], contig_a[CTG_DIR], contig_a[CHR_STR], contig_a[CHR_END]]
+            list_b = [contig_b[CTG_NAM], contig_b[CTG_DIR], contig_b[CHR_STR], contig_b[CHR_END]]
+            if contig_a[CTG_NAM] in rpt_con:
+                print(list_a, list_b, "all_repeat", file=f)
+            else:
+                print(list_a, list_b, file=f)
+        print("", file=f)
 
 st_compress = dict()
 for ddict in nclose_start_compress.values():
@@ -990,7 +1043,7 @@ for ddict in nclose_end_compress.values():
                 ed_compress[pair[0]] = ctg1_idx
 
 
-with open(f"{PREFIX}/nclose_nodes_list.txt", "wt") as f:
+with open(f"{PREFIX}/compressed_nclose_nodes_list.txt", "wt") as f:
     for i in nclose_type:
         print(f"{i[0]}, {i[1]}, {len(nclose_type[i])}", file=f)
         st_flag = False
@@ -1014,10 +1067,14 @@ with open(f"{PREFIX}/nclose_nodes_list.txt", "wt") as f:
         print("", file=f)
 
 
+nclose_node_count = 0
+telo_node_count = 0
+
 with open(f"{PREFIX}/telomere_connected_list.txt", "wt") as f:
     for i in telo_contig:
         print(i, file=f)
         for j in telo_contig[i]:
+            telo_node_count += 1
             print(contig_data[j[1]], file=f)
         print("", file=f)
 # print("start_compress")
@@ -1029,20 +1086,17 @@ with open(f"{PREFIX}/telomere_connected_list.txt", "wt") as f:
 #      print(contig_data[i][:CHR_END+1])
 #      print(contig_data[ed_compress[i]][:CHR_END+1])
 
-#exit(1)
-
-for i in nclose_start_compress:
-    pass
-
 
 bnd_graph_adjacency = initialize_bnd_graph(contig_data, nclose_nodes, telo_contig)
 
 
-with open(f"{PREFIX}/nclose_nodes.txt", "wt") as f: 
-    for i in nclose_nodes:
-        print(i, nclose_nodes[i], contig_data[nclose_nodes[i][0]][CTG_TYP], file=f)
 
-with open(f"{PREFIX}/bnd_graph.txt", "wt") as f: 
+with open(f"{PREFIX}/nclose_nodes_index.txt", "wt") as f: 
+    for i in nclose_nodes:
+        nclose_node_count += 2
+        print(i, nclose_nodes[i][0], nclose_nodes[i][1], contig_data[nclose_nodes[i][0]][CTG_TYP], file=f)
+
+with open(f"{PREFIX}/bnd_only_graph.txt", "wt") as f: 
     for i in bnd_graph_adjacency:
         print(i, bnd_graph_adjacency[i], file=f)
 
@@ -1101,15 +1155,16 @@ for node in bnd_graph_adjacency:
                         edge_limit = tuple(list(edge)+[j, k+1])
                         G.add_weighted_edges_from([(node_limit, edge_limit, d)])
             else:
-                for j in range(0, CHR_CHANGE_LIMIT):
+                for j in range(0, CHR_CHANGE_LIMIT+1):
                     for k in range(0, DIR_CHANGE_LIMIT+1):
                         node_limit = tuple(list(node)+[j, k])
                         edge_limit = tuple(list(edge)+[j, k])
                         G.add_weighted_edges_from([(node_limit, edge_limit, d)])
 
-print(G)
 save_loc = PREFIX + '/00_raw'
-print(PREFIX)
+print("Now saving results in folder : " + PREFIX)
+print(f"NClose node count : {nclose_node_count}, Telomere connected node count : {telo_node_count}")
+print("Dimension of Breakend Graph :", G)
 
 def run_graph(data):
     # path_cluster = set()
@@ -1164,6 +1219,7 @@ def run_graph(data):
                         contig_data[path[path_len-2][1]][CHR_END] - contig_data[path[path_len-2][1]][CHR_STR]
                     contig_set =  set()
                     contig_set.add(path[path_len-2][1])
+
                     nclose_st_cluster_set = set()
                     nclose_ed_cluster_set = set()
                     cluster_overlap_flag = False
@@ -1180,8 +1236,10 @@ def run_graph(data):
                             nclose_ed_cluster_set.add(ed_compress[path[node][1]])
                     if cluster_overlap_flag:
                         continue
-                                
+                    
+                    censat_node_vis = 0
                     contig_overuse_flag = False
+                    censat_overuse_flag = False
                     for node in range(1, path_len-2):
                         if path[node][1] in contig_set:
                             contig_overuse_flag = True
@@ -1191,6 +1249,11 @@ def run_graph(data):
                         contig_e = contig_data[path[node+1][1]]
                         ds = contig_s[CHR_END] - contig_s[CHR_STR]
                         de = contig_e[CHR_END] - contig_e[CHR_STR]
+                        if contig_s[CTG_CENSAT] != '0' and contig_e[CTG_CENSAT] != '0':
+                                censat_node_vis += 1
+                                if censat_node_vis >= CENSAT_VISIT_LIMIT:
+                                    censat_overuse_flag = True
+                                    break
                         if contig_s[CTG_NAM] == contig_e[CTG_NAM]:
                             if path[node][1] < path[node+1][1]:
                                 for same_contig in range(path[node][1]+1, path[node+1][1]):
@@ -1209,7 +1272,7 @@ def run_graph(data):
                                 de = contig_e[CHR_END] - contig_e[CHR_STR]
                                 path_counter[contig_s[CHR_NAM]] += \
                                 distance_checker(contig_s, contig_e) + ds + de
-                    if contig_overuse_flag:
+                    if contig_overuse_flag or censat_overuse_flag:
                         continue
                     
                     total_path_ref_len = sum(path_counter.values())

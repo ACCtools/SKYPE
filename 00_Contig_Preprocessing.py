@@ -2,7 +2,10 @@ import os
 import sys
 import argparse
 import pandas as pd
+import numpy as np
 import copy
+import itertools
+import re
 
 from collections import defaultdict
 from collections import Counter
@@ -28,15 +31,28 @@ CTG_RPTCASE = 17
 CTG_CENSAT = 18
 CTG_MAINFLOWDIR = 19
 CTG_MAINFLOWCHR = 20
+CTG_GLOBALIDX = 21
+
+DIR_FOR = 1
+DIR_BAK = 0
 
 K = 1000
+M = 1000 * K
 INF = 10000000000
 CONTIG_MINIMUM_SIZE = 100*K
 BND_CONTIG_BOUND = 0.1
 RPT_BND_CONTIG_BOUND = 0.2
 CHROMOSOME_COUNT = 23
 MAPQ_BOUND = 60
+TELOMERE_EXPANSION = 5 * K
+CENSAT_COMPRESSABLE_THRESHOLD = 1e6
 
+FORCE_TELOMERE_THRESHOLD = 10*K
+TELOMERE_CLUSTER_THRESHOLD = 500*K
+
+FLANK_SIZE_BP = 3*M
+MIN_FLANK_SIZE_BP = 1*M
+BREAKEND_CEN_RATIO_THRESHOLD = 1.4
 
 def dbg() :
     print("hi")
@@ -74,12 +90,15 @@ def import_telo_data(file_path : str, chr_len : dict) -> dict :
         for i in int_induce_idx:
             temp_list[i] = int(temp_list[i])
         if temp_list[0]!=telo_data[-1][0]:
+            temp_list[2]+=TELOMERE_EXPANSION
             temp_list.append('f')
         else:
             if temp_list[1]>chr_len[temp_list[0]]/2:
+                temp_list[1]-=TELOMERE_EXPANSION
                 temp_list.append('b')
             else:
                 temp_list.append('f')
+                temp_list[2]+=TELOMERE_EXPANSION
         telo_data.append(tuple(temp_list))
     return telo_data[1:]
 
@@ -90,6 +109,21 @@ def import_repeat_data(file_path : str) -> dict :
         temp_list = curr_data.split("\t")
         repeat_data[temp_list[0]].append((int(temp_list[1]), int(temp_list[2])))
     return repeat_data
+
+
+def import_censat_repeat_data(file_path : str) -> dict :
+    fai_file = open(file_path, "r")
+    repeat_data = defaultdict(list)
+    for curr_data in fai_file:
+        temp_list = curr_data.split("\t")
+        ref_data = (int(temp_list[1]), int(temp_list[2]))
+        if abs(ref_data[1] - ref_data[0]) > CENSAT_COMPRESSABLE_THRESHOLD:
+            repeat_data[temp_list[0]].append(ref_data)
+    return repeat_data
+
+
+def ctg_name_to_int(ctg_name):
+    return re.search(r'\d+$', ctg_name[:-1]).group()
 
 
 def distance_checker(node_a : tuple, node_b : tuple) -> int :
@@ -103,6 +137,9 @@ def inclusive_checker(contig_node : tuple, telomere_node : tuple) -> bool :
         return True
     else:
         return False
+    
+def telo_distance_checker(node: tuple, telo: tuple) -> int :
+    return min(abs(telo[CHR_STR] - node[CHR_END]), abs(telo[CHR_END] - node[CHR_STR]))
     
 def label_node(contig_data : list, telo_data) -> list :
     label = []
@@ -155,9 +192,9 @@ def preprocess_telo(contig_data : list, node_label : list) -> list :
             curr_contig_ed = i-1
             front_telo_bound = curr_contig_st
             end_telo_bound = curr_contig_ed
-            while node_label[front_telo_bound][0] != '0' and front_telo_bound<=curr_contig_ed:
+            while front_telo_bound<=curr_contig_ed and node_label[front_telo_bound][0] != '0' :
                 front_telo_bound+=1
-            while node_label[end_telo_bound][0] != '0' and end_telo_bound>=curr_contig_st:
+            while end_telo_bound>=curr_contig_st and node_label[end_telo_bound][0] != '0':
                 end_telo_bound-=1
             st = curr_contig_st
             ed = curr_contig_ed
@@ -303,6 +340,252 @@ def preprocess_telo(contig_data : list, node_label : list) -> list :
     contig_data = contig_data[0:-1]
     return telo_preprocessed_contig, report_case, telo_connect_info
 
+def initial_graph_build(contig_data : list, telo_data : dict) -> list :
+    '''
+    Initialize
+    '''
+    contig_data_size = len(contig_data)
+    chr_corr = {}
+    chr_rev_corr = {}
+    contig_data_size = len(contig_data)
+    for i in range(1, CHROMOSOME_COUNT):
+        chr_corr['chr'+str(i)+'f'] = contig_data_size + i - 1
+        chr_rev_corr[contig_data_size + i - 1] = 'chr'+str(i)+'f'
+    chr_corr['chrXf'] = contig_data_size + CHROMOSOME_COUNT - 1
+    chr_corr['chrYf'] = contig_data_size + CHROMOSOME_COUNT - 1
+    chr_rev_corr[contig_data_size + CHROMOSOME_COUNT - 1] = 'chrXf'
+    for i in range(1, CHROMOSOME_COUNT):
+        chr_corr['chr'+str(i)+'b'] = contig_data_size + CHROMOSOME_COUNT + i - 1
+        chr_rev_corr[contig_data_size + CHROMOSOME_COUNT + i - 1] = 'chr'+str(i)+'b'
+    chr_corr['chrXb'] = contig_data_size + 2*CHROMOSOME_COUNT - 1
+    chr_corr['chrYb'] = contig_data_size + 2*CHROMOSOME_COUNT - 1
+    chr_rev_corr[contig_data_size + 2*CHROMOSOME_COUNT - 1] = 'chrXb'
+
+    adjacency = [[[] for _ in range(contig_data_size+CHROMOSOME_COUNT*2)], [[] for _ in range(contig_data_size+CHROMOSOME_COUNT*2)]]
+    '''
+    Algorithm
+    '''
+    curr_contig_st = 0
+    while curr_contig_st<contig_data_size:
+        curr_contig_ed = contig_data[curr_contig_st][CTG_ENDND]
+        if curr_contig_st != curr_contig_ed:
+            if contig_data[curr_contig_st][CTG_TELCON] != '0':
+                dest = chr_corr[contig_data[curr_contig_st][CTG_TELCON]]
+                adjacency[DIR_FOR][dest].append([DIR_FOR, curr_contig_st, 0])
+                adjacency[DIR_FOR][curr_contig_st].append([DIR_FOR, dest, 0])
+                adjacency[DIR_BAK][curr_contig_st].append([DIR_FOR, dest, 0])
+            if contig_data[curr_contig_ed][CTG_TELCON] != '0':
+                dest = chr_corr[contig_data[curr_contig_ed][CTG_TELCON]]
+                adjacency[DIR_FOR][curr_contig_ed].append([DIR_FOR, dest, 0])
+                adjacency[DIR_BAK][curr_contig_ed].append([DIR_FOR, dest, 0])
+                adjacency[DIR_FOR][dest].append([DIR_BAK, curr_contig_ed, 0])
+        else:
+            if contig_data[curr_contig_st][CTG_TELCON] != '0':
+                if contig_data[curr_contig_st][CTG_TELCON][-1]=='f':
+                    dest = chr_corr[contig_data[curr_contig_st][CTG_TELCON]]
+                    adjacency[DIR_FOR][dest].append([DIR_FOR, curr_contig_st, 0])
+                    adjacency[DIR_BAK][curr_contig_st].append([DIR_FOR, dest, 0])
+                    adjacency[DIR_FOR][curr_contig_st].append([DIR_FOR, dest, 0])
+                else:
+                    dest = chr_corr[contig_data[curr_contig_ed][CTG_TELCON]]
+                    adjacency[DIR_FOR][curr_contig_ed].append([DIR_FOR, dest, 0])
+                    adjacency[DIR_BAK][curr_contig_ed].append([DIR_FOR, dest, 0])
+                    adjacency[DIR_FOR][dest].append([DIR_BAK, curr_contig_ed, 0])
+
+        curr_contig_st = curr_contig_ed + 1
+    '''
+    If telomere node has 0 connection, connect with closest node with same chromosome type.
+    '''
+    end_node_list = set()
+    for i in contig_data:
+        end_node_list.add((i[CTG_STRND], i[CTG_ENDND])) 
+    for i in range(contig_data_size, contig_data_size + CHROMOSOME_COUNT*2):
+        curr_telo_set = set()
+        now_telo = chr_rev_corr[i]
+        flag = False
+        for j in range(2):
+            for _ in adjacency[j][i]:
+                # 10K 이내면 없애기
+                if i < contig_data_size + CHROMOSOME_COUNT:
+                    if contig_data[_[1]][CHR_STR] < telo_data[now_telo][0]+FORCE_TELOMERE_THRESHOLD:
+                        flag = True
+                else:
+                    if contig_data[_[1]][CHR_END] > telo_data[now_telo][1]-FORCE_TELOMERE_THRESHOLD:
+                        flag = True
+                curr_telo_set.add(_[1])
+        if flag:
+            continue
+        telo_dist = INF
+        telo_connect_node = 0
+        telo_dir = 0
+        temp_contig = (0, 0, 0, 0, 0, 0, 0, telo_data[now_telo][0], telo_data[now_telo][1])
+        #우리가 연결하는 텔로미어 노드
+        if now_telo[-1]=='f':
+            for st, ed in end_node_list:
+                # 텔로미어와 겹치지 않으며, 배제된 노드가 아니고, 중복이 아니며, + 방향이고, 거리가 갱신가능한 경우
+                if contig_data[st][CHR_NAM] == now_telo[0:-1] \
+                and contig_data[st][CTG_TELDIR] == '0' \
+                and st not in curr_telo_set \
+                and telo_dist > telo_distance_checker(contig_data[st], temp_contig) \
+                and contig_data[st][CTG_DIR]=='+':
+                    telo_connect_node = st
+                    telo_dist = telo_distance_checker(contig_data[st], temp_contig)
+                    telo_dir = '+'
+                if contig_data[ed][CHR_NAM] == now_telo[0:-1] \
+                and contig_data[ed][CTG_TELDIR] == '0' \
+                and ed not in curr_telo_set \
+                and telo_dist > telo_distance_checker(contig_data[ed], temp_contig) \
+                and contig_data[ed][CTG_DIR]=='-':
+                    telo_connect_node = ed
+                    telo_dist = telo_distance_checker(contig_data[ed], temp_contig)
+                    telo_dir = '-'
+            if telo_dir == '+':
+                adjacency[DIR_FOR][i].append([DIR_FOR, telo_connect_node, telo_dist])
+                adjacency[DIR_BAK][telo_connect_node].append([DIR_FOR, i, telo_dist])
+            else:
+                adjacency[DIR_FOR][i].append([DIR_BAK, telo_connect_node, telo_dist])
+                adjacency[DIR_FOR][telo_connect_node].append([DIR_FOR, i, telo_dist])
+        else:
+            for st, ed in end_node_list:
+                if contig_data[st][CHR_NAM] == now_telo[0:-1] \
+                and contig_data[st][CTG_TELDIR] == '0' \
+                and st not in curr_telo_set \
+                and telo_dist > telo_distance_checker(contig_data[st], temp_contig) \
+                and contig_data[st][CTG_DIR]=='-':
+                    telo_connect_node = st
+                    telo_dist = telo_distance_checker(contig_data[st], temp_contig)
+                    telo_dir = '-'
+                if contig_data[ed][CHR_NAM] == now_telo[0:-1] \
+                and contig_data[ed][CTG_TELDIR] == '0' \
+                and ed not in curr_telo_set \
+                and telo_dist > telo_distance_checker(contig_data[ed], temp_contig) \
+                and contig_data[ed][CTG_DIR]=='+':
+                    telo_connect_node = ed
+                    telo_dist = telo_distance_checker(contig_data[ed], temp_contig)
+                    telo_dir = '+'
+            if telo_dir == '+':
+                adjacency[DIR_FOR][i].append([DIR_BAK, telo_connect_node, telo_dist])
+                adjacency[DIR_FOR][telo_connect_node].append([DIR_FOR, i, telo_dist])
+                adjacency[DIR_BAK][telo_connect_node].append([DIR_FOR, i, telo_dist])
+            else:
+                adjacency[DIR_FOR][i].append([DIR_FOR, telo_connect_node, telo_dist])
+                adjacency[DIR_BAK][telo_connect_node].append([DIR_FOR, i, telo_dist])
+                adjacency[DIR_FOR][telo_connect_node].append([DIR_FOR, i, telo_dist])
+    return adjacency
+
+def edge_optimization(contig_data : list, contig_adjacency : list, telo_dict : dict) -> list :
+    chr_corr = {}
+    chr_rev_corr = {}
+    contig_data_size = len(contig_data)
+    for i in range(1, CHROMOSOME_COUNT):
+        chr_corr['chr'+str(i)+'f'] = contig_data_size + i - 1
+        chr_rev_corr[contig_data_size + i - 1] = 'chr'+str(i)+'f'
+    chr_corr['chrXf'] = contig_data_size + CHROMOSOME_COUNT - 1
+    chr_corr['chrYf'] = contig_data_size + CHROMOSOME_COUNT - 1
+    chr_rev_corr[contig_data_size + CHROMOSOME_COUNT - 1] = 'chrXf'
+    for i in range(1, CHROMOSOME_COUNT):
+        chr_corr['chr'+str(i)+'b'] = contig_data_size + CHROMOSOME_COUNT + i - 1
+        chr_rev_corr[contig_data_size + CHROMOSOME_COUNT + i - 1] = 'chr'+str(i)+'b'
+    chr_corr['chrXb'] = contig_data_size + 2*CHROMOSOME_COUNT - 1
+    chr_corr['chrYb'] = contig_data_size + 2*CHROMOSOME_COUNT - 1
+    chr_rev_corr[contig_data_size + 2*CHROMOSOME_COUNT - 1] = 'chrXb'
+    contig_pair_nodes = defaultdict(list)
+    optimized_adjacency = [[[] for _ in range(contig_data_size + CHROMOSOME_COUNT*2)], [[] for _ in range(contig_data_size + CHROMOSOME_COUNT*2)]]
+    for _ in range(2):
+        for i in range(len(contig_data)+CHROMOSOME_COUNT*2):
+            if i==7121:
+                t=1
+            for edge in contig_adjacency[_][i]:
+                if edge[1] >= contig_data_size or i >= contig_data_size:
+                    optimized_adjacency[_][i].append(edge)
+                    continue
+                a = (ctg_name_to_int(contig_data[i][CTG_NAM]))
+                b = (ctg_name_to_int(contig_data[edge[1]][CTG_NAM]))
+                if int(a)>int(b):
+                    contig_pair_nodes[(contig_data[edge[1]][CTG_NAM], contig_data[i][CTG_NAM])] \
+                    .append([edge[1], i])
+                else:
+                    contig_pair_nodes[(contig_data[i][CTG_NAM], contig_data[edge[1]][CTG_NAM])]\
+                    .append([i, edge[1]])
+    minmaxnode_contigpair = {}
+    for pair in contig_pair_nodes:
+        min_first_contig = INF
+        max_first_contig = 0
+        min_second_contig = INF
+        max_second_contig = 0
+        for edge in contig_pair_nodes[pair]:
+            min_first_contig = min(min_first_contig, edge[0])
+            max_first_contig = max(max_first_contig, edge[0])
+            min_second_contig = min(min_second_contig, edge[1])
+            max_second_contig = max(max_second_contig, edge[1])
+            minmaxnode_contigpair[pair] = [min_first_contig, max_first_contig, min_second_contig, max_second_contig]
+    contig_data_size = len(contig_data)
+    for i in range(2):
+        for j in range(contig_data_size):
+            first_contig_name = contig_data[j][CTG_NAM]
+            fcn_int = int(ctg_name_to_int(first_contig_name))
+            for edge in contig_adjacency[i][j]:
+                if edge[1] >= contig_data_size:
+                    continue
+                second_contig_name = contig_data[edge[1]][CTG_NAM]
+                scn_int = int(ctg_name_to_int(second_contig_name))
+                if fcn_int == scn_int:
+                    optimized_adjacency[i][j].append(edge)
+                elif fcn_int < scn_int:
+                    if j in minmaxnode_contigpair[(first_contig_name, second_contig_name)][0:2]\
+                    or edge[1] in minmaxnode_contigpair[(first_contig_name, second_contig_name)][2:4]:
+                        optimized_adjacency[i][j].append(edge)
+                else:
+                    if edge[1] in minmaxnode_contigpair[(second_contig_name, first_contig_name)][0:2] \
+                    or j in minmaxnode_contigpair[(second_contig_name, first_contig_name)][2:4]:
+                        optimized_adjacency[i][j].append(edge)
+    for i in range(contig_data_size, contig_data_size+2*CHROMOSOME_COUNT):
+        telo_name = chr_rev_corr[i]
+        telo_range = telo_dict[telo_name]
+        for j in range(2):
+            using_edge = []
+            now_edge = [-1, 0, 0]
+            for edge in optimized_adjacency[j][i]:
+                if telo_name[-1]=='f':
+                    if contig_data[edge[1]][CHR_STR]<=TELOMERE_CLUSTER_THRESHOLD:
+                        if now_edge[0]<0:
+                            now_edge = edge
+                        else:
+                            if contig_data[now_edge[1]][CHR_STR] > contig_data[edge[1]][CHR_STR]:
+                                now_edge = edge
+                            elif contig_data[now_edge[1]][CHR_STR] == contig_data[edge[1]][CHR_STR]:
+                                if contig_data[now_edge[1]][CTG_LEN] > contig_data[edge[1]][CTG_LEN]:
+                                    now_edge = edge
+                    else:
+                        using_edge.append(edge)
+                else:
+                    if contig_data[edge[1]][CHR_END]>=telo_range[1]-TELOMERE_CLUSTER_THRESHOLD:
+                        if now_edge[0]<0:
+                            now_edge = edge
+                        else:
+                            if contig_data[now_edge[1]][CHR_END] < contig_data[edge[1]][CHR_END]:
+                                now_edge = edge
+                            elif contig_data[now_edge[1]][CHR_END] == contig_data[edge[1]][CHR_END]:
+                                if contig_data[now_edge[1]][CTG_LEN] == contig_data[edge[1]][CTG_LEN]:
+                                    now_edge = edge
+                    else:
+                        using_edge.append(edge)
+            if now_edge == [-1, 0, 0]:
+                pass
+            else:
+                using_edge.append(now_edge)
+            optimized_adjacency[j][i] = using_edge
+        
+    telo_connected_set = set()
+    telo_connected_dict = dict()
+    for j in range(2):
+        for i in range(contig_data_size, contig_data_size + 2*(CHROMOSOME_COUNT)):
+            for k in optimized_adjacency[j][i]:
+                telo_connected_set.add(k[1])
+                telo_connected_dict[k[1]] = chr_rev_corr[i]
+
+    return telo_connected_set, telo_connected_dict
+
 def calc_ratio(contig_data : list) -> dict:
     contig_data_size = len(contig_data)
     contig_data.append((0, 0, 0, 0, 0, 0, 0, 0, 0))
@@ -360,11 +643,11 @@ def calc_chukji(contig_data : list) -> dict:
     return ref_qry_ratio, chukji          
 
 def find_mainflow(contig_data : list) -> dict:
-    total_contig_count = len(contig_data)
+    contig_data_size = len(contig_data)
     mainflow_dict = {}
     st = 0
     ed = contig_data[st][CTG_ENDND]
-    while st<total_contig_count:
+    while st<contig_data_size:
         ed = contig_data[st][CTG_ENDND]
         ref_length_counter = Counter()
         for i in range(st, ed+1):
@@ -556,6 +839,314 @@ def preprocess_repeat(contig_data : list) -> list:
         curr_contig_st = curr_contig_ed+1
     return repeat_preprocessed_contig
 
+def chr2int(x):
+    chrXY2int = {'chrX' : 24, 'chrY' : 25}
+    if x in chrXY2int:
+        return chrXY2int[x]
+    else:
+        return int(x[3:])
+    
+def weighted_avg_meandepth(chrom_df, region_start, region_end):
+    overlapping = chrom_df[(chrom_df['nd'] >= region_start) & (chrom_df['st'] <= region_end)]
+    if overlapping.empty:
+        return None
+    total_weight = 0
+    weighted_sum = 0
+    for _, row in overlapping.iterrows():
+        overlap_start = max(row['st'], region_start)
+        overlap_end = min(row['nd'], region_end)
+        if overlap_start <= overlap_end:
+            length = overlap_end - overlap_start + 1
+            weighted_sum += row['meandepth'] * length
+            total_weight += length
+    return weighted_sum / total_weight if total_weight > 0 else None
+
+
+def find_breakend_centromere(repeat_censat_data : dict, chr_len : list, df : pd.DataFrame):
+    results = []
+
+    # Remove unused Y
+    ydf = df.query('chr == "chrY"')
+    ydepth = np.mean(ydf['meandepth'].to_numpy())
+
+    depth = np.mean(df['meandepth'].to_numpy())
+
+    sd, bd = sorted([depth, ydepth])
+    yratio = bd / sd
+    if yratio > 2:
+        df = df.query('chr != "chrY"')
+
+    # 각 염색체별 repeat 영역에 대해 flanking 영역 계산
+    for chrom, intervals in repeat_censat_data.items():
+        chrom_length = chr_len.get(chrom)
+        if chrom_length is None:
+            continue
+        chrom_df = df[df['chr'] == chrom]
+        if chrom_df.empty:
+            continue
+
+        for rep in intervals:
+            rep_start_0, rep_end_0 = rep  # 0-indexed 좌표
+            
+            # 좌측 flanking: repeat의 1-indexed 시작은 rep_start_0 + 1
+            if rep_start_0 > 0:
+                left_flank_end = rep_start_0  # repeat 시작 전 마지막 base (1-indexed)
+                left_flank_start = max(1, (rep_start_0 + 1) - FLANK_SIZE_BP)
+
+                if left_flank_end < left_flank_start or (left_flank_end - left_flank_start + 1) < MIN_FLANK_SIZE_BP:
+                    left_flank_start = None
+                    left_flank_end = None
+                    left_weighted = None
+                else:
+                    left_weighted = weighted_avg_meandepth(chrom_df, left_flank_start, left_flank_end)
+            else:
+                left_flank_start = None
+                left_flank_end = None
+                left_weighted = None
+
+            # 우측 flanking: repeat의 끝 이후 첫 base부터
+            if rep_end_0 < chrom_length:
+                right_flank_start = rep_end_0 + 1
+                right_flank_end = min(chrom_length, rep_end_0 + FLANK_SIZE_BP)
+
+                if right_flank_end < right_flank_start or (right_flank_end - right_flank_start + 1) < MIN_FLANK_SIZE_BP:
+                    right_flank_start = None
+                    right_flank_end = None
+                    right_weighted = None
+                else:
+                    right_weighted = weighted_avg_meandepth(chrom_df, right_flank_start, right_flank_end)
+            else:
+                right_flank_start = None
+                right_flank_end = None
+                right_weighted = None
+
+            # 양쪽 flanking 영역 중 하나라도 존재하지 않으면 해당 repeat를 건너뜁니다.
+            if left_flank_start is None or right_flank_start is None:
+                continue
+            
+            if left_weighted >= right_weighted:
+                weighted_ratio = left_weighted / right_weighted
+            else:
+                weighted_ratio = right_weighted / left_weighted
+
+            weighted_diff = abs(right_weighted - left_weighted)
+            
+            # results.append({
+            #     'chr': chrom,
+            #     'repeat_start': rep_start_0,
+            #     'repeat_end': rep_end_0,
+            #     'left_weighted_meandepth': left_weighted,
+            #     'right_weighted_meandepth': right_weighted,
+            #     'weighted_ratio': weighted_ratio,
+            #     'weighted_diff': weighted_diff
+            # })
+
+            results.append({
+                'chr': chrom,
+                'repeat_start_0': rep_start_0,
+                'repeat_end_0': rep_end_0,
+                'left_flank_start': left_flank_start,
+                'left_flank_end': left_flank_end,
+                'left_weighted_meandepth': left_weighted,
+                'right_flank_start': right_flank_start,
+                'right_flank_end': right_flank_end,
+                'right_weighted_meandepth': right_weighted,
+                'weighted_ratio': weighted_ratio,
+                'weighted_diff': weighted_diff
+            })
+
+    result_df = pd.DataFrame(results)
+    result_df = result_df[result_df['weighted_ratio']>=BREAKEND_CEN_RATIO_THRESHOLD]
+
+    censat_bnd_chr_list = sorted(set(result_df['chr']), key=lambda t : chr2int(t))
+    print(f'Breakend censat chr : {' '.join(censat_bnd_chr_list)}')
+
+    right_df = result_df[result_df['right_weighted_meandepth'] > result_df['left_weighted_meandepth']]
+    left_df = result_df[result_df['left_weighted_meandepth'] > result_df['right_weighted_meandepth']]
+    vtg_list = []
+    cnt = 0
+    for row1, row2 in itertools.combinations(right_df.itertuples(index = False), 2):
+        cnt+=1
+        N = int(CENSAT_COMPRESSABLE_THRESHOLD//2)
+        mid_row1_censat = int(row1.repeat_start_0 + row1.repeat_end_0)//2
+        mid_row2_censat = int(row2.repeat_start_0 + row2.repeat_end_0)//2
+
+        temp_node1 = ['vtg'+f"{cnt:0{6}d}l", N, 0, N//2, '+', row1.chr, 
+                     chr_len[row1.chr], mid_row1_censat - N//2, mid_row1_censat, 
+                     60, 1, (cnt-1)*2, (cnt-1)*2+1, 0, 0, 0, 0, 0, 0, '+', row1.chr, f"2.{(cnt-1)*2}"]
+        
+        temp_node2 = ['vtg'+f"{cnt:0{6}d}l", N, N//2, N, '+', row2.chr,
+                     chr_len[row2.chr], mid_row2_censat, mid_row2_censat + N//2, 
+                     60, 1, (cnt-1)*2, (cnt-1)*2+1, 0, 0, 0, 0, 0, 0, '+', row1.chr, f"2.{(cnt-1)*2+1}"]
+        
+        vtg_list.append(temp_node1)
+        vtg_list.append(temp_node2)
+
+
+    for row1, row2 in itertools.combinations(left_df.itertuples(index = False), 2):
+        cnt+=1
+        N = int(CENSAT_COMPRESSABLE_THRESHOLD//2)
+        mid_row1_censat = int(row1.repeat_start_0 + row1.repeat_end_0)//2
+        mid_row2_censat = int(row2.repeat_start_0 + row2.repeat_end_0)//2
+
+        temp_node1 = ['vtg'+f"{cnt:0{6}d}l", N, 0, N//2, '+', row1.chr, 
+                     chr_len[row1.chr], mid_row1_censat - N//2, mid_row1_censat, 
+                     60, 1, (cnt-1)*2, (cnt-1)*2+1, 0, 0, 0, 0, 0, 0, '+', row1.chr, f"2.{(cnt-1)*2}"]
+        
+        temp_node2 = ['vtg'+f"{cnt:0{6}d}l", N, N//2, N, '+', row2.chr,
+                     chr_len[row2.chr], mid_row2_censat, mid_row2_censat + N//2, 
+                     60, 1, (cnt-1)*2, (cnt-1)*2+1, 0, 0, 0, 0, 0, 0, '+', row1.chr, f"2.{(cnt-1)*2+1}"]
+        
+        vtg_list.append(temp_node1)
+        vtg_list.append(temp_node2)
+
+    for row1 in left_df.itertuples(index = False):
+        for row2 in right_df.itertuples(index = False):
+            cnt+=1
+            N = int(CENSAT_COMPRESSABLE_THRESHOLD//2)
+            mid_row1_censat = int(row1.repeat_start_0 + row1.repeat_end_0)//2
+            mid_row2_censat = int(row2.repeat_start_0 + row2.repeat_end_0)//2
+
+            temp_node1 = ['vtg'+f"{cnt:0{6}d}l", N, 0, N//2, '+', row1.chr, 
+                     chr_len[row1.chr], mid_row1_censat - N//2, mid_row1_censat, 
+                     60, 1, (cnt-1)*2, (cnt-1)*2+1, 0, 0, 0, 0, 0, 0, '+', row1.chr, f"2.{(cnt-1)*2}"]
+        
+            temp_node2 = ['vtg'+f"{cnt:0{6}d}l", N, N//2, N, '+', row2.chr,
+                     chr_len[row2.chr], mid_row2_censat, mid_row2_censat + N//2, 
+                     60, 1, (cnt-1)*2, (cnt-1)*2+1, 0, 0, 0, 0, 0, 0, '-', row1.chr, f"2.{(cnt-1)*2+1}"]
+            
+            vtg_list.append(temp_node1)
+            vtg_list.append(temp_node2)
+
+    return vtg_list
+
+def break_double_telomere_contig(contig_data : list, telo_connected_set : set):
+    s = 0
+    vtg_list = []
+    idx = 0
+    count = 0
+    contig_data_size = len(contig_data)
+    while s<contig_data_size:
+        e = contig_data[s][CTG_ENDND]
+        cnt = 0
+        for i in range(s+1, e):
+            if contig_data[i][CTG_TELDIR][0] in ('f', 'b')\
+            and s not in telo_connected_set \
+            and e not in telo_connected_set:
+                cnt+=1
+        if cnt >= 2:
+            st = s
+            ed = e
+            while st <= e and contig_data[st][CTG_TELDIR] == '0':
+                st+=1
+            while ed >= s and contig_data[ed][CTG_TELDIR] == '0':
+                ed-=1
+            for i in range(s, st+1):
+                temp_list = copy.deepcopy(contig_data[i])
+                temp_list[CTG_NAM] = 'f' + temp_list[CTG_NAM][1:]
+                temp_list[CTG_STRND] = idx
+                temp_list[CTG_ENDND] = idx + st - s
+                vtg_list.append(temp_list)
+                count+=1
+            idx += st-s+1
+            for i in range(ed, e+1):
+                temp_list = copy.deepcopy(contig_data[i])
+                temp_list[CTG_NAM] = 'b' + temp_list[CTG_NAM][1:]
+                temp_list[CTG_STRND] = idx
+                temp_list[CTG_ENDND] = idx + e - ed
+                vtg_list.append(temp_list)
+                count+=1
+        s = e+1
+    return vtg_list
+
+
+def pass_pipeline(pre_contig_data, telo_dict, telo_bound_dict, repeat_data, repeat_censat_data):
+    if len(pre_contig_data)==0:
+        return []
+    contig_data = []
+
+    for i in pre_contig_data:
+        contig_data.append(i[:9] + [i[CTG_MAPQ], i[CTG_GLOBALIDX]])
+
+    node_label = label_node(contig_data, telo_dict)
+
+    repeat_label = label_repeat_node(contig_data, repeat_data)
+
+    telo_preprocessed_contig, report_case, telo_connect_info = preprocess_telo(contig_data, node_label)
+
+    new_contig_data = []
+
+    for i in telo_preprocessed_contig:
+        temp_list = contig_data[i]
+        if i in telo_connect_info:
+            temp_list.append(telo_connect_info[i])
+        else:
+            temp_list.append("0")
+        new_contig_data.append(temp_list)
+
+    
+    new_node_repeat_label = label_repeat_node(new_contig_data, repeat_data)
+    new_node_repeat_censat_label = label_repeat_node(new_contig_data, repeat_censat_data)
+    new_node_telo_label = label_node(new_contig_data, telo_dict)
+
+    ref_qry_ratio = calc_ratio(new_contig_data)
+    preprocess_result, \
+    preprocess_contig_type, \
+    preprocess_terminal_nodes, \
+    len_counter = preprocess_contig(new_contig_data, new_node_telo_label, ref_qry_ratio, new_node_repeat_label)
+    preprocess_result = set(preprocess_result)
+    new_contig_data = new_contig_data[0:-1]
+    contig_data_size = len(new_contig_data)
+
+    telo_ppc_contig = []
+    cnt = 0
+    for i in range(contig_data_size):
+        if new_contig_data[i][CTG_NAM] in preprocess_result:
+            temp_list = new_contig_data[i][:10]
+            temp_list.append(preprocess_contig_type[new_contig_data[i][CTG_NAM]])
+            temp_list.append(preprocess_terminal_nodes[new_contig_data[i][CTG_NAM]][0])
+            temp_list.append(preprocess_terminal_nodes[new_contig_data[i][CTG_NAM]][1])
+            temp_list.append(new_node_telo_label[i][0])
+            temp_list.append(new_node_telo_label[i][1])
+            temp_list.append(new_contig_data[i][11])
+            temp_list.append(new_node_repeat_label[i][0])
+            temp_list.append(new_node_repeat_label[i][1])
+            temp_list.append(new_node_repeat_censat_label[i][1])
+            temp_list.append(new_contig_data[i][10])
+            telo_ppc_contig.append(temp_list)
+            cnt+=1
+
+    mainflow_dict = find_mainflow(telo_ppc_contig)
+    telo_ppc_size = len(telo_ppc_contig)
+    for i in range(telo_ppc_size):
+        max_chr = mainflow_dict[telo_ppc_contig[i][CTG_NAM]]
+        temp = [max_chr[0], max_chr[1], telo_ppc_contig[i][-1]]
+        telo_ppc_contig[i] = telo_ppc_contig[i][:-1]
+        telo_ppc_contig[i] += temp
+
+    final_contig = preprocess_repeat(telo_ppc_contig)
+
+    final_contig_repeat_label = label_repeat_node(final_contig, repeat_data)
+
+    final_telo_node_label = label_node(final_contig, telo_dict)
+
+    final_ref_qry_ratio = calc_ratio(final_contig)
+
+    final_using_contig, final_ctg_typ, final_preprocess_terminal_nodes, _ = preprocess_contig(final_contig, final_telo_node_label, final_ref_qry_ratio, final_contig_repeat_label)
+
+    final_contig = final_contig[:-1]
+
+    real_final_contig = []
+
+    final_using_contig = set(final_using_contig)
+    for i in range(0, len(final_contig)):
+        if final_contig[i][CTG_NAM] in final_using_contig:
+            final_contig[i][CTG_TYP] = final_ctg_typ[final_contig[i][CTG_NAM]]
+            final_contig[i][CTG_STRND] = final_preprocess_terminal_nodes[final_contig[i][CTG_NAM]][0]
+            final_contig[i][CTG_ENDND] = final_preprocess_terminal_nodes[final_contig[i][CTG_NAM]][1]
+            real_final_contig.append(final_contig[i])
+
+    return real_final_contig
 
 def main():
     parser = argparse.ArgumentParser(description="Process file paths for telomere analysis.")
@@ -571,15 +1162,18 @@ def main():
                         help="Path to the chromosome repeat information file.")
     parser.add_argument("censat_bed_path", 
                         help="Path to the censat repeat information file.")
-    
+    parser.add_argument("main_stat_path", 
+                        help="Path to the main stat file.")
     parser.add_argument("--alt", 
                         help="Path to an alternative PAF file (optional).")
 
     # 인자 파싱
     args = parser.parse_args()
 
-    # t = "python 00_Contig_Preprocessing.py 20_acc_pipe/OZ.p/OZ.p.aln.paf public_data/chm13v2.0_telomere.bed public_data/chm13v2.0.fa.fai public_data/chm13v2.0_repeat.m.bed public_data/chm13v2.0_censat_v2.1.m.bed --alt 20_acc_pipe/OZ.a/OZ.a.aln.paf".split()
-    # args = parser.parse_args(t[2:])
+    original_node_count = 0
+
+    #t = "python 00_Contig_Preprocessing.py 20_acc_pipe/OZ.p/OZ.p.aln.paf public_data/chm13v2.0_telomere.bed public_data/chm13v2.0.fa.fai public_data/chm13v2.0_repeat.m.bed public_data/chm13v2.0_censat_v2.1.m.bed /home/hyunwoo/51g_cancer_denovo/51_depth_data/OZ.win.stat.gz --alt 20_acc_pipe/OZ.a/OZ.a.aln.paf".split()
+    #args = parser.parse_args(t[2:])
 
     PAF_FILE_PATH = []
     if args.alt is None:
@@ -592,18 +1186,28 @@ def main():
     PREPROCESSED_PAF_FILE_PATH = (PAF_FILE_PATH[0] +'.ppc.paf')
     REPEAT_INFO_FILE_PATH = args.repeat_bed_path
     CENSAT_PATH = args.censat_bed_path
+    main_stat_loc = args.main_stat_path
 
     chr_len = find_chr_len(CHROMOSOME_INFO_FILE_PATH)
     telo_data = import_telo_data(TELOMERE_INFO_FILE_PATH, chr_len)
     repeat_data = import_repeat_data(REPEAT_INFO_FILE_PATH)
-    repeat_censat_data = import_repeat_data(CENSAT_PATH)
+    repeat_censat_data = import_censat_repeat_data(CENSAT_PATH)
+
+
+    df = pd.read_csv(main_stat_loc, compression='gzip', comment='#', sep='\t', names=['chr', 'st', 'nd', 'length', 'covsite', 'totaldepth', 'cov', 'meandepth'])
+    df = df.query('chr != "chrM"')
+
+    cen_vtg_contig = find_breakend_centromere(repeat_censat_data, chr_len, df)
 
     telo_dict = defaultdict(list)
     for _ in telo_data:
         telo_dict[_[0]].append(_[1:])
 
 
+
     contig_data = import_data(PAF_FILE_PATH[0])
+
+    original_node_count += len(contig_data)
 
     node_label = label_node(contig_data, telo_dict)
 
@@ -679,22 +1283,19 @@ def main():
 
     real_final_contig = []
 
-    with open(PREPROCESSED_PAF_FILE_PATH, "wt") as f:
-        final_using_contig = set(final_using_contig)
-        for i in range(0, len(final_contig)):
-            if final_contig[i][CTG_NAM] in final_using_contig:
-                final_contig[i][CTG_TYP] = final_ctg_typ[final_contig[i][CTG_NAM]]
-                final_contig[i][CTG_STRND] = final_preprocess_terminal_nodes[final_contig[i][CTG_NAM]][0]
-                final_contig[i][CTG_ENDND] = final_preprocess_terminal_nodes[final_contig[i][CTG_NAM]][1]
-                real_final_contig.append(final_contig[i])
-                for j in final_contig[i]:
-                    print(j, end="\t", file=f)
-                print("", file=f)
-
+    final_using_contig = set(final_using_contig)
+    for i in range(0, len(final_contig)):
+        if final_contig[i][CTG_NAM] in final_using_contig:
+            final_contig[i][CTG_TYP] = final_ctg_typ[final_contig[i][CTG_NAM]]
+            final_contig[i][CTG_STRND] = final_preprocess_terminal_nodes[final_contig[i][CTG_NAM]][0]
+            final_contig[i][CTG_ENDND] = final_preprocess_terminal_nodes[final_contig[i][CTG_NAM]][1]
+            real_final_contig.append(final_contig[i])
+    total_len = len(real_final_contig)
 
     # alt process
     if args.alt != None:
         contig_data = import_data(PAF_FILE_PATH[1])
+        original_node_count += len(contig_data)
         node_label = label_node(contig_data, telo_dict)
         telo_preprocessed_contig, report_case, telo_connect_info = preprocess_telo(contig_data, node_label)
         new_contig_data = []
@@ -758,48 +1359,88 @@ def main():
 
         real_alt_final_contig = []
 
-        with open(PREPROCESSED_PAF_FILE_PATH, "a") as f:
-            alt_final_using_contig = set(alt_final_using_contig)
-            for i in range(0, len(alt_final_contig)):
-                if alt_final_contig[i][CTG_NAM] in alt_final_using_contig:
-                    alt_final_contig[i][CTG_TYP] = alt_final_ctg_typ[alt_final_contig[i][CTG_NAM]]
-                    alt_final_contig[i][CTG_STRND] = alt_final_preprocess_terminal_nodes[alt_final_contig[i][CTG_NAM]][0] + bias
-                    alt_final_contig[i][CTG_ENDND] = alt_final_preprocess_terminal_nodes[alt_final_contig[i][CTG_NAM]][1] + bias
-                    for j in alt_final_contig[i]:
-                        print(j, end="\t", file=f)
-                    real_alt_final_contig.append(alt_final_contig[i])
-                    print("", file=f)
-        real_final_contig = real_final_contig + real_alt_final_contig
-        real_final_ratio, chukji = calc_chukji(real_final_contig)
-        real_final_contig = real_final_contig[:-1]
-        real_final_ctg_typ = final_ctg_typ | alt_final_ctg_typ
-        # with open(f"06_repeat_preprocess/{PAF_FILE_PATH[0].split("/")[-1].split(".")[0]}_real_final_ratio.txt", "wt") as f:
-        #     a =[]
-        #     for i in real_final_ratio:
-        #         if real_final_ctg_typ[i] in (3, 4):
-        #             a.append((i, real_final_ratio[i], chukji[i]))
-        #     a = sorted(a, key=lambda x:x[1])
-        #     for i in a:
-        #         print(i[0], i[1], int(i[2]/1000), file=f)
-
-        final_len_count = Counter()
-        s = 0
-        while s<len(real_final_contig):
-            e = real_final_contig[s][CTG_ENDND]
-            for i in range(s, e+1):
-                final_len_count[real_final_contig[i][CTG_NAM]] += real_final_contig[i][CHR_END] - real_final_contig[i][CHR_STR]
-            s = e+1
-        a = len_counter + alt_len_counter
-        ppc_bna_ratio = []
+        alt_final_using_contig = set(alt_final_using_contig)
+        for i in range(0, len(alt_final_contig)):
+            if alt_final_contig[i][CTG_NAM] in alt_final_using_contig:
+                alt_final_contig[i][CTG_TYP] = alt_final_ctg_typ[alt_final_contig[i][CTG_NAM]]
+                alt_final_contig[i][CTG_STRND] = alt_final_preprocess_terminal_nodes[alt_final_contig[i][CTG_NAM]][0] + bias
+                alt_final_contig[i][CTG_ENDND] = alt_final_preprocess_terminal_nodes[alt_final_contig[i][CTG_NAM]][1] + bias
+                real_alt_final_contig.append(alt_final_contig[i])
         
-        # prefix = os.path.basename(PREPROCESSED_PAF_FILE_PATH).split('.')[0]
-        # with open(f"06_repeat_preprocess/repeat_ppc_before_and_after.{prefix}.txt", "wt") as f:
-        #     for i in a:
-        #         ppc_bna_ratio.append((i, final_len_count[i]/a[i]))
-        #     ppc_bna_ratio.sort(key=lambda x:x[1])
-        #     for i in ppc_bna_ratio:
-        #         if 0 < i[1] < 1:
-        #             print(i[0],i[1], file=f)
+        real_final_contig = real_final_contig + real_alt_final_contig
+        total_len = len(real_final_contig)
+    
+    
+    telo_fb_dict = defaultdict(list)
+    for k, v in telo_dict.items():
+        for i in v:
+            telo_fb_dict[k+i[-1]].append([i[0], i[1]])
+    
+    telo_bound_dict = {}
+    for k, v in telo_fb_dict.items():
+        if k[-1]=='f':
+            telo_bound_dict[k] = min(v, key=lambda t:t[0])
+        else:
+            telo_bound_dict[k] = max(v, key=lambda t:t[1])
+    
+
+    adjacency = initial_graph_build(real_final_contig, telo_bound_dict)
+
+    telo_connected_node, telo_connected_dict = edge_optimization(real_final_contig, adjacency, telo_bound_dict)
+
+    # for i in range(total_len):
+    #     if i in telo_connected_node:
+    #         real_final_contig[i][CTG_TELCON] = telo_connected_dict[i]
+    
+    break_contig = break_double_telomere_contig(real_final_contig, telo_connected_node)
+
+    final_break_contig = pass_pipeline(break_contig, telo_dict, telo_bound_dict, repeat_data, repeat_censat_data)
+
+    final_cen_vtg_contig = pass_pipeline(cen_vtg_contig, telo_dict, telo_bound_dict, repeat_data, repeat_censat_data)
+
+    for i in final_break_contig:
+        temp_list = i
+        temp_list[CTG_STRND] += total_len
+        temp_list[CTG_ENDND] += total_len
+        real_final_contig.append(temp_list)
+
+    for i in final_cen_vtg_contig:
+        temp_list = i
+        temp_list[CTG_STRND] += total_len + len(final_break_contig)
+        temp_list[CTG_ENDND] += total_len + len(final_break_contig)
+        real_final_contig.append(temp_list)
+    add_node_count = len(final_break_contig) + len(final_cen_vtg_contig)
+    s = 0
+    r_l = len(real_final_contig)
+    print(f"Original PAF file length : {original_node_count}, Final preprocessed PAF file length: {r_l}, Number of virtual contigs added on preprocessing : {add_node_count}")
+    contig = set()
+    while s<r_l:
+        e=real_final_contig[s][CTG_ENDND]
+        chkcensat = False
+        chktelo=False
+        for i in range(s, e+1):
+            if real_final_contig[i][CTG_TELCHR] != '0':
+                chkcensat = True
+            elif real_final_contig[i][CTG_CENSAT] != '0':
+                chktelo = True
+        
+        if chkcensat and chktelo:
+            contig.add(contig_data[s][CTG_NAM])
+        
+        s = e+1
+    
+    # for i in contig:
+    #     print(i)
+
+    with open(PREPROCESSED_PAF_FILE_PATH, "wt") as f:
+        for i in real_final_contig:
+            for j in i:
+                print(j, end="\t", file=f)
+            print("", file=f)
+            
+    
+
+    
 
 if __name__ == "__main__":
     main()
