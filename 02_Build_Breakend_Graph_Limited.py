@@ -1,15 +1,10 @@
-import re
 import sys
 import argparse
-import pandas as pd
 from collections import defaultdict, Counter
 import ast
-import matplotlib.pyplot as plt
 import networkx as nx
 import copy
 import os
-
-from datetime import datetime
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from tqdm import tqdm
 
@@ -58,7 +53,7 @@ NCLOSE_MERGE_LIMIT = 1*K
 ALL_REPEAT_NCLOSE_COMPRESS_LIMIT = 500*K
 PATH_COMPRESS_LIMIT = 50*K
 IGNORE_PATH_LIMIT = 50*K
-NON_REPEAT_NOISE_RATIO=0.1
+NON_REPEAT_NOISE_RATIO=0.01
 
 CENSAT_COMPRESSABLE_THRESHOLD = 1000*K
 
@@ -220,6 +215,9 @@ def extract_nclose_node(contig_data : list, bnd_contig : set, repeat_contig_name
     censat_nclose_compress = set()
     nclose_dict = {}
     all_nclose_compress = defaultdict(list)
+    telo_name_set = set()
+    for i in telo_set:
+        telo_name_set.add(contig_data[i][CTG_NAM])
 
     div_repeat_paf_name = set()
     for i in ORIGNAL_PAF_LOC_LIST:
@@ -289,12 +287,12 @@ def extract_nclose_node(contig_data : list, bnd_contig : set, repeat_contig_name
                 #     print(ed not in telo_set)
 
                 all_nclose_compress[(st_chr[1], ed_chr[1])].append((st, ed))
-
                 
                 if contig_data[s][CTG_NAM] in div_repeat_paf_name \
                    and contig_data[s][CTG_NAM] in repeat_contig_name \
                    and st not in telo_set \
-                   and ed not in telo_set :
+                   and ed not in telo_set \
+                   and contig_data[s][CTG_NAM] not in telo_name_set:
                     s = e+1
                     continue
                     
@@ -776,7 +774,7 @@ def initialize_bnd_graph(contig_data : list, nclose_nodes : dict, telo_contig : 
         for j in telo_contig[i]:
             curr_contig = contig_data[j[1]]
             for nodes in nclose_nodes:
-                if nodes == curr_contig[CTG_NAM]:
+                if j[1] in nclose_nodes[nodes]:
                     continue
                 # curr_contig : telo-connected node
                 # index : j[1] and k
@@ -784,6 +782,8 @@ def initialize_bnd_graph(contig_data : list, nclose_nodes : dict, telo_contig : 
                     nclose_contig = contig_data[nclose_nodes[nodes][k]]
                     telo_idx = j[1]
                     nclose_idx = nclose_nodes[nodes][k]
+                    if telo_idx == 203 and nclose_idx == 207:
+                        print("hi")
                     if nclose_contig[CHR_NAM] != curr_contig[CHR_NAM]:
                         continue
                     k_ind = 'b' if k%2 else 'f'
@@ -816,7 +816,7 @@ def initialize_bnd_graph(contig_data : list, nclose_nodes : dict, telo_contig : 
                     # if both end have consistency
                     if dir1 == dir2:
                         if dir1 == "inc":
-                            if curr_contig[CTG_DIR]=='+' and k_ind=='f+':
+                            if curr_contig[CTG_DIR]=='+' and k_ind=='f+': # +
                                 bnd_adjacency[(DIR_OUT, telo_idx)].append([DIR_FOR, nclose_idx])
                                 bnd_adjacency[(DIR_BAK, nclose_idx)].append([DIR_IN, telo_idx])
                             elif curr_contig[CTG_DIR]=='-' and k_ind=='b-':
@@ -825,11 +825,11 @@ def initialize_bnd_graph(contig_data : list, nclose_nodes : dict, telo_contig : 
                             elif curr_contig[CTG_DIR]=='+' and k_ind=='b-':
                                 bnd_adjacency[(DIR_OUT, telo_idx)].append([DIR_BAK, nclose_idx])
                                 bnd_adjacency[(DIR_FOR, nclose_idx)].append([DIR_IN, telo_idx])
-                            elif curr_contig[CTG_DIR]=='-' and k_ind=='f+':
+                            elif curr_contig[CTG_DIR]=='-' and k_ind=='f+': # +
                                 bnd_adjacency[(DIR_OUT, telo_idx)].append([DIR_FOR, nclose_idx])
                                 bnd_adjacency[(DIR_BAK, nclose_idx)].append([DIR_IN, telo_idx])
                         else:
-                            if curr_contig[CTG_DIR]=='+' and k_ind=='b+':
+                            if curr_contig[CTG_DIR]=='+' and k_ind=='b+': # +
                                 bnd_adjacency[(DIR_FOR, nclose_idx)].append([DIR_IN, telo_idx])
                                 bnd_adjacency[(DIR_OUT, telo_idx)].append([DIR_BAK, nclose_idx])
                             elif curr_contig[CTG_DIR]=='-' and k_ind=='f-':
@@ -838,7 +838,7 @@ def initialize_bnd_graph(contig_data : list, nclose_nodes : dict, telo_contig : 
                             elif curr_contig[CTG_DIR]=='+' and k_ind=='f-':
                                 bnd_adjacency[(DIR_OUT, telo_idx)].append([DIR_FOR, nclose_idx])
                                 bnd_adjacency[(DIR_BAK, nclose_idx)].append([DIR_IN, telo_idx])
-                            elif curr_contig[CTG_DIR]=='-' and k_ind=='b+':
+                            elif curr_contig[CTG_DIR]=='-' and k_ind=='b+': # +
                                 bnd_adjacency[(DIR_OUT, telo_idx)].append([DIR_BAK, nclose_idx])
                                 bnd_adjacency[(DIR_FOR, nclose_idx)].append([DIR_IN, telo_idx])
                     # else: each end have different sign of increment
@@ -898,7 +898,7 @@ parser.add_argument("--orignal_paf_loc", nargs='+',
 
 args = parser.parse_args()
 
-# t = "python 04_Build_Breakend_Graph_Limited.py 20_acc_pipe/OZ.p/OZ.p.aln.paf.ppc.paf public_data/chm13v2.0.fa.fai public_data/chm13v2.0_censat_v2.1.m.bed 20_acc_pipe/OZ.p/OZ.p.aln.paf.ppc.paf.op.graph.txt 30_skype_pipe/OZ_23_31_14 --orignal_paf_loc 20_acc_pipe/OZ.p/OZ.p.paf 20_acc_pipe/OZ.a/OZ.a.paf"
+# t = "python 02_Build_Breakend_Graph_Limited.py 20_acc_pipe/Caki-1.p/Caki-1.p.aln.paf.ppc.paf public_data/chm13v2.0.fa.fai public_data/chm13v2.0_censat_v2.1.m.bed 20_acc_pipe/Caki-1.p/Caki-1.p.aln.paf.ppc.paf.op.graph.txt 30_skype_pipe/Caki-1_16_54_43 --orignal_paf_loc 20_acc_pipe/Caki-1.p/Caki-1.p.paf 20_acc_pipe/Caki-1.a/Caki-1.a.paf"
 # t = t.split(" ")
 # args = parser.parse_args(t[2:])
 
@@ -934,6 +934,7 @@ chr_rev_corr[contig_data_size + 2*CHROMOSOME_COUNT - 1] = 'chrXb'
 graph_adjacency = import_data(graph_data)
 
 telo_contig = extract_telomere_connect_contig(contig_data, graph_adjacency)
+
 
 telo_set = set()
 
@@ -1077,19 +1078,9 @@ with open(f"{PREFIX}/telomere_connected_list.txt", "wt") as f:
             telo_node_count += 1
             print(contig_data[j[1]], file=f)
         print("", file=f)
-# print("start_compress")
-# for i in st_compress:
-#     print(contig_data[i][:CHR_END+1])
-#     print(contig_data[st_compress[i]][:CHR_END+1])
-# print("end_compress")
-# for i in ed_compress:
-#      print(contig_data[i][:CHR_END+1])
-#      print(contig_data[ed_compress[i]][:CHR_END+1])
 
 
 bnd_graph_adjacency = initialize_bnd_graph(contig_data, nclose_nodes, telo_contig)
-
-
 
 with open(f"{PREFIX}/nclose_nodes_index.txt", "wt") as f: 
     for i in nclose_nodes:
@@ -1374,6 +1365,7 @@ with open(f'{PREFIX}/report.txt', 'a') as f:
     cnt = sum(i[1] for i in cnt_list)
     print(cancer_prefix, file=f)
     print(cnt, file=f)
+    print(f"Total path count : {cnt}")
     for (st, nd), c in sorted(cnt_list, key=lambda x:-x[1]):
         if c > 0:
             print(st, nd, c, file=f)

@@ -512,7 +512,7 @@ def connect_path(folder_path, index_file_path, cnt, contig_data, G):
                         print(tuple((DIR_BAK, i)), file=h)
         last_path_idx = bnd_index_path[-1][1]
         print(contig_data[last_path_idx], file=g)
-        print(tuple((DIR_FOR, last_path_idx)), file=h)
+        print(tuple((DIR_IN, last_path_idx)), file=h)
         print(end_telo, file=g)
                     
 
@@ -599,8 +599,6 @@ def main():
         for edge in bnd_connected_graph[node]:
             G.add_weighted_edges_from([(node, tuple(edge[:-1]), edge[-1])])
 
-    #connect_path("test", "13_breakend_connect_graph/1.index.txt", 1, contig_data, G)
-    #exit(1)
     cnt=0
     chr_chr_folder_path = glob.glob(BREAKEND_GRAPH_PATH_FILE_PREFIX+"/00_raw/*")
     for folder_path in tqdm(chr_chr_folder_path, desc='Build breakend graph', disable=not sys.stdout.isatty()):

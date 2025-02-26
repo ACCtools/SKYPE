@@ -1,17 +1,13 @@
 import re
 import argparse
-import pandas as pd
 import os
 import sys
-from collections import defaultdict
 import ast
-import matplotlib.pyplot as plt
 import glob
-import networkx as nx
 import copy
 
 from tqdm import tqdm
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, as_completed, ThreadPoolExecutor
 
 CTG_NAM = 0
 CTG_LEN = 1
@@ -76,12 +72,9 @@ def import_index_path(file_path : str) -> list:
     index_file = open(file_path, "r")
     index_data = []
     for curr_index in index_file:
-        curr_index.rstrip()
-        if curr_index[0] == '(':
-            index_data.append(ast.literal_eval(curr_index)[1])
-        elif curr_index[0] != '[':
-            temp_list = curr_index.split("\t")
-            index_data.append(tuple((int(temp_list[0]), int(temp_list[1]))))
+        curr_index = curr_index.rstrip()
+        index_data.append(ast.literal_eval(curr_index))
+    index_file.close()
     return index_data
 
 class PAFOverlapError(Exception):
@@ -462,9 +455,10 @@ parser.add_argument("prefix",
 parser.add_argument("--alt", 
                     help="Path to an alternative PAF file (optional).")
 
-
+# t = "python 20_Fill_Path.py 20_acc_pipe/Caki-1.p/Caki-1.p.aln.paf 20_acc_pipe/Caki-1.p/Caki-1.p.aln.paf.ppc.paf 30_skype_pipe/Caki-1_03_52_36 --alt 20_acc_pipe/Caki-1.a/Caki-1.a.aln.paf"
+# t = t.split()
 args = parser.parse_args()
-
+# args = parser.parse_args(t[2:])
 PAF_FILE_PATH = []
 paf_file = []
 if args.alt is None:
@@ -484,6 +478,7 @@ contig_data = import_data2(PREPROCESSED_PAF_FILE_PATH)
 contig_data_size = len(contig_data)
 cnt=0
 PATH_FILE_FOLDER = f"{args.prefix}/10_fill/"
+TYPE_4_PATH_FILE_FOLDER = f"{args.prefix}/11_ref_ratio_outliers/"
 
 # fpath = "13_breakend_connect_graph/HuH-28.bnd_path.00:05:20/chr18f_chr18b"
 # ifpath = "13_breakend_connect_graph/HuH-28.bnd_path.00:05:20/chr18f_chr18b/1.index.txt"
@@ -492,19 +487,23 @@ PATH_FILE_FOLDER = f"{args.prefix}/10_fill/"
 
 # exit(1)
 
-def fill_path(args):
-    folder_path, index_file_path, cnt = args
+def fill_path(index_file_path):
+    temp_file = index_file_path.split("/")[:-1]
+    temp_file[2] = '20_depth'
+    folder_path = "/".join(temp_file)
+    cnt = int(index_file_path.split(".")[-3][-1])
     os.makedirs(f"{folder_path}", exist_ok=True)
     with open(f"{folder_path}/{cnt}.paf", "wt") as f:
         full_connected_path = import_index_path(index_file_path)
-        init_contig = form_normal_contig(contig_data[full_connected_path[0]], paf_file)
+        init_contig = form_normal_contig(contig_data[full_connected_path[0][1]], paf_file)
         path_contig = [init_contig]
         full_connected_path_len = len(full_connected_path)
         vcnt = 0
         for i in range(1, full_connected_path_len):
             curr_contig = path_contig[-1]
-            next_contig = contig_data[full_connected_path[i]]
-            if curr_contig[CHR_NAM] == next_contig[CHR_NAM] and curr_contig[CTG_NAM] != next_contig[CTG_NAM]:
+            next_contig = contig_data[full_connected_path[i][1]]
+            if curr_contig[CHR_NAM] == next_contig[CHR_NAM] and curr_contig[CTG_NAM] != next_contig[CTG_NAM] \
+            or (curr_contig[CHR_NAM] == next_contig[CHR_NAM] and (full_connected_path[i-1][0] in (2, 3) or full_connected_path[i][0] in (2, 3))):
                 dist = distance_checker(curr_contig, next_contig)
                 if dist > 0:
                     vcnt += 1
@@ -559,20 +558,21 @@ def fill_path(args):
             cigar_str = 'cg:Z:' + cs_to_cigar(i[-1][5:])
             print(("\t".join(list(map(str, i + [cigar_str])))), file=f)
     
-    return    
+    return
+
+# fill_path(('30_skype_pipe/Caki-1_03_52_36/20_depth/chr17f_chr17b', '30_skype_pipe/Caki-1_03_52_36/10_fill/chr17f_chr17b/2.index.txt', 1))
+# exit(1)
+
 
 with ProcessPoolExecutor(max_workers=48) as executor:
     futures = []
     chr_chr_folder_path = glob.glob(PATH_FILE_FOLDER+"*")
+    # print(chr_chr_folder_path)
+    # chr_chr_folder_path = ["30_skype_pipe/Caki-1_03_52_36/10_fill/chr17f_chr17b"]
     for folder_path in chr_chr_folder_path:
         index_file_paths = glob.glob(folder_path + "/*index*")
-        cnt = 0
         for index_file_path in index_file_paths:
-            chr_folder = index_file_path.split('/')[-2]
-            cnt+=1
-            
-            ack = (f'{args.prefix}/20_depth/{chr_folder}', index_file_path, cnt)
-            futures.append(executor.submit(fill_path, ack))
+            futures.append(executor.submit(fill_path, index_file_path))
             
     
     # 제출된 작업들이 완료될 때까지 진행 상황을 tqdm으로 표시합니다.

@@ -1,14 +1,15 @@
 import os
 import sys
 import glob
-import pandas as pd
 import subprocess
 
 from tqdm import tqdm
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
 PATH_FILE_FOLDER = f"{sys.argv[1]}/20_depth/"
+RATIO_OUTLIER_FOLDER = f"{sys.argv[1]}/11_ref_ratio_outliers/"
 chr_chr_folder_path = glob.glob(PATH_FILE_FOLDER+"*")
+back_front_folder_path = glob.glob(RATIO_OUTLIER_FOLDER+"*")
 DEPTH_WINDOW=100 * 1e3
 
 DEPTH_THREAD=2
@@ -32,6 +33,11 @@ def get_paf_run(paf_loc):
 with ProcessPoolExecutor(max_workers=int(TOTAL_THREAD/DEPTH_THREAD)) as executor:
     futures = []
     for folder_path in chr_chr_folder_path:
+        paf_paths = glob.glob(folder_path + "/*.paf")
+        for paf_loc in paf_paths:
+            futures.append(executor.submit(get_paf_run, paf_loc))
+
+    for folder_path in back_front_folder_path:
         paf_paths = glob.glob(folder_path + "/*.paf")
         for paf_loc in paf_paths:
             futures.append(executor.submit(get_paf_run, paf_loc))

@@ -1,5 +1,3 @@
-import os
-import sys
 import argparse
 import pandas as pd
 import numpy as np
@@ -49,6 +47,7 @@ CENSAT_COMPRESSABLE_THRESHOLD = 1e6
 
 FORCE_TELOMERE_THRESHOLD = 10*K
 TELOMERE_CLUSTER_THRESHOLD = 500*K
+SUBTELOMERE_LENGTH = 500*K
 
 FLANK_SIZE_BP = 3*M
 MIN_FLANK_SIZE_BP = 1*M
@@ -158,6 +157,32 @@ def label_node(contig_data : list, telo_data) -> list :
             label.append(('0', '0'))
     return label
 
+def label_subtelo_node(contig_data : list, telo_data) -> list :
+    label = []
+    contig_data_size = len(contig_data)
+    for i in range(contig_data_size):
+        checker = 0
+        for j in telo_data[contig_data[i][CHR_NAM]]:
+            if j[2]=='f':
+                if distance_checker(contig_data[i], (0, 0, 0, 0, 0, 0, 0, j[0], j[1]+SUBTELOMERE_LENGTH)) == 0:
+                    inclusive_label = ""
+                    if inclusive_checker(contig_data[i], (0, 0, 0, 0, 0, 0, 0, j[0], j[1]+SUBTELOMERE_LENGTH)):
+                        inclusive_label = "in"
+                    label.append((contig_data[i][CHR_NAM], j[2]+inclusive_label))
+                    checker = 1
+                    break
+            else:
+                if distance_checker(contig_data[i], (0, 0, 0, 0, 0, 0, 0, j[0] - SUBTELOMERE_LENGTH, j[1])) == 0:
+                    inclusive_label = ""
+                    if inclusive_checker(contig_data[i], (0, 0, 0, 0, 0, 0, 0, j[0] - SUBTELOMERE_LENGTH, j[1])):
+                        inclusive_label = "in"
+                    label.append((contig_data[i][CHR_NAM], j[2]+inclusive_label))
+                    checker = 1
+                    break
+        if checker==0:
+            label.append(('0', '0'))
+    return label
+
 def label_repeat_node(contig_data : list, repeat_data) -> list :
     label = []
     contig_data_size = len(contig_data)
@@ -183,6 +208,7 @@ def label_repeat_node(contig_data : list, repeat_data) -> list :
 def preprocess_telo(contig_data : list, node_label : list) -> list :
     telo_preprocessed_contig = []
     telo_connect_info = {}
+    semi_telomere_contig = []
     report_case = {'A':[], 'B':[], 'C':[], 'ESC':[], 'ALL_TELO_NON_ESC':[]}
     contig_data_size = len(contig_data)
     curr_contig_st = 0
@@ -333,12 +359,104 @@ def preprocess_telo(contig_data : list, node_label : list) -> list :
                         ed = end_telo_bound
                 for j in range(st, ed+1):
                     telo_preprocessed_contig.append(j)
+                
             else:
                 report_case['ALL_TELO_NON_ESC'].append(curr_contig_st)
             # initialize
             curr_contig_st = curr_contig_ed+1
     contig_data = contig_data[0:-1]
     return telo_preprocessed_contig, report_case, telo_connect_info
+
+def subtelo_cut(contig_data : list, node_label : list, subnode_label : list) -> list :
+    telo_preprocessed_contig = []
+    contig_data_size = len(contig_data)
+    curr_contig_st = 0
+    tcnt = 0
+    idx = 0
+    while curr_contig_st < contig_data_size:
+        curr_contig_ed = contig_data[curr_contig_st][CTG_ENDND]
+        front_telo_bound = curr_contig_st
+        end_telo_bound = curr_contig_ed
+        front_telcon = False
+        end_telcon = False
+        front_block_contain_telo = False
+        end_block_contain_telo = False
+        st = curr_contig_st
+        ed = curr_contig_ed
+        if contig_data[curr_contig_st][CTG_TELCON] != '0':
+            front_telcon = True
+        if contig_data[curr_contig_ed][CTG_TELCON] != '0':
+            end_telcon = True
+        front_dest = '0'
+        end_dest = '0'
+        if not front_telcon:
+            while front_telo_bound<=curr_contig_ed and subnode_label[front_telo_bound][0] != '0' :
+                if node_label[front_telo_bound][0] != '0':
+                    front_block_contain_telo = True
+                front_telo_bound+=1
+        if not end_telcon:
+            while end_telo_bound>=curr_contig_st and subnode_label[end_telo_bound][0] != '0':
+                if node_label[front_telo_bound][0] != '0':
+                    end_block_contain_telo = True
+                end_telo_bound-=1
+        for_cut = False
+        bak_cut = False
+        if front_telo_bound > curr_contig_st and front_block_contain_telo:
+            st = front_telo_bound
+            if contig_data[st][CTG_DIR]=='+':
+                front_dest = contig_data[st][CHR_NAM] + 'f'
+                for_cut = True
+            else:
+                front_dest = contig_data[st][CHR_NAM] + 'b'
+                for_cut = True
+        if end_telo_bound < curr_contig_ed and end_block_contain_telo:
+            ed = end_telo_bound
+            if contig_data[ed][CTG_DIR]=='+':
+                end_dest = contig_data[ed][CHR_NAM] + 'b'
+                bak_cut = True
+            else:
+                end_dest = contig_data[ed][CHR_NAM] + 'f'
+                bak_cut = True
+        if (for_cut or bak_cut) and st < ed:
+            l = ed - st
+            tcnt+=1
+            if for_cut:
+                temp_list = copy.deepcopy(contig_data[st])
+                temp_list[CTG_NAM] = 'ttg'+f"{tcnt:0{6}d}l"
+                temp_list[CTG_STRND] = idx
+                temp_list[CTG_ENDND] = idx + l
+                temp_list[CTG_TELCON] = front_dest
+                telo_preprocessed_contig.append(temp_list)
+            else:
+                temp_list = copy.deepcopy(contig_data[st])
+                temp_list[CTG_NAM] = 'ttg'+f"{tcnt:0{6}d}l"
+                temp_list[CTG_STRND] = idx
+                temp_list[CTG_ENDND] = idx + l
+                telo_preprocessed_contig.append(temp_list)
+            for i in range(st+1, ed):
+                temp_list = copy.deepcopy(contig_data[i])
+                temp_list[CTG_NAM] = 'ttg'+f"{tcnt:0{6}d}l"
+                temp_list[CTG_STRND] = idx
+                temp_list[CTG_ENDND] = idx + l
+                telo_preprocessed_contig.append(temp_list)
+            if bak_cut:
+                temp_list = copy.deepcopy(contig_data[ed])
+                temp_list[CTG_NAM] = 'ttg'+f"{tcnt:0{6}d}l"
+                temp_list[CTG_STRND] = idx
+                temp_list[CTG_ENDND] = idx + l
+                temp_list[CTG_TELCON] = end_dest
+                telo_preprocessed_contig.append(temp_list)
+            else:
+                temp_list = copy.deepcopy(contig_data[ed])
+                temp_list[CTG_NAM] = 'ttg'+f"{tcnt:0{6}d}l"
+                temp_list[CTG_STRND] = idx
+                temp_list[CTG_ENDND] = idx + l
+                telo_preprocessed_contig.append(temp_list)
+            idx += l + 1
+        
+        curr_contig_st = curr_contig_ed+1
+    return telo_preprocessed_contig
+
 
 def initial_graph_build(contig_data : list, telo_data : dict) -> list :
     '''
@@ -1060,69 +1178,83 @@ def break_double_telomere_contig(contig_data : list, telo_connected_set : set):
     return vtg_list
 
 
-def pass_pipeline(pre_contig_data, telo_dict, telo_bound_dict, repeat_data, repeat_censat_data):
-    if len(pre_contig_data)==0:
-        return []
-    contig_data = []
+def pass_pipeline(pre_contig_data, telo_dict, telo_bound_dict, repeat_data, repeat_censat_data, telo_ppc_passed):
+    if not telo_ppc_passed:
+        if len(pre_contig_data)==0:
+            return []
+        contig_data = []
 
-    for i in pre_contig_data:
-        contig_data.append(i[:9] + [i[CTG_MAPQ], i[CTG_GLOBALIDX]])
+        for i in pre_contig_data:
+            contig_data.append(i[:9] + [i[CTG_MAPQ], i[CTG_GLOBALIDX]])
 
-    node_label = label_node(contig_data, telo_dict)
+        node_label = label_node(contig_data, telo_dict)
 
-    repeat_label = label_repeat_node(contig_data, repeat_data)
+        repeat_label = label_repeat_node(contig_data, repeat_data)
 
-    telo_preprocessed_contig, report_case, telo_connect_info = preprocess_telo(contig_data, node_label)
+        telo_preprocessed_contig, report_case, telo_connect_info = preprocess_telo(contig_data, node_label)
 
-    new_contig_data = []
+        new_contig_data = []
 
-    for i in telo_preprocessed_contig:
-        temp_list = contig_data[i]
-        if i in telo_connect_info:
-            temp_list.append(telo_connect_info[i])
-        else:
-            temp_list.append("0")
-        new_contig_data.append(temp_list)
+        for i in telo_preprocessed_contig:
+            temp_list = contig_data[i]
+            if i in telo_connect_info:
+                temp_list.append(telo_connect_info[i])
+            else:
+                temp_list.append("0")
+            new_contig_data.append(temp_list)
+
+        
+        new_node_repeat_label = label_repeat_node(new_contig_data, repeat_data)
+        new_node_repeat_censat_label = label_repeat_node(new_contig_data, repeat_censat_data)
+        new_node_telo_label = label_node(new_contig_data, telo_dict)
+
+        ref_qry_ratio = calc_ratio(new_contig_data)
+        preprocess_result, \
+        preprocess_contig_type, \
+        preprocess_terminal_nodes, \
+        len_counter = preprocess_contig(new_contig_data, new_node_telo_label, ref_qry_ratio, new_node_repeat_label)
+        preprocess_result = set(preprocess_result)
+        new_contig_data = new_contig_data[0:-1]
+        contig_data_size = len(new_contig_data)
+
+        telo_ppc_contig = []
+        cnt = 0
+        for i in range(contig_data_size):
+            if new_contig_data[i][CTG_NAM] in preprocess_result:
+                temp_list = new_contig_data[i][:10]
+                temp_list.append(preprocess_contig_type[new_contig_data[i][CTG_NAM]])
+                temp_list.append(preprocess_terminal_nodes[new_contig_data[i][CTG_NAM]][0])
+                temp_list.append(preprocess_terminal_nodes[new_contig_data[i][CTG_NAM]][1])
+                temp_list.append(new_node_telo_label[i][0])
+                temp_list.append(new_node_telo_label[i][1])
+                temp_list.append(new_contig_data[i][11])
+                temp_list.append(new_node_repeat_label[i][0])
+                temp_list.append(new_node_repeat_label[i][1])
+                temp_list.append(new_node_repeat_censat_label[i][1])
+                temp_list.append(new_contig_data[i][10])
+                telo_ppc_contig.append(temp_list)
+                cnt+=1
+        mainflow_dict = find_mainflow(telo_ppc_contig)
+        telo_ppc_size = len(telo_ppc_contig)
+        
+        for i in range(telo_ppc_size):
+            max_chr = mainflow_dict[telo_ppc_contig[i][CTG_NAM]]
+            temp = [max_chr[0], max_chr[1], telo_ppc_contig[i][-1]]
+            telo_ppc_contig[i] = telo_ppc_contig[i][:-1]
+            telo_ppc_contig[i] += temp
+    else:
+        if len(pre_contig_data)==0:
+            return []
+        telo_ppc_contig = pre_contig_data
+        mainflow_dict = find_mainflow(telo_ppc_contig)
+        telo_ppc_size = len(telo_ppc_contig)
+        
+        for i in range(telo_ppc_size):
+            max_chr = mainflow_dict[telo_ppc_contig[i][CTG_NAM]]
+            telo_ppc_contig[i][CTG_MAINFLOWDIR] = max_chr[0]
+            telo_ppc_contig[i][CTG_MAINFLOWCHR] = max_chr[1]
 
     
-    new_node_repeat_label = label_repeat_node(new_contig_data, repeat_data)
-    new_node_repeat_censat_label = label_repeat_node(new_contig_data, repeat_censat_data)
-    new_node_telo_label = label_node(new_contig_data, telo_dict)
-
-    ref_qry_ratio = calc_ratio(new_contig_data)
-    preprocess_result, \
-    preprocess_contig_type, \
-    preprocess_terminal_nodes, \
-    len_counter = preprocess_contig(new_contig_data, new_node_telo_label, ref_qry_ratio, new_node_repeat_label)
-    preprocess_result = set(preprocess_result)
-    new_contig_data = new_contig_data[0:-1]
-    contig_data_size = len(new_contig_data)
-
-    telo_ppc_contig = []
-    cnt = 0
-    for i in range(contig_data_size):
-        if new_contig_data[i][CTG_NAM] in preprocess_result:
-            temp_list = new_contig_data[i][:10]
-            temp_list.append(preprocess_contig_type[new_contig_data[i][CTG_NAM]])
-            temp_list.append(preprocess_terminal_nodes[new_contig_data[i][CTG_NAM]][0])
-            temp_list.append(preprocess_terminal_nodes[new_contig_data[i][CTG_NAM]][1])
-            temp_list.append(new_node_telo_label[i][0])
-            temp_list.append(new_node_telo_label[i][1])
-            temp_list.append(new_contig_data[i][11])
-            temp_list.append(new_node_repeat_label[i][0])
-            temp_list.append(new_node_repeat_label[i][1])
-            temp_list.append(new_node_repeat_censat_label[i][1])
-            temp_list.append(new_contig_data[i][10])
-            telo_ppc_contig.append(temp_list)
-            cnt+=1
-
-    mainflow_dict = find_mainflow(telo_ppc_contig)
-    telo_ppc_size = len(telo_ppc_contig)
-    for i in range(telo_ppc_size):
-        max_chr = mainflow_dict[telo_ppc_contig[i][CTG_NAM]]
-        temp = [max_chr[0], max_chr[1], telo_ppc_contig[i][-1]]
-        telo_ppc_contig[i] = telo_ppc_contig[i][:-1]
-        telo_ppc_contig[i] += temp
 
     final_contig = preprocess_repeat(telo_ppc_contig)
 
@@ -1382,7 +1514,16 @@ def main():
             telo_bound_dict[k] = min(v, key=lambda t:t[0])
         else:
             telo_bound_dict[k] = max(v, key=lambda t:t[1])
-    
+
+    telo_label = label_node(real_final_contig, telo_dict)
+    subtelo_label = label_subtelo_node(real_final_contig, telo_dict)
+    subtelo_ppc_node = subtelo_cut(real_final_contig, telo_label, subtelo_label)
+
+    with open("subtelo.txt", "wt") as f:
+        for i in subtelo_ppc_node:
+            for j in i:
+                print(j, end="\t", file=f)
+            print(file=f)
 
     adjacency = initial_graph_build(real_final_contig, telo_bound_dict)
 
@@ -1394,9 +1535,11 @@ def main():
     
     break_contig = break_double_telomere_contig(real_final_contig, telo_connected_node)
 
-    final_break_contig = pass_pipeline(break_contig, telo_dict, telo_bound_dict, repeat_data, repeat_censat_data)
+    final_break_contig = pass_pipeline(break_contig, telo_dict, telo_bound_dict, repeat_data, repeat_censat_data, False)
 
-    final_cen_vtg_contig = pass_pipeline(cen_vtg_contig, telo_dict, telo_bound_dict, repeat_data, repeat_censat_data)
+    final_cen_vtg_contig = pass_pipeline(cen_vtg_contig, telo_dict, telo_bound_dict, repeat_data, repeat_censat_data, False)
+
+    final_subtelo_ppc_node = pass_pipeline(subtelo_ppc_node, telo_dict, telo_bound_dict, repeat_data, repeat_censat_data, True)
 
     for i in final_break_contig:
         temp_list = i
@@ -1404,11 +1547,22 @@ def main():
         temp_list[CTG_ENDND] += total_len
         real_final_contig.append(temp_list)
 
+    total_len += len(final_break_contig)
+
     for i in final_cen_vtg_contig:
         temp_list = i
-        temp_list[CTG_STRND] += total_len + len(final_break_contig)
-        temp_list[CTG_ENDND] += total_len + len(final_break_contig)
+        temp_list[CTG_STRND] += total_len
+        temp_list[CTG_ENDND] += total_len
         real_final_contig.append(temp_list)
+
+    total_len += len(final_cen_vtg_contig)
+
+    for i in final_subtelo_ppc_node:
+        temp_list = i
+        temp_list[CTG_STRND] += total_len
+        temp_list[CTG_ENDND] += total_len
+        real_final_contig.append(temp_list)
+
     add_node_count = len(final_break_contig) + len(final_cen_vtg_contig)
     s = 0
     r_l = len(real_final_contig)

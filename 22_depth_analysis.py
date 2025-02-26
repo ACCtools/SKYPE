@@ -8,7 +8,7 @@ import glob
 from tqdm import tqdm
 from scipy.optimize import nnls
 
-ABS_MAX_COVERAGE_RATIO = 6
+ABS_MAX_COVERAGE_RATIO = int(sys.argv[3])
 
 def chr2int(x):
     chrXY2int = {'chrX' : 24, 'chrY' : 25}
@@ -39,8 +39,10 @@ bed_data = import_bed(bpath)
 
 # HuH-28의 /home/hyunwoo/51g_cancer_denovo/51_depth_data/HuH-28.win.stat.gz를 읽어서 모든 경우 chr, st set을 가지고온다 (나머지 없는 경우를 0으로 채우게)
 # chrM은 뺀다
-
+RATIO_OUTLIER_FOLDER = f"{sys.argv[2]}/11_ref_ratio_outliers/"
 main_stat_loc = sys.argv[1]
+front_contig_path = RATIO_OUTLIER_FOLDER+"front_jump/"
+back_contig_path = RATIO_OUTLIER_FOLDER+"back_jump/"
 
 
 df = pd.read_csv(main_stat_loc, compression='gzip', comment='#', sep='\t', names=['chr', 'st', 'nd', 'length', 'covsite', 'totaldepth', 'cov', 'meandepth'])
@@ -105,6 +107,26 @@ for folder_path in tqdm(chr_chr_folder_path, desc='Parse coverage from gz files'
         filter_vec_list.append(fv)
         vec_list.append(v)
 
+fclen = len(glob.glob(front_contig_path+"*"))
+for i in tqdm(range(1, fclen//4 + 1), desc='Parse coverage from forward-directed outlier contig gz files', disable=not sys.stdout.isatty()):
+    ov_loc = front_contig_path+f"{i}.win.stat.gz"
+    bv_loc = front_contig_path+f"{i}_base.win.stat.gz"
+    ofv, ov = get_vec_from_stat_loc(ov_loc)
+    bfv, bv = get_vec_from_stat_loc(bv_loc)
+    filter_vec_list.append(ofv-bfv)
+    vec_list.append(ov-bv)
+
+bclen = len(glob.glob(back_contig_path+"*"))
+for i in tqdm(range(1, bclen//4 + 1), desc='Parse coverage from backward-directed outlier contig gz files', disable=not sys.stdout.isatty()):
+    ov_loc = back_contig_path+f"{i}.win.stat.gz"
+    bv_loc = back_contig_path+f"{i}_base.win.stat.gz"
+    ofv, ov = get_vec_from_stat_loc(ov_loc)
+    bfv, bv = get_vec_from_stat_loc(bv_loc)
+    filter_vec_list.append(ofv+bfv)
+    vec_list.append(ov+bv)
+
+
+print("Regression analysis is ongoing...")
 
 A = np.vstack(filter_vec_list).T
 B = main_filter_vec
@@ -116,6 +138,8 @@ b_norm = np.linalg.norm(B)
 
 print(f'Error : {round(error, 4)}')
 print(f'Norm error : {round(error / b_norm, 4)}')
+
+print("Forming result images...")
 
 A = np.vstack(vec_list)
 B = main_vec
