@@ -53,7 +53,7 @@ NCLOSE_MERGE_LIMIT = 1*K
 ALL_REPEAT_NCLOSE_COMPRESS_LIMIT = 500*K
 PATH_COMPRESS_LIMIT = 50*K
 IGNORE_PATH_LIMIT = 50*K
-NON_REPEAT_NOISE_RATIO=0.01
+NON_REPEAT_NOISE_RATIO=0.1
 
 CENSAT_COMPRESSABLE_THRESHOLD = 1000*K
 
@@ -663,7 +663,7 @@ def make_virtual_ord_ctg(contig_data, fake_bnd):
             vctg_rng = fake_bnd[curr_ctg]
             for i in range(vctg_rng[0], vctg_rng[1] +1):
                 temp_list = list(contig_data[i])
-                temp_list[CTG_NAM] = temp_list[CTG_NAM][:-1] + "1l"
+                temp_list[CTG_NAM] = temp_list[CTG_NAM][:-1] + "l"
                 temp_list[CTG_TYP] = 3
                 temp_list[CTG_STRND] = idx + contig_data_size
                 temp_list[CTG_ENDND] = idx + vctg_rng[1] - vctg_rng[0] + contig_data_size

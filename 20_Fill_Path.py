@@ -455,7 +455,7 @@ parser.add_argument("prefix",
 parser.add_argument("--alt", 
                     help="Path to an alternative PAF file (optional).")
 
-# t = "python 20_Fill_Path.py 20_acc_pipe/Caki-1.p/Caki-1.p.aln.paf 20_acc_pipe/Caki-1.p/Caki-1.p.aln.paf.ppc.paf 30_skype_pipe/Caki-1_03_52_36 --alt 20_acc_pipe/Caki-1.a/Caki-1.a.aln.paf"
+# t = "python 20_Fill_Path.py 20_acc_pipe/KKU-100.p/KKU-100.p.aln.paf 20_acc_pipe/KKU-100.p/KKU-100.p.aln.paf.ppc.paf 30_skype_pipe/KKU-100_06_27_56 --alt 20_acc_pipe/KKU-100.a/KKU-100.a.aln.paf"
 # t = t.split()
 args = parser.parse_args()
 # args = parser.parse_args(t[2:])
@@ -487,11 +487,12 @@ TYPE_4_PATH_FILE_FOLDER = f"{args.prefix}/11_ref_ratio_outliers/"
 
 # exit(1)
 
+
 def fill_path(index_file_path):
     temp_file = index_file_path.split("/")[:-1]
     temp_file[2] = '20_depth'
     folder_path = "/".join(temp_file)
-    cnt = int(index_file_path.split(".")[-3][-1])
+    cnt = int(index_file_path.split(".")[-3].split("/")[-1])
     os.makedirs(f"{folder_path}", exist_ok=True)
     with open(f"{folder_path}/{cnt}.paf", "wt") as f:
         full_connected_path = import_index_path(index_file_path)
@@ -500,6 +501,8 @@ def fill_path(index_file_path):
         full_connected_path_len = len(full_connected_path)
         vcnt = 0
         for i in range(1, full_connected_path_len):
+            if i==full_connected_path_len-1:
+                t=1
             curr_contig = path_contig[-1]
             next_contig = contig_data[full_connected_path[i][1]]
             if curr_contig[CHR_NAM] == next_contig[CHR_NAM] and curr_contig[CTG_NAM] != next_contig[CTG_NAM] \
@@ -553,15 +556,11 @@ def fill_path(index_file_path):
             else:
                 next_contig_origin = form_normal_contig(next_contig, paf_file)
                 path_contig.append(next_contig_origin)
-
         for i in path_contig:
             cigar_str = 'cg:Z:' + cs_to_cigar(i[-1][5:])
-            print(("\t".join(list(map(str, i + [cigar_str])))), file=f)
+            print("\t".join(list(map(str, i + [cigar_str]))), file=f)
     
     return
-
-# fill_path(('30_skype_pipe/Caki-1_03_52_36/20_depth/chr17f_chr17b', '30_skype_pipe/Caki-1_03_52_36/10_fill/chr17f_chr17b/2.index.txt', 1))
-# exit(1)
 
 
 with ProcessPoolExecutor(max_workers=48) as executor:
@@ -573,8 +572,8 @@ with ProcessPoolExecutor(max_workers=48) as executor:
         index_file_paths = glob.glob(folder_path + "/*index*")
         for index_file_path in index_file_paths:
             futures.append(executor.submit(fill_path, index_file_path))
-            
-    
-    # 제출된 작업들이 완료될 때까지 진행 상황을 tqdm으로 표시합니다.
-    for future in tqdm(as_completed(futures), total=len(futures), desc='Fill gap and modify path data', disable=not sys.stdout.isatty()):
-        pass
+        
+
+# 제출된 작업들이 완료될 때까지 진행 상황을 tqdm으로 표시합니다.
+for future in tqdm(as_completed(futures), total=len(futures), desc='Fill gap and modify path data', disable=not sys.stdout.isatty()):
+    pass

@@ -8,7 +8,8 @@ import glob
 from tqdm import tqdm
 from scipy.optimize import nnls
 
-ABS_MAX_COVERAGE_RATIO = int(sys.argv[3])
+ABS_MAX_COVERAGE_RATIO = 10
+MAX_PATH_CNT = 100
 
 def chr2int(x):
     chrXY2int = {'chrX' : 24, 'chrY' : 25}
@@ -145,7 +146,7 @@ A = np.vstack(vec_list)
 B = main_vec
 
 # NNLS 예측 coverage: 각 구성요소의 기여도를 합산하여 하나의 벡터로 만듦
-predicted_B = A.T.dot(weights)
+predicted_B = np.maximum(A.T.dot(weights), 0)
 
 # 4. 각 window의 각도 계산 (circos-like 배치를 위해)
 total_windows = len(chr_st_list)
@@ -213,15 +214,22 @@ plt.savefig(f"{sys.argv[2]}/total_cov.png")
 # 상위 50개 구성요소 선택 및 각 구성요소의 coverage 계산
 # ----------------------------
 
-# weight가 높은 순으로 상위 50개 구성요소의 인덱스 (가상 염색체)
-top_indices = np.argsort(weights)[-50:]
+# weight가 높은 순으로 상위 100개 구성요소의 인덱스 (가상 염색체)
+nz_cnt = 0
+for w in weights:
+    if w > 0:
+        nz_cnt += 1
+    if nz_cnt >= MAX_PATH_CNT:
+        break
+
+top_indices = np.argsort(weights)[-nz_cnt:]
 top_indices = top_indices[::-1]  # 내림차순 정렬
 
 # 각 구성요소의 contribution profile: weight * 해당 A 행
 top_components_coverage = {}
 for idx in top_indices:
     # A[idx, :]는 각 window에 대한 값, 여기에 weight를 곱함
-    top_components_coverage[idx] = weights[idx] * A[idx, :]
+    top_components_coverage[idx] = np.maximum(weights[idx] * A[idx, :], 0)
 
 # ----------------------------
 # chr_st_list를 이용해 각 윈도우의 위치(각도)를 계산

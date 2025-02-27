@@ -12,8 +12,8 @@ chr_chr_folder_path = glob.glob(PATH_FILE_FOLDER+"*")
 back_front_folder_path = glob.glob(RATIO_OUTLIER_FOLDER+"*")
 DEPTH_WINDOW=100 * 1e3
 
-DEPTH_THREAD=2
-TOTAL_THREAD=128
+DEPTH_THREAD=1
+TOTAL_THREAD=100
 
 
 def get_paf_run(paf_loc):
