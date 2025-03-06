@@ -455,7 +455,7 @@ parser.add_argument("prefix",
 parser.add_argument("--alt", 
                     help="Path to an alternative PAF file (optional).")
 
-# t = "python 20_Fill_Path.py 20_acc_pipe/KKU-100.p/KKU-100.p.aln.paf 20_acc_pipe/KKU-100.p/KKU-100.p.aln.paf.ppc.paf 30_skype_pipe/KKU-100_06_27_56 --alt 20_acc_pipe/KKU-100.a/KKU-100.a.aln.paf"
+# t = "python 20_Fill_Path.py 20_acc_pipe/HuCC-T1.p/HuCC-T1.p.aln.paf 20_acc_pipe/HuCC-T1.p/HuCC-T1.p.aln.paf.ppc.paf 30_skype_pipe/HuCC-T1_00_50_38 --alt 20_acc_pipe/HuCC-T1.a/HuCC-T1.a.aln.paf"
 # t = t.split()
 args = parser.parse_args()
 # args = parser.parse_args(t[2:])
@@ -520,6 +520,9 @@ def fill_path(index_file_path):
                         new_next_contig = form_normal_contig(next_contig, paf_file)
                         path_contig.append(new_contig)
                         path_contig.append(new_next_contig)
+                elif curr_contig[CHR_END] == next_contig[CHR_STR] or curr_contig[CHR_STR] == next_contig[CHR_END]:
+                    new_next_contig = form_normal_contig(next_contig, paf_file)
+                    path_contig.append(new_next_contig)
                 else:
                     if curr_contig[CTG_DIR] == '-':
                         curr_contig_rc = node_dir_transform(curr_contig)
@@ -562,6 +565,9 @@ def fill_path(index_file_path):
     
     return
 
+
+# fill_path("30_skype_pipe/HuCC-T1_00_50_38/10_fill/chr14f_chr14b/1.index.txt")
+# exit(1)
 
 with ProcessPoolExecutor(max_workers=48) as executor:
     futures = []

@@ -4,9 +4,12 @@ from collections import defaultdict, Counter
 import ast
 import networkx as nx
 import copy
+import shutil
 import os
-from concurrent.futures import ProcessPoolExecutor, as_completed
+# from concurrent.futures import ProcessPoolExecutor, as_completed
+from multiprocessing import Pool
 from tqdm import tqdm
+from functools import partial
 
 CTG_NAM = 0
 CTG_LEN = 1
@@ -41,8 +44,9 @@ CHROMOSOME_COUNT = 23
 K = 1000
 CHUKJI_LIMIT = 50*K
 BND_CONTIG_BOUND = 0.1
+TOT_PATH_LIMIT = 50*K
 
-CHR_CHANGE_LIMIT = 7
+CHR_CHANGE_LIMIT_PREFIX = 7
 DIR_CHANGE_LIMIT = 1
 CENSAT_VISIT_LIMIT = 2
 
@@ -1091,73 +1095,76 @@ with open(f"{PREFIX}/bnd_only_graph.txt", "wt") as f:
     for i in bnd_graph_adjacency:
         print(i, bnd_graph_adjacency[i], file=f)
 
-G = nx.DiGraph()
-for i in bnd_graph_adjacency:
-    for j in range(0, CHR_CHANGE_LIMIT+1):
-        for k in range(0, DIR_CHANGE_LIMIT+1):
-            if type(i)==str:
-                G.add_node((i, j, k))
-            else:
-                G.add_node(tuple(list(i)+[j, k]))
-for node in bnd_graph_adjacency:
-    for edge in bnd_graph_adjacency[node]:
-        if type(edge)==str:
-            for j in range(0, CHR_CHANGE_LIMIT+1):
-                for k in range(0, DIR_CHANGE_LIMIT+1):
-                    node_limit = tuple(list(node)+[j, k])
-                    edge_limit = (edge, j, k)
-                    G.add_weighted_edges_from([(node_limit, edge_limit, 0)])
-        elif type(node)==str:
-            for j in range(0, CHR_CHANGE_LIMIT+1):
-                for k in range(0, DIR_CHANGE_LIMIT+1):
-                    node_limit = (node, j, k)
-                    edge_limit = tuple(list(edge) + [j, k])
-                    G.add_weighted_edges_from([(node_limit, edge_limit, 0)])
-        else:
-            contig_s = contig_data[node[1]]
-            contig_e = contig_data[edge[1]]
-            if contig_s[CTG_NAM] == contig_e[CTG_NAM]:
-                if node[1] < edge[1]:
-                    d = 0
-                    for i in range(node[1]+1, edge[1]):
-                        d += contig_data[i][CHR_END] - contig_data[i][CHR_STR]
-                else:
-                    d = 0
-                    for i in range(edge[1]+1, node[1]):
-                        d += contig_data[i][CHR_END] - contig_data[i][CHR_STR]
-                        
-            else:
-                ds = contig_s[CHR_END] - contig_s[CHR_STR]
-                de = contig_e[CHR_END] - contig_e[CHR_STR]
-                if distance_checker(contig_s, contig_e)==0:
-                    d = ds + de - overlap_calculator(contig_s, contig_e)
-                else:  
-                    d = distance_checker(contig_s, contig_e) + ds + de 
-            if contig_s[CHR_NAM] != contig_e[CHR_NAM]:
-                for j in range(0, CHR_CHANGE_LIMIT):
-                    for k in range(0, DIR_CHANGE_LIMIT+1):
-                        node_limit = tuple(list(node)+[j, k])
-                        edge_limit = tuple(list(edge)+[j+1, k])
-                        G.add_weighted_edges_from([(node_limit, edge_limit, d)])
-            elif contig_s[CTG_DIR] != contig_e[CTG_DIR] and contig_s[CTG_NAM] == contig_e[CTG_NAM]:
-                for j in range(0, CHR_CHANGE_LIMIT+1):
-                    for k in range(0, DIR_CHANGE_LIMIT):
-                        node_limit = tuple(list(node)+[j, k])
-                        edge_limit = tuple(list(edge)+[j, k+1])
-                        G.add_weighted_edges_from([(node_limit, edge_limit, d)])
-            else:
-                for j in range(0, CHR_CHANGE_LIMIT+1):
-                    for k in range(0, DIR_CHANGE_LIMIT+1):
-                        node_limit = tuple(list(node)+[j, k])
-                        edge_limit = tuple(list(edge)+[j, k])
-                        G.add_weighted_edges_from([(node_limit, edge_limit, d)])
 
 save_loc = PREFIX + '/00_raw'
 print("Now saving results in folder : " + PREFIX)
 print(f"NClose node count : {nclose_node_count}, Telomere connected node count : {telo_node_count}")
-print("Dimension of Breakend Graph :", G)
 
-def run_graph(data):
+def make_graph(CHR_CHANGE_LIMIT):
+    G = nx.DiGraph()
+    for i in bnd_graph_adjacency:
+        for j in range(0, CHR_CHANGE_LIMIT+1):
+            for k in range(0, DIR_CHANGE_LIMIT+1):
+                if type(i)==str:
+                    G.add_node((i, j, k))
+                else:
+                    G.add_node(tuple(list(i)+[j, k]))
+    for node in bnd_graph_adjacency:
+        for edge in bnd_graph_adjacency[node]:
+            if type(edge)==str:
+                for j in range(0, CHR_CHANGE_LIMIT+1):
+                    for k in range(0, DIR_CHANGE_LIMIT+1):
+                        node_limit = tuple(list(node)+[j, k])
+                        edge_limit = (edge, j, k)
+                        G.add_weighted_edges_from([(node_limit, edge_limit, 0)])
+            elif type(node)==str:
+                for j in range(0, CHR_CHANGE_LIMIT+1):
+                    for k in range(0, DIR_CHANGE_LIMIT+1):
+                        node_limit = (node, j, k)
+                        edge_limit = tuple(list(edge) + [j, k])
+                        G.add_weighted_edges_from([(node_limit, edge_limit, 0)])
+            else:
+                contig_s = contig_data[node[1]]
+                contig_e = contig_data[edge[1]]
+                if contig_s[CTG_NAM] == contig_e[CTG_NAM]:
+                    if node[1] < edge[1]:
+                        d = 0
+                        for i in range(node[1]+1, edge[1]):
+                            d += contig_data[i][CHR_END] - contig_data[i][CHR_STR]
+                    else:
+                        d = 0
+                        for i in range(edge[1]+1, node[1]):
+                            d += contig_data[i][CHR_END] - contig_data[i][CHR_STR]
+                            
+                else:
+                    ds = contig_s[CHR_END] - contig_s[CHR_STR]
+                    de = contig_e[CHR_END] - contig_e[CHR_STR]
+                    if distance_checker(contig_s, contig_e)==0:
+                        d = ds + de - overlap_calculator(contig_s, contig_e)
+                    else:  
+                        d = distance_checker(contig_s, contig_e) + ds + de 
+                if contig_s[CHR_NAM] != contig_e[CHR_NAM]:
+                    for j in range(0, CHR_CHANGE_LIMIT):
+                        for k in range(0, DIR_CHANGE_LIMIT+1):
+                            node_limit = tuple(list(node)+[j, k])
+                            edge_limit = tuple(list(edge)+[j+1, k])
+                            G.add_weighted_edges_from([(node_limit, edge_limit, d)])
+                elif contig_s[CTG_DIR] != contig_e[CTG_DIR] and contig_s[CTG_NAM] == contig_e[CTG_NAM]:
+                    for j in range(0, CHR_CHANGE_LIMIT+1):
+                        for k in range(0, DIR_CHANGE_LIMIT):
+                            node_limit = tuple(list(node)+[j, k])
+                            edge_limit = tuple(list(edge)+[j, k+1])
+                            G.add_weighted_edges_from([(node_limit, edge_limit, d)])
+                else:
+                    for j in range(0, CHR_CHANGE_LIMIT+1):
+                        for k in range(0, DIR_CHANGE_LIMIT+1):
+                            node_limit = tuple(list(node)+[j, k])
+                            edge_limit = tuple(list(edge)+[j, k])
+                            G.add_weighted_edges_from([(node_limit, edge_limit, d)])
+
+    return G
+
+def run_graph(data, CHR_CHANGE_LIMIT):
     # path_cluster = set()
     i, j = data
     src = (chr_rev_corr[i], 0, 0)
@@ -1347,16 +1354,74 @@ for i in range(contig_data_size, contig_data_size + 2*CHROMOSOME_COUNT):
     for j in range(i, contig_data_size + 2*CHROMOSOME_COUNT):
         tar_ind_list.append((i, j))
 
-        
+def init_worker(shared_graph):
+    global G
+    G = shared_graph
+
 # cnt_list = process_map(run_graph, tar_ind_list, max_workers=48, chunksize=1)
+tot_cnt = TOT_PATH_LIMIT
 cnt_list = []
-with ProcessPoolExecutor(max_workers=128) as executor:
-    # 각 tar_ind에 대해 run_graph 함수를 실행하는 작업들을 제출합니다.
-    futures = [executor.submit(run_graph, tar) for tar in tar_ind_list]
+
+while tot_cnt >= TOT_PATH_LIMIT and CHR_CHANGE_LIMIT_PREFIX > 0:
+    tot_cnt = 0
+    cnt_list = []
+
+    # 각 반복마다 새로운 G 객체 생성
+    G_obj = make_graph(CHR_CHANGE_LIMIT=CHR_CHANGE_LIMIT_PREFIX)
+
+    # Pool 생성 시 initializer에 G_obj를 전달 (initargs는 반드시 튜플로)
+    with Pool(processes=128, initializer=init_worker, initargs=(G_obj,)) as pool:
+        # imap을 사용하여 결과를 순차적으로 받아옴
+        result_iterator = pool.imap_unordered(partial(run_graph, CHR_CHANGE_LIMIT=CHR_CHANGE_LIMIT_PREFIX), tar_ind_list)
+        for rs in tqdm(result_iterator,
+                        total=len(tar_ind_list),
+                        desc=f'Build breakend construct graph <{CHR_CHANGE_LIMIT_PREFIX}>',
+                        disable=not sys.stdout.isatty()):
+            
+            cnt_list.append(rs)
+            tot_cnt += rs[1]
+
+            # 한계치를 넘으면 즉시 종료
+            if tot_cnt >= TOT_PATH_LIMIT:
+                pool.terminate()  # 작업 중인 프로세스들을 즉시 종료
+                shutil.rmtree(save_loc, ignore_errors=True)
+                break
     
-    # 제출된 작업들이 완료될 때까지 진행 상황을 tqdm으로 표시합니다.
-    for future in tqdm(as_completed(futures), total=len(futures), desc='Build breakend construct graph', disable=not sys.stdout.isatty()):
-        cnt_list.append(future.result())
+    if tot_cnt >= TOT_PATH_LIMIT:
+        print(f'CHR_CHANGE_LIMIT : {CHR_CHANGE_LIMIT_PREFIX} failed')
+        CHR_CHANGE_LIMIT_PREFIX -= 1
+
+# while tot_cnt >= TOT_PATH_LIMIT and CHR_CHANGE_LIMIT_PREFIX > 0:
+#     tot_cnt = 0
+#     cnt_list = []
+
+#     # 각 반복마다 새로운 G 객체 생성
+#     G_obj = make_graph(CHR_CHANGE_LIMIT=CHR_CHANGE_LIMIT_PREFIX)
+
+#     # 새로운 ProcessPoolExecutor를 생성하여, 해당 반복의 G를 워커에 전달
+#     with ProcessPoolExecutor(max_workers=128, initializer=init_worker, initargs={G_obj}) as executor:
+#         futures = [executor.submit(partial(run_graph, CHR_CHANGE_LIMIT=CHR_CHANGE_LIMIT_PREFIX), tar) for tar in tar_ind_list]
+    
+#         for future in tqdm(as_completed(futures), total=len(futures), desc=f'Build breakend construct graph <{CHR_CHANGE_LIMIT_PREFIX}>', disable=not sys.stdout.isatty()):
+#             rs = future.result()
+#             cnt_list.append(rs)
+#             tot_cnt += rs[1]
+
+#             if tot_cnt >= TOT_PATH_LIMIT:
+#                 print(f'CHR_CHANGE_LIMIT : {CHR_CHANGE_LIMIT_PREFIX} failed')
+#                 executor.shutdown(wait=False)
+#                 shutil.rmtree(save_loc, ignore_errors=True)
+#                 CHR_CHANGE_LIMIT_PREFIX -= 1
+#                 break
+
+
+
+if CHR_CHANGE_LIMIT_PREFIX == 0:
+    print('Cancer is too divergent.')
+    print('Breakend path failed')
+    exit(1)
+
+print(f'CHR_CHANGE_LIMIT : {CHR_CHANGE_LIMIT_PREFIX} sucess')
 
 cancer_prefix = os.path.basename(PREPROCESSED_PAF_FILE_PATH).split('.')[0]
 

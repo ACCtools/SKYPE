@@ -7,6 +7,7 @@ import glob
 
 from tqdm import tqdm
 from scipy.optimize import nnls
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
 ABS_MAX_COVERAGE_RATIO = 10
 MAX_PATH_CNT = 100
@@ -96,17 +97,39 @@ def get_vec_from_stat_loc(stat_loc_):
 PATH_FILE_FOLDER = f"{sys.argv[2]}/20_depth"
 chr_chr_folder_path = glob.glob(PATH_FILE_FOLDER+"/*")
 
-main_filter_vec, main_vec = get_vec_from_stat_loc(main_stat_loc)
+def get_two_vec_list_folder(folder_path):
+    filter_vec_list = []
+    vec_list = []
 
-filter_vec_list = []
-vec_list = []
-for folder_path in tqdm(chr_chr_folder_path, desc='Parse coverage from gz files', disable=not sys.stdout.isatty()):
     paf_paths = glob.glob(folder_path + "/*.win.stat.gz")
     for stat_loc in paf_paths:
         fv, v = get_vec_from_stat_loc(stat_loc)
 
         filter_vec_list.append(fv)
         vec_list.append(v)
+
+    return filter_vec_list, vec_list
+
+main_filter_vec, main_vec = get_vec_from_stat_loc(main_stat_loc)
+
+filter_vec_list = []
+vec_list = []
+
+with ProcessPoolExecutor(max_workers=128) as executor:
+    futures = [executor.submit(get_two_vec_list_folder, folder_path) for folder_path in chr_chr_folder_path]
+    for future in tqdm(as_completed(futures), total=len(futures), desc='Parse coverage from gz files', disable=not sys.stdout.isatty()):
+        fvl, vl = future.result()
+
+        filter_vec_list.extend(fvl)
+        vec_list.extend(vl)
+
+# for folder_path in tqdm(chr_chr_folder_path, desc='Parse coverage from gz files', disable=not sys.stdout.isatty()):
+#     paf_paths = glob.glob(folder_path + "/*.win.stat.gz")
+#     for stat_loc in paf_paths:
+#         fv, v = get_vec_from_stat_loc(stat_loc)
+
+#         filter_vec_list.append(fv)
+#         vec_list.append(v)
 
 fclen = len(glob.glob(front_contig_path+"*"))
 for i in tqdm(range(1, fclen//4 + 1), desc='Parse coverage from forward-directed outlier contig gz files', disable=not sys.stdout.isatty()):
