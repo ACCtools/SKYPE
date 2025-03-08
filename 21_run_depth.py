@@ -1,19 +1,33 @@
 import os
 import sys
 import glob
+import argparse
 import subprocess
 
 from tqdm import tqdm
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
-PATH_FILE_FOLDER = f"{sys.argv[1]}/20_depth/"
-RATIO_OUTLIER_FOLDER = f"{sys.argv[1]}/11_ref_ratio_outliers/"
+parser = argparse.ArgumentParser(description="SKYPE run depth program")
+
+parser.add_argument("prefix", 
+                    help="Pefix for pipeline")
+
+parser.add_argument("-t", "--thread", 
+                    help="Number of thread", type=int)
+
+args = parser.parse_args()
+
+PREFIX = args.prefix
+THREAD = args.thread
+
+PATH_FILE_FOLDER = f"{PREFIX}/20_depth/"
+RATIO_OUTLIER_FOLDER = f"{PREFIX}/11_ref_ratio_outliers/"
 chr_chr_folder_path = glob.glob(PATH_FILE_FOLDER+"*")
 back_front_folder_path = glob.glob(RATIO_OUTLIER_FOLDER+"*")
 DEPTH_WINDOW=100 * 1e3
 
 DEPTH_THREAD=1
-TOTAL_THREAD=100
+TOTAL_THREAD=THREAD
 
 
 def get_paf_run(paf_loc):

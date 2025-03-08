@@ -1,6 +1,7 @@
 import numpy as np
 import pandas as pd
 import sys
+import argparse
 import collections
 import matplotlib.pyplot as plt
 import glob
@@ -38,11 +39,26 @@ def inclusive_checker(tuple_a : tuple, tuple_b : tuple) -> bool :
 
 bed_data = import_bed(bpath)
 
+parser = argparse.ArgumentParser(description="SKYPE depth analysis")
+
+parser.add_argument("main_stat_loc", 
+                    help="Cancer coverage location file")
+
+parser.add_argument("prefix", 
+                    help="Pefix for pipeline")
+
+parser.add_argument("-t", "--thread", 
+                    help="Number of thread", type=int)
+
+args = parser.parse_args()
+
+PREFIX = args.prefix
+THREAD = args.thread
+main_stat_loc = args.main_stat_loc
 
 # HuH-28의 /home/hyunwoo/51g_cancer_denovo/51_depth_data/HuH-28.win.stat.gz를 읽어서 모든 경우 chr, st set을 가지고온다 (나머지 없는 경우를 0으로 채우게)
 # chrM은 뺀다
-RATIO_OUTLIER_FOLDER = f"{sys.argv[2]}/11_ref_ratio_outliers/"
-main_stat_loc = sys.argv[1]
+RATIO_OUTLIER_FOLDER = f"{PREFIX}/11_ref_ratio_outliers/"
 front_contig_path = RATIO_OUTLIER_FOLDER+"front_jump/"
 back_contig_path = RATIO_OUTLIER_FOLDER+"back_jump/"
 
@@ -94,7 +110,7 @@ def get_vec_from_stat_loc(stat_loc_):
     
     return np.asarray(fv, dtype=np.float64), np.asarray(v, dtype=np.float64)
 
-PATH_FILE_FOLDER = f"{sys.argv[2]}/20_depth"
+PATH_FILE_FOLDER = f"{PREFIX}/20_depth"
 chr_chr_folder_path = glob.glob(PATH_FILE_FOLDER+"/*")
 
 def get_two_vec_list_folder(folder_path):
@@ -115,7 +131,7 @@ main_filter_vec, main_vec = get_vec_from_stat_loc(main_stat_loc)
 filter_vec_list = []
 vec_list = []
 
-with ProcessPoolExecutor(max_workers=128) as executor:
+with ProcessPoolExecutor(max_workers=THREAD) as executor:
     futures = [executor.submit(get_two_vec_list_folder, folder_path) for folder_path in chr_chr_folder_path]
     for future in tqdm(as_completed(futures), total=len(futures), desc='Parse coverage from gz files', disable=not sys.stdout.isatty()):
         fvl, vl = future.result()
@@ -229,7 +245,7 @@ ax.set_ylim(ax.get_ylim()[0], np.median(B) * 3)
 plt.title("Circos-like Plot: Observed vs. NNLS Predicted Coverage", fontsize=14)
 plt.legend(loc='upper right', bbox_to_anchor=(1.3, 1.1), fontsize='small')
 plt.tight_layout()
-plt.savefig(f"{sys.argv[2]}/total_cov.png")
+plt.savefig(f"{PREFIX}/total_cov.png")
 
 # print("NNLS weights:", weights)
 
@@ -326,4 +342,4 @@ ax.set_ylim(ax.get_ylim()[0], np.median(B) * 3)
 plt.title("Circos-like Plot: Coverage and Top 50 Components")
 plt.legend(loc='upper right', bbox_to_anchor=(1.3, 1.1), fontsize='small')
 plt.tight_layout()
-plt.savefig(f'{sys.argv[2]}/virtual_chromosome_circosplot.png')
+plt.savefig(f'{PREFIX}/virtual_chromosome_circosplot.png')

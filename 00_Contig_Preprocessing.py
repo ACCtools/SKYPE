@@ -49,9 +49,9 @@ FORCE_TELOMERE_THRESHOLD = 10*K
 TELOMERE_CLUSTER_THRESHOLD = 500*K
 SUBTELOMERE_LENGTH = 500*K
 
-FLANK_SIZE_BP = 3*M
+FLANK_SIZE_BP = 5*M
 MIN_FLANK_SIZE_BP = 1*M
-BREAKEND_CEN_RATIO_THRESHOLD = 1.4
+BREAKEND_CEN_RATIO_THRESHOLD = 1.2
 
 def dbg() :
     print("hi")
@@ -1077,7 +1077,7 @@ def find_breakend_centromere(repeat_censat_data : dict, chr_len : list, df : pd.
     result_df = result_df[result_df['weighted_ratio']>=BREAKEND_CEN_RATIO_THRESHOLD]
 
     censat_bnd_chr_list = sorted(set(result_df['chr']), key=lambda t : chr2int(t))
-    print(f'Breakend censat chr : {' '.join(censat_bnd_chr_list)}')
+    print(f'Breakend censat chr : {" ".join(censat_bnd_chr_list)}')
 
     right_df = result_df[result_df['right_weighted_meandepth'] > result_df['left_weighted_meandepth']]
     left_df = result_df[result_df['left_weighted_meandepth'] > result_df['right_weighted_meandepth']]
