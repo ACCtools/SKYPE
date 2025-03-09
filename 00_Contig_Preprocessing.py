@@ -49,9 +49,10 @@ FORCE_TELOMERE_THRESHOLD = 10*K
 TELOMERE_CLUSTER_THRESHOLD = 500*K
 SUBTELOMERE_LENGTH = 500*K
 
-FLANK_SIZE_BP = 5*M
+LOW_FLANK_SIZE_BP = 5*M
+HIGH_FLANK_SIZE_BP = 10*M
 MIN_FLANK_SIZE_BP = 1*M
-BREAKEND_CEN_RATIO_THRESHOLD = 1.2
+BREAKEND_CEN_RATIO_THRESHOLD = 1.5
 
 def dbg() :
     print("hi")
@@ -1006,71 +1007,67 @@ def find_breakend_centromere(repeat_censat_data : dict, chr_len : list, df : pd.
         for rep in intervals:
             rep_start_0, rep_end_0 = rep  # 0-indexed 좌표
             
-            # 좌측 flanking: repeat의 1-indexed 시작은 rep_start_0 + 1
-            if rep_start_0 > 0:
-                left_flank_end = rep_start_0  # repeat 시작 전 마지막 base (1-indexed)
-                left_flank_start = max(1, (rep_start_0 + 1) - FLANK_SIZE_BP)
+            final_weighted_ratio = -1
+            final_left_weighted = -1
+            final_right_weighted = -1
 
-                if left_flank_end < left_flank_start or (left_flank_end - left_flank_start + 1) < MIN_FLANK_SIZE_BP:
+            for FLANK_SIZE_BP in [HIGH_FLANK_SIZE_BP, LOW_FLANK_SIZE_BP]:
+                # 좌측 flanking: repeat의 1-indexed 시작은 rep_start_0 + 1
+                if rep_start_0 > 0:
+                    left_flank_end = rep_start_0  # repeat 시작 전 마지막 base (1-indexed)
+                    left_flank_start = max(1, (rep_start_0 + 1) - FLANK_SIZE_BP)
+
+                    if left_flank_end < left_flank_start or (left_flank_end - left_flank_start + 1) < MIN_FLANK_SIZE_BP:
+                        left_flank_start = None
+                        left_flank_end = None
+                        left_weighted = None
+                    else:
+                        left_weighted = weighted_avg_meandepth(chrom_df, left_flank_start, left_flank_start + MIN_FLANK_SIZE_BP)
+                else:
                     left_flank_start = None
                     left_flank_end = None
                     left_weighted = None
+
+                # 우측 flanking: repeat의 끝 이후 첫 base부터
+                if rep_end_0 < chrom_length:
+                    right_flank_start = rep_end_0 + 1
+                    right_flank_end = min(chrom_length, rep_end_0 + FLANK_SIZE_BP)
+
+                    if right_flank_end < right_flank_start or (right_flank_end - right_flank_start + 1) < MIN_FLANK_SIZE_BP:
+                        right_flank_start = None
+                        right_flank_end = None
+                        right_weighted = None
+                    else:
+                        right_weighted = weighted_avg_meandepth(chrom_df, right_flank_end - MIN_FLANK_SIZE_BP, right_flank_end)
                 else:
-                    left_weighted = weighted_avg_meandepth(chrom_df, left_flank_start, left_flank_end)
-            else:
-                left_flank_start = None
-                left_flank_end = None
-                left_weighted = None
-
-            # 우측 flanking: repeat의 끝 이후 첫 base부터
-            if rep_end_0 < chrom_length:
-                right_flank_start = rep_end_0 + 1
-                right_flank_end = min(chrom_length, rep_end_0 + FLANK_SIZE_BP)
-
-                if right_flank_end < right_flank_start or (right_flank_end - right_flank_start + 1) < MIN_FLANK_SIZE_BP:
                     right_flank_start = None
                     right_flank_end = None
                     right_weighted = None
+
+                # 양쪽 flanking 영역 중 하나라도 존재하지 않으면 해당 repeat를 건너뜁니다.
+                if left_flank_start is None or right_flank_start is None:
+                    continue
+                
+                if left_weighted >= right_weighted:
+                    weighted_ratio = left_weighted / right_weighted
                 else:
-                    right_weighted = weighted_avg_meandepth(chrom_df, right_flank_start, right_flank_end)
-            else:
-                right_flank_start = None
-                right_flank_end = None
-                right_weighted = None
-
-            # 양쪽 flanking 영역 중 하나라도 존재하지 않으면 해당 repeat를 건너뜁니다.
-            if left_flank_start is None or right_flank_start is None:
+                    weighted_ratio = right_weighted / left_weighted
+                
+                if final_weighted_ratio < weighted_ratio:
+                    final_weighted_ratio = weighted_ratio
+                    final_left_weighted = left_weighted
+                    final_right_weighted = right_weighted
+            
+            if final_weighted_ratio == -1:
                 continue
-            
-            if left_weighted >= right_weighted:
-                weighted_ratio = left_weighted / right_weighted
-            else:
-                weighted_ratio = right_weighted / left_weighted
-
-            weighted_diff = abs(right_weighted - left_weighted)
-            
-            # results.append({
-            #     'chr': chrom,
-            #     'repeat_start': rep_start_0,
-            #     'repeat_end': rep_end_0,
-            #     'left_weighted_meandepth': left_weighted,
-            #     'right_weighted_meandepth': right_weighted,
-            #     'weighted_ratio': weighted_ratio,
-            #     'weighted_diff': weighted_diff
-            # })
 
             results.append({
                 'chr': chrom,
                 'repeat_start_0': rep_start_0,
                 'repeat_end_0': rep_end_0,
-                'left_flank_start': left_flank_start,
-                'left_flank_end': left_flank_end,
-                'left_weighted_meandepth': left_weighted,
-                'right_flank_start': right_flank_start,
-                'right_flank_end': right_flank_end,
-                'right_weighted_meandepth': right_weighted,
-                'weighted_ratio': weighted_ratio,
-                'weighted_diff': weighted_diff
+                'left_weighted_meandepth': final_left_weighted,
+                'right_weighted_meandepth': final_right_weighted,
+                'weighted_ratio': final_weighted_ratio,
             })
 
     result_df = pd.DataFrame(results)

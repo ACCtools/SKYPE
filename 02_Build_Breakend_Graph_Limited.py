@@ -895,11 +895,10 @@ parser.add_argument("graph_file_txt",
                     help="Path to the graph text file.")
 parser.add_argument("prefix", 
                     help="Pefix for pipeline")
-
 parser.add_argument("--orignal_paf_loc", nargs='+',
                     help="Orignal paf location to detect location (primary, alternative paf location)")
 parser.add_argument("-t", "--thread", 
-                        help="Number of thread", type=int)
+                    help="Number of thread", type=int)
 
 args = parser.parse_args()
 
