@@ -116,6 +116,7 @@ chr_chr_folder_path = glob.glob(PATH_FILE_FOLDER+"/*")
 def get_two_vec_list_folder(folder_path):
     filter_vec_list = []
     vec_list = []
+    loc_list = []
 
     paf_paths = glob.glob(folder_path + "/*.win.stat.gz")
     for stat_loc in paf_paths:
@@ -123,21 +124,25 @@ def get_two_vec_list_folder(folder_path):
 
         filter_vec_list.append(fv)
         vec_list.append(v)
+        loc_list.append(stat_loc)
 
-    return filter_vec_list, vec_list
+    return filter_vec_list, vec_list, loc_list
 
 main_filter_vec, main_vec = get_vec_from_stat_loc(main_stat_loc)
 
 filter_vec_list = []
 vec_list = []
+tot_loc_list = []
 
 with ProcessPoolExecutor(max_workers=THREAD) as executor:
     futures = [executor.submit(get_two_vec_list_folder, folder_path) for folder_path in chr_chr_folder_path]
     for future in tqdm(as_completed(futures), total=len(futures), desc='Parse coverage from gz files', disable=not sys.stdout.isatty()):
-        fvl, vl = future.result()
+        fvl, vl, ll = future.result()
 
         filter_vec_list.extend(fvl)
         vec_list.extend(vl)
+        tot_loc_list.extend(ll)
+
 
 # for folder_path in tqdm(chr_chr_folder_path, desc='Parse coverage from gz files', disable=not sys.stdout.isatty()):
 #     paf_paths = glob.glob(folder_path + "/*.win.stat.gz")
