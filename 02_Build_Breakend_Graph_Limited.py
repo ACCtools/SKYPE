@@ -45,6 +45,7 @@ K = 1000
 CHUKJI_LIMIT = 50*K
 BND_CONTIG_BOUND = 0.1
 TOT_PATH_LIMIT = 50*K
+PAT_PATH_LIMIT = 5*K
 
 CHR_CHANGE_LIMIT_PREFIX = 7
 DIR_CHANGE_LIMIT = 1
@@ -52,8 +53,8 @@ CENSAT_VISIT_LIMIT = 2
 
 
 PATH_MAJOR_COMPONENT = 3
-NCLOSE_COMPRESS_LIMIT = 50*K
-NCLOSE_MERGE_LIMIT = 1*K
+NCLOSE_COMPRESS_LIMIT = 100*K
+NCLOSE_MERGE_LIMIT = 10*K
 ALL_REPEAT_NCLOSE_COMPRESS_LIMIT = 500*K
 PATH_COMPRESS_LIMIT = 50*K
 IGNORE_PATH_LIMIT = 50*K
@@ -1169,7 +1170,8 @@ def run_graph(data, CHR_CHANGE_LIMIT):
     i, j = data
     src = (chr_rev_corr[i], 0, 0)
     tar = chr_rev_corr[j]
-
+    folder_name = f"{save_loc}/{src[0]}_{tar}"
+    cnt = 0
     H = copy.deepcopy(G)
     for k in range(contig_data_size, contig_data_size + 2*CHROMOSOME_COUNT):
         if chr_rev_corr[k] not in (src[0], tar):
@@ -1178,156 +1180,175 @@ def run_graph(data, CHR_CHANGE_LIMIT):
                     H.remove_node((chr_rev_corr[k], ii, jj))
     # print(src[0], tar)
     path_compress = defaultdict(list)
-    ii = CHR_CHANGE_LIMIT
-    
-    path_list = []
-    for jj in range(0, DIR_CHANGE_LIMIT+1):
-        I = copy.deepcopy(H)
-        if src[0] != tar:
-            for iii in range(0, CHR_CHANGE_LIMIT+1):
-                for jjj in range(0, DIR_CHANGE_LIMIT+1):
-                    if iii or jjj:
-                        I.remove_node((src[0], iii, jjj))
-                    if iii!=ii or jjj!=jj:
-                        I.remove_node((tar, iii, jjj))
-        else:
-            for iii in range(0, CHR_CHANGE_LIMIT+1):
-                for jjj in range(0, DIR_CHANGE_LIMIT+1):
-                    if (iii!=ii or jjj!=jj) and (iii + jjj != 0):
-                        if I.has_node((tar, iii, jjj)):
+    for ii in range(0, CHR_CHANGE_LIMIT+1):
+        for jj in range(0, DIR_CHANGE_LIMIT+1):
+            I = copy.deepcopy(H)
+            if src[0] != tar:
+                for iii in range(0, CHR_CHANGE_LIMIT+1):
+                    for jjj in range(0, DIR_CHANGE_LIMIT+1):
+                        if iii or jjj:
+                            I.remove_node((src[0], iii, jjj))
+                        if iii!=ii or jjj!=jj:
                             I.remove_node((tar, iii, jjj))
-        # print(ii, jj)
-        if nx.has_path(I, src, (tar, ii, jj)):
-            # print(src, (tar, ii, jj))
-            for path in nx.shortest_simple_paths(I, source=src, target=(tar, ii, jj), weight = 'weight'):
-                    # for k in path:
-                #     print(k)
-                calc_weight = nx.path_weight(I, path, 'weight')
-                #print(cnt, calc_weight)
-                path_len = len(path)
-                path_counter = Counter()
-                if path_len == 1:
-                    continue
-                # 양끝 전처리
-                if contig_data[path[1][1]][CTG_NAM] == contig_data[path[2][1]][CTG_NAM]:
-                    path_counter[contig_data[path[1][1]][CHR_NAM]]+=\
-                    contig_data[path[1][1]][CHR_END] - contig_data[path[1][1]][CHR_STR]
+            else:
+                for iii in range(0, CHR_CHANGE_LIMIT+1):
+                    for jjj in range(0, DIR_CHANGE_LIMIT+1):
+                        if (iii!=ii or jjj!=jj) and (iii + jjj != 0):
+                            if I.has_node((tar, iii, jjj)):
+                                I.remove_node((tar, iii, jjj))
+            # print(ii, jj)
+            if nx.has_path(I, src, (tar, ii, jj)):
+                # print(src, (tar, ii, jj))
+                for path in nx.shortest_simple_paths(I, source=src, target=(tar, ii, jj), weight = 'weight'):
+                      # for k in path:
+                    #     print(k)
+                    calc_weight = nx.path_weight(I, path, 'weight')
+                    #print(cnt, calc_weight)
+                    path_len = len(path)
+                    path_counter = Counter()
+                    if path_len == 1:
+                        continue
+                    # 양끝 전처리
+                    if contig_data[path[1][1]][CTG_NAM] == contig_data[path[2][1]][CTG_NAM]:
+                        path_counter[contig_data[path[1][1]][CHR_NAM]]+=\
+                        contig_data[path[1][1]][CHR_END] - contig_data[path[1][1]][CHR_STR]
 
-                if contig_data[path[path_len-2][1]][CTG_NAM] == contig_data[path[path_len-3][1]][CTG_NAM]:
-                    path_counter[contig_data[path[path_len-2][1]][CHR_NAM]]+=\
-                    contig_data[path[path_len-2][1]][CHR_END] - contig_data[path[path_len-2][1]][CHR_STR]
-                contig_set =  set()
-                contig_set.add(path[path_len-2][1])
+                    if contig_data[path[path_len-2][1]][CTG_NAM] == contig_data[path[path_len-3][1]][CTG_NAM]:
+                        path_counter[contig_data[path[path_len-2][1]][CHR_NAM]]+=\
+                        contig_data[path[path_len-2][1]][CHR_END] - contig_data[path[path_len-2][1]][CHR_STR]
+                    contig_set =  set()
+                    contig_set.add(path[path_len-2][1])
 
-                nclose_st_cluster_set = set()
-                nclose_ed_cluster_set = set()
-                cluster_overlap_flag = False
-                for node in range(1, path_len-1):
-                    if path[node][1] in st_compress.keys() and st_compress[path[node][1]] in nclose_st_cluster_set:
-                        cluster_overlap_flag = True
-                        break
-                    elif path[node][1] in st_compress.keys():
-                        nclose_st_cluster_set.add(st_compress[path[node][1]])
-                    if path[node][1] in ed_compress.keys() and ed_compress[path[node][1]] in nclose_ed_cluster_set:
-                        cluster_overlap_flag = True
-                        break
-                    elif path[node][1] in ed_compress.keys():
-                        nclose_ed_cluster_set.add(ed_compress[path[node][1]])
-                if cluster_overlap_flag:
-                    continue
-                
-                censat_node_vis = 0
-                contig_overuse_flag = False
-                censat_overuse_flag = False
-                for node in range(1, path_len-2):
-                    if path[node][1] in contig_set:
-                        contig_overuse_flag = True
-                        break
-                    contig_set.add(path[node][1])
-                    contig_s = contig_data[path[node][1]]
-                    contig_e = contig_data[path[node+1][1]]
-                    ds = contig_s[CHR_END] - contig_s[CHR_STR]
-                    de = contig_e[CHR_END] - contig_e[CHR_STR]
-                    if contig_s[CTG_CENSAT] != '0' and contig_e[CTG_CENSAT] != '0':
-                            censat_node_vis += 1
-                            if censat_node_vis >= CENSAT_VISIT_LIMIT:
-                                censat_overuse_flag = True
-                                break
-                    if contig_s[CTG_NAM] == contig_e[CTG_NAM]:
-                        if path[node][1] < path[node+1][1]:
-                            for same_contig in range(path[node][1]+1, path[node+1][1]):
-                                path_counter[contig_data[same_contig][CHR_NAM]] += \
-                                contig_data[same_contig][CHR_END] - contig_data[same_contig][CHR_STR]
+                    nclose_st_cluster_set = set()
+                    nclose_ed_cluster_set = set()
+                    cluster_overlap_flag = False
+                    for node in range(1, path_len-1):
+                        if path[node][1] in st_compress.keys() and st_compress[path[node][1]] in nclose_st_cluster_set:
+                            cluster_overlap_flag = True
+                            break
+                        elif path[node][1] in st_compress.keys():
+                            nclose_st_cluster_set.add(st_compress[path[node][1]])
+                        if path[node][1] in ed_compress.keys() and ed_compress[path[node][1]] in nclose_ed_cluster_set:
+                            cluster_overlap_flag = True
+                            break
+                        elif path[node][1] in ed_compress.keys():
+                            nclose_ed_cluster_set.add(ed_compress[path[node][1]])
+                    if cluster_overlap_flag:
+                        continue
+                    
+                    censat_node_vis = 0
+                    contig_overuse_flag = False
+                    censat_overuse_flag = False
+                    for node in range(1, path_len-2):
+                        if path[node][1] in contig_set:
+                            contig_overuse_flag = True
+                            break
+                        contig_set.add(path[node][1])
+                        contig_s = contig_data[path[node][1]]
+                        contig_e = contig_data[path[node+1][1]]
+                        ds = contig_s[CHR_END] - contig_s[CHR_STR]
+                        de = contig_e[CHR_END] - contig_e[CHR_STR]
+                        if contig_s[CTG_CENSAT] != '0' and contig_e[CTG_CENSAT] != '0':
+                                censat_node_vis += 1
+                                if censat_node_vis >= CENSAT_VISIT_LIMIT:
+                                    censat_overuse_flag = True
+                                    break
+                        if contig_s[CTG_NAM] == contig_e[CTG_NAM]:
+                            if path[node][1] < path[node+1][1]:
+                                for same_contig in range(path[node][1]+1, path[node+1][1]):
+                                    path_counter[contig_data[same_contig][CHR_NAM]] += \
+                                    contig_data[same_contig][CHR_END] - contig_data[same_contig][CHR_STR]
+                            else:
+                                for same_contig in range(path[node+1][1]+1, path[node][1]):
+                                    path_counter[contig_data[same_contig][CHR_NAM]] += \
+                                    contig_data[same_contig][CHR_END] - contig_data[same_contig][CHR_STR]
                         else:
-                            for same_contig in range(path[node+1][1]+1, path[node][1]):
-                                path_counter[contig_data[same_contig][CHR_NAM]] += \
-                                contig_data[same_contig][CHR_END] - contig_data[same_contig][CHR_STR]
-                    else:
-                        if distance_checker(contig_s, contig_e)==0:
-                            path_counter[contig_s[CHR_NAM]] += \
-                            ds + de - overlap_calculator(contig_s, contig_e)
-                        else:  
-                            ds = contig_s[CHR_END] - contig_s[CHR_STR]
-                            de = contig_e[CHR_END] - contig_e[CHR_STR]
-                            path_counter[contig_s[CHR_NAM]] += \
-                            distance_checker(contig_s, contig_e) + ds + de
-                if contig_overuse_flag or censat_overuse_flag:
-                    continue
-                
-                total_path_ref_len = sum(path_counter.values())
+                            if distance_checker(contig_s, contig_e)==0:
+                                path_counter[contig_s[CHR_NAM]] += \
+                                ds + de - overlap_calculator(contig_s, contig_e)
+                            else:  
+                                ds = contig_s[CHR_END] - contig_s[CHR_STR]
+                                de = contig_e[CHR_END] - contig_e[CHR_STR]
+                                path_counter[contig_s[CHR_NAM]] += \
+                                distance_checker(contig_s, contig_e) + ds + de
+                    if contig_overuse_flag or censat_overuse_flag:
+                        continue
+                    
+                    total_path_ref_len = sum(path_counter.values())
 
-                ig_k_list = []
-                for k, v in path_counter.items():
-                    if v < IGNORE_PATH_LIMIT:
-                        ig_k_list.append(k)
-                
-                for k in ig_k_list:
-                    del path_counter[k]
+                    ig_k_list = []
+                    for k, v in path_counter.items():
+                        if v < IGNORE_PATH_LIMIT:
+                            ig_k_list.append(k)
+                    
+                    for k in ig_k_list:
+                        del path_counter[k]
 
-                if len(path_counter) == 0:
-                    continue
-                
-                ack = sorted(path_counter.items(), key=lambda x:-x[1])
-                longest_chr = ack[0]
-                second_chr = ack[1] if len(ack) > 1 else ack[0]
-                
-                flag = True
-                flagflag = False
-                rank = []
-                for i in range(min(PATH_MAJOR_COMPONENT, len(ack))):
-                    if ack[i][0] in (src[0][:-1], tar[:-1]):
-                        rank.append(i)
-                if len(rank)==2:
-                    flagflag = True
-                elif len(rank)==1:
-                    if rank[0]<=1:
+                    if len(path_counter) == 0:
+                        continue
+                    
+                    ack = sorted(path_counter.items(), key=lambda x:-x[1])
+                    longest_chr = ack[0]
+                    second_chr = ack[1] if len(ack) > 1 else ack[0]
+                    
+                    flag = True
+                    flagflag = False
+                    rank = []
+                    for i in range(min(PATH_MAJOR_COMPONENT, len(ack))):
+                        if ack[i][0] in (src[0][:-1], tar[:-1]):
+                            rank.append(i)
+                    if len(rank)==2:
                         flagflag = True
+                    elif len(rank)==1:
+                        if rank[0]<=1:
+                            flagflag = True
+                        else:
+                            flagflag = False
                     else:
                         flagflag = False
-                else:
-                    flagflag = False
-                flag = flagflag
-                #print(longest_chr[1] / total_path_ref_len)
-                if (longest_chr[1]+second_chr[1])/total_path_ref_len < 0.5:
-                    flag=False
-                if chr_len[longest_chr[0]] + chr_len[second_chr[0]] < total_path_ref_len:
-                    flag = False
-                if flag:
-                    key = tuple(sorted(path_counter.keys()))
-                    flagflag = True
-                    for curr_path_counter in path_compress[key]:
-                        check = all(abs(curr_path_counter[chr_name] - path_counter[chr_name]) <= PATH_COMPRESS_LIMIT for chr_name in key)
-                        if check:
-                            flagflag = False
-                            break
-                    if flagflag:
-                        path_compress[key].append(copy.deepcopy(path_counter))
-                        path_list.append(path)
-                        
-                if calc_weight >= chr_len['chr1']*2:
-                    break
+                    flag = flagflag
+                    #print(longest_chr[1] / total_path_ref_len)
+                    if (longest_chr[1]+second_chr[1])/total_path_ref_len < 0.5:
+                        flag=False
+                    if chr_len[longest_chr[0]] + chr_len[second_chr[0]] < total_path_ref_len:
+                        flag = False
+                    if flag:
+                        key = tuple(sorted(path_counter.keys()))
+                        flagflag = True
+                        for curr_path_counter in path_compress[key]:
+                            check = all(abs(curr_path_counter[chr_name] - path_counter[chr_name]) <= PATH_COMPRESS_LIMIT for chr_name in key)
+                            if check:
+                                flagflag = False
+                                break
+                        if flagflag:
+                            path_compress[key].append(copy.deepcopy(path_counter))
+                            cnt+=1
 
-    return ((src[0], tar), path_list)
+                            folder_name2 = folder_name
+                            os.makedirs(folder_name, exist_ok=True)
+                            file_name = folder_name2 + f"/{cnt}.paf"
+                            file_name2 = folder_name2 + f"/{cnt}.index.txt"
+                            f = open(file_name, "wt")
+                            g = open(file_name2, "wt")
+                            for nodes in path:
+                                if type(nodes[0])==str:
+                                    print(nodes, file=f)
+                                    print(nodes, file=g)
+                                else:
+                                    f.write("\t".join(map(str, contig_data[nodes[1]])))
+                                    f.write("\n")
+                                    g.write("\t".join(map(str, nodes))+"\n")
+                            print(ack, file=f)
+                            print(ack, file=g)
+                            f.close()
+                            g.close()
+                            if cnt>=PAT_PATH_LIMIT:
+                                return ((src[0], tar), cnt)
+                            
+                    if calc_weight >= chr_len['chr1'] * 1.5:
+                        break
+    
+    return ((src[0], tar), cnt)
 
 tar_ind_list = []
 for i in range(contig_data_size, contig_data_size + 2*CHROMOSOME_COUNT):
@@ -1340,85 +1361,38 @@ def init_worker(shared_graph):
 
 # cnt_list = process_map(run_graph, tar_ind_list, max_workers=48, chunksize=1)
 THREAD=args.thread
-now_chr_limit = 0
 
-tot_cnt = 0
-tot_path_list = defaultdict(list)
-while now_chr_limit <= CHR_CHANGE_LIMIT_PREFIX:
-    now_tot_cnt = tot_cnt
-    now_path_list = dict()
+tot_cnt = TOT_PATH_LIMIT
+cnt_list = []
 
-    G_obj = make_graph(CHR_CHANGE_LIMIT=now_chr_limit)
+while tot_cnt >= TOT_PATH_LIMIT and CHR_CHANGE_LIMIT_PREFIX > 0:
+    tot_cnt = 0
+    cnt_list = []
+
+    # 각 반복마다 새로운 G 객체 생성
+    G_obj = make_graph(CHR_CHANGE_LIMIT=CHR_CHANGE_LIMIT_PREFIX)
+
+    # Pool 생성 시 initializer에 G_obj를 전달 (initargs는 반드시 튜플로)
     with Pool(processes=THREAD, initializer=init_worker, initargs=(G_obj,)) as pool:
-        result_iterator = pool.imap_unordered(partial(run_graph, CHR_CHANGE_LIMIT=now_chr_limit), tar_ind_list)
-        for tar_ind, pl in tqdm(result_iterator,
+        # imap을 사용하여 결과를 순차적으로 받아옴
+        result_iterator = pool.imap_unordered(partial(run_graph, CHR_CHANGE_LIMIT=CHR_CHANGE_LIMIT_PREFIX), tar_ind_list)
+        for rs in tqdm(result_iterator,
                         total=len(tar_ind_list),
-                        desc=f'Build breakend construct graph <{now_chr_limit}>',
+                        desc=f'Build breakend construct graph <{CHR_CHANGE_LIMIT_PREFIX}>',
                         disable=not sys.stdout.isatty()):
             
-            now_path_list[tar_ind] = pl
-            now_tot_cnt += len(pl)
+            cnt_list.append(rs)
+            tot_cnt += rs[1]
 
             # 한계치를 넘으면 즉시 종료
-            if now_tot_cnt >= TOT_PATH_LIMIT:
+            if tot_cnt >= TOT_PATH_LIMIT:
                 pool.terminate()  # 작업 중인 프로세스들을 즉시 종료
                 shutil.rmtree(save_loc, ignore_errors=True)
                 break
-
-    if now_tot_cnt >= TOT_PATH_LIMIT:
-        print(f'CHR_CHANGE_LIMIT : {now_chr_limit} failed')
-        break
     
-    tot_cnt = now_tot_cnt
-    for tar, pl in now_path_list.items():
-        tot_path_list[tar].extend(pl)
-    now_chr_limit += 1
-    
-
-for (s0, tar), path_list in tot_path_list.items():
-    folder_name = f"{save_loc}/{s0}_{tar}"
-    if len(path_list) > 0:
-        os.makedirs(folder_name, exist_ok=True)
-        for cnt, path in enumerate(path_list):
-            file_name = folder_name + f"/{cnt}.paf"
-            file_name2 = folder_name + f"/{cnt}.index.txt"
-
-            with open(file_name, "wt") as f, \
-                open(file_name2, "wt") as g:
-                
-                for nodes in path:
-                    if type(nodes[0])==str:
-                        print(nodes, file=f)
-                        print(nodes, file=g)
-                    else:
-                        f.write("\t".join(map(str, contig_data[nodes[1]])))
-                        f.write("\n")
-                        g.write("\t".join(map(str, nodes))+"\n")
-                # print(ack, file=f)
-                # print(ack, file=g)
-
-# while tot_cnt >= TOT_PATH_LIMIT and CHR_CHANGE_LIMIT_PREFIX > 0:
-#     tot_cnt = 0
-#     cnt_list = []
-
-#     # 각 반복마다 새로운 G 객체 생성
-#     G_obj = make_graph(CHR_CHANGE_LIMIT=CHR_CHANGE_LIMIT_PREFIX)
-
-#     # 새로운 ProcessPoolExecutor를 생성하여, 해당 반복의 G를 워커에 전달
-#     with ProcessPoolExecutor(max_workers=128, initializer=init_worker, initargs={G_obj}) as executor:
-#         futures = [executor.submit(partial(run_graph, CHR_CHANGE_LIMIT=CHR_CHANGE_LIMIT_PREFIX), tar) for tar in tar_ind_list]
-    
-#         for future in tqdm(as_completed(futures), total=len(futures), desc=f'Build breakend construct graph <{CHR_CHANGE_LIMIT_PREFIX}>', disable=not sys.stdout.isatty()):
-#             rs = future.result()
-#             cnt_list.append(rs)
-#             tot_cnt += rs[1]
-
-#             if tot_cnt >= TOT_PATH_LIMIT:
-#                 print(f'CHR_CHANGE_LIMIT : {CHR_CHANGE_LIMIT_PREFIX} failed')
-#                 executor.shutdown(wait=False)
-#                 shutil.rmtree(save_loc, ignore_errors=True)
-#                 CHR_CHANGE_LIMIT_PREFIX -= 1
-#                 break
+    if tot_cnt >= TOT_PATH_LIMIT:
+        print(f'CHR_CHANGE_LIMIT : {CHR_CHANGE_LIMIT_PREFIX} failed')
+        CHR_CHANGE_LIMIT_PREFIX -= 1
 
 
 if CHR_CHANGE_LIMIT_PREFIX == 0:
@@ -1432,10 +1406,10 @@ cancer_prefix = os.path.basename(PREPROCESSED_PAF_FILE_PATH).split('.')[0]
 
 
 with open(f'{PREFIX}/report.txt', 'a') as f:
-    cnt = sum(map(len, tot_path_list.values()))
+    cnt = sum(i[1] for i in cnt_list)
     print(cancer_prefix, file=f)
     print(cnt, file=f)
     print(f"Total path count : {cnt}")
-    for (st, nd), pl in sorted(tot_path_list.items(), key=lambda x:-len(x[1])):
-        if len(pl) > 0:
-            print(st, nd, len(pl), file=f)
+    for (st, nd), c in sorted(cnt_list, key=lambda x:-x[1]):
+        if c > 0:
+            print(st, nd, c, file=f)
