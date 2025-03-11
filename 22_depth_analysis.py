@@ -10,7 +10,7 @@ from tqdm import tqdm
 from scipy.optimize import nnls
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
-ABS_MAX_COVERAGE_RATIO = 10
+ABS_MAX_COVERAGE_RATIO = 3
 MAX_PATH_CNT = 100
 
 def chr2int(x):
@@ -235,12 +235,12 @@ for chr_name in chromosomes:
     # 염색체 이름 라벨을 중앙 각도에 배치 (최대 반지름보다 약간 바깥쪽)
     mid_angle = (start_angle + end_angle) / 2
     max_r = max(B.max(), predicted_B.max())
-    ax.text(mid_angle, np.median(B) * 2.5, chr_name, ha='center', va='center', fontsize=10, fontweight='bold')
+    ax.text(mid_angle, np.median(B) * ABS_MAX_COVERAGE_RATIO * 0.8, chr_name, ha='center', va='center', fontsize=10, fontweight='bold')
 
 ax.set_yticklabels([])
 ax.set_xticklabels([])
 
-ax.set_ylim(ax.get_ylim()[0], np.median(B) * 3)
+ax.set_ylim(ax.get_ylim()[0], np.median(B) * ABS_MAX_COVERAGE_RATIO)
 
 plt.title("Circos-like Plot: Observed vs. NNLS Predicted Coverage", fontsize=14)
 plt.legend(loc='upper right', bbox_to_anchor=(1.3, 1.1), fontsize='small')
@@ -331,13 +331,13 @@ for chr_name in chromosomes:
     # 라벨: 각 염색체 아크의 중간 위치에 표시
     mid_angle = (start_angle + end_angle) / 2
     # 반지름은 최대 B 값의 약간 위로 배치
-    ax.text(mid_angle, np.median(B) * 2.5, chr_name, ha='center', va='center', fontsize=10, fontweight='bold')
+    ax.text(mid_angle, np.median(B) * ABS_MAX_COVERAGE_RATIO * 0.8, chr_name, ha='center', va='center', fontsize=10, fontweight='bold')
 
 # 옵션: 불필요한 그리드/눈금 제거
 ax.set_yticklabels([])
 ax.set_xticklabels([])
 
-ax.set_ylim(ax.get_ylim()[0], np.median(B) * 3) 
+ax.set_ylim(ax.get_ylim()[0], np.median(B) * ABS_MAX_COVERAGE_RATIO) 
 
 plt.title("Circos-like Plot: Coverage and Top 50 Components")
 plt.legend(loc='upper right', bbox_to_anchor=(1.3, 1.1), fontsize='small')
