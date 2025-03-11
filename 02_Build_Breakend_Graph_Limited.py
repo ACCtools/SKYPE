@@ -2,11 +2,16 @@ import sys
 import argparse
 from collections import defaultdict, Counter
 import ast
+
+import graph_tool.all as gt
+import graph_tool
+
 import networkx as nx
+
 import copy
 import shutil
 import os
-# from concurrent.futures import ProcessPoolExecutor, as_completed
+
 from multiprocessing import Pool
 from tqdm import tqdm
 from functools import partial
@@ -53,8 +58,8 @@ CENSAT_VISIT_LIMIT = 2
 
 
 PATH_MAJOR_COMPONENT = 3
-NCLOSE_COMPRESS_LIMIT = 100*K
-NCLOSE_MERGE_LIMIT = 10*K
+NCLOSE_COMPRESS_LIMIT = 50*K
+NCLOSE_MERGE_LIMIT = 1*K
 ALL_REPEAT_NCLOSE_COMPRESS_LIMIT = 500*K
 PATH_COMPRESS_LIMIT = 50*K
 IGNORE_PATH_LIMIT = 50*K
@@ -123,10 +128,8 @@ def find_chr_len(file_path : str) -> dict:
         chr_len[curr_data[0]] = int(curr_data[1])
     return chr_len
 
-
 def extract(contig : list) -> list:
     return [contig[CTG_NAM], contig[CHR_STR], contig[CHR_END]]
-
 
 def chr2int(x):
     chrXY2int = {'chrX' : 24, 'chrY' : 25}
@@ -207,7 +210,6 @@ def calculate_single_contig_ref_ratio(contig_data : list) -> float:
     for node in contig_data:
         total_ref_len += node[CHR_END] - node[CHR_STR]
     return estimated_ref_len/total_ref_len, total_ref_len
-
 
 def extract_nclose_node(contig_data : list, bnd_contig : set, repeat_contig_name : set, \
                         censat_contig_name : set, repeat_censat_data : dict, ORIGNAL_PAF_LOC_LIST : list, telo_set : set) -> dict:
@@ -700,7 +702,6 @@ def extract_telomere_connect_contig(contig_data : list, graph_adjacency : dict) 
     
     return telomere_connect_contig
     
-
 def initialize_bnd_graph(contig_data : list, nclose_nodes : dict, telo_contig : dict) -> dict:
     bnd_adjacency = defaultdict(list)
     for i in telo_contig:
@@ -1165,190 +1166,305 @@ def make_graph(CHR_CHANGE_LIMIT):
 
     return G
 
+def get_prop_type(value, key=None):
+    """
+    Performs typing and value conversion for the graph_tool PropertyMap class.
+    If a key is provided, it also ensures the key is in a format that can be
+    used with the PropertyMap. Returns a tuple, (type name, value, key)
+    """
+
+    # Deal with the value
+    if isinstance(value, bool):
+        tname = 'bool'
+
+    elif isinstance(value, int):
+        tname = 'float'
+        value = float(value)
+
+    elif isinstance(value, float):
+        tname = 'float'
+
+    elif isinstance(value, dict):
+        tname = 'object'
+
+    else:
+        tname = 'string'
+        value = str(value)
+
+    return tname, value, key
+
+def nx2gt(nxG):
+    """
+    Converts a networkx graph to a graph-tool graph.
+    """
+    # Phase 0: Create a directed or undirected graph-tool Graph
+    gtG = graph_tool.Graph(directed=nxG.is_directed())
+
+    # Add the Graph properties as "internal properties"
+    for key, value in nxG.graph.items():
+        # Convert the value and key into a type for graph-tool
+        tname, value, key = get_prop_type(value, key)
+
+        prop = gtG.new_graph_property(tname) # Create the PropertyMap
+        gtG.graph_properties[key] = prop     # Set the PropertyMap
+        gtG.graph_properties[key] = value    # Set the actual value
+
+    # Phase 1: Add the vertex and edge property maps
+    # Go through all nodes and edges and add seen properties
+    # Add the node properties first
+    nprops = set() # cache keys to only add properties once
+    for node, data in nxG.nodes(data=True):
+
+        # Go through all the properties if not seen and add them.
+        for key, val in data.items():
+            if key in nprops: continue # Skip properties already added
+
+            # Convert the value and key into a type for graph-tool
+            tname, _, key  = get_prop_type(val, key)
+
+            prop = gtG.new_vertex_property(tname) # Create the PropertyMap
+            gtG.vertex_properties[key] = prop     # Set the PropertyMap
+
+            # Add the key to the already seen properties
+            nprops.add(key)
+
+    # Also add the node id: in NetworkX a node can be any hashable type, but
+    # in graph-tool node are defined as indices. So we capture any strings
+    # in a special PropertyMap called 'id' -- modify as needed!
+    gtG.vertex_properties['id'] = gtG.new_vertex_property('string')
+
+    # Add the edge properties second
+    eprops = set() # cache keys to only add properties once
+    for src, dst, data in nxG.edges(data=True):
+
+        # Go through all the edge properties if not seen and add them.
+        for key, val in data.items():
+            if key in eprops: continue # Skip properties already added
+
+            # Convert the value and key into a type for graph-tool
+            tname, _, key = get_prop_type(val, key)
+
+            prop = gtG.new_edge_property(tname) # Create the PropertyMap
+            gtG.edge_properties[key] = prop     # Set the PropertyMap
+
+            # Add the key to the already seen properties
+            eprops.add(key)
+
+    # Phase 2: Actually add all the nodes and vertices with their properties
+    # Add the nodes
+    vertices = {} # vertex mapping for tracking edges later
+    for node, data in nxG.nodes(data=True):
+
+        # Create the vertex and annotate for our edges later
+        v = gtG.add_vertex()
+        vertices[node] = v
+
+        # Set the vertex properties, not forgetting the id property
+        data['id'] = str(node)
+        for key, value in data.items():
+            gtG.vp[key][v] = value # vp is short for vertex_properties
+
+    # Add the edges
+    for src, dst, data in nxG.edges(data=True):
+
+        # Look up the vertex structs from our vertices mapping and add edge.
+        e = gtG.add_edge(vertices[src], vertices[dst])
+
+        # Add the edge properties
+        for key, value in data.items():
+            gtG.ep[key][e] = value # ep is short for edge_properties
+
+    # Done, finally!
+    return gtG
+
+def find_vertex_by_id(gtG, node_id):
+    for v in gtG.vertices():
+        if gtG.vp['id'][v] == str(node_id):
+            return v
+    return None
+
 def run_graph(data, CHR_CHANGE_LIMIT):
-    # path_cluster = set()
     i, j = data
     src = (chr_rev_corr[i], 0, 0)
     tar = chr_rev_corr[j]
     folder_name = f"{save_loc}/{src[0]}_{tar}"
     cnt = 0
     H = copy.deepcopy(G)
-    for k in range(contig_data_size, contig_data_size + 2*CHROMOSOME_COUNT):
+
+    # src와 tar에 해당하지 않는 노드 제거
+    for k in range(contig_data_size, contig_data_size + 2 * CHROMOSOME_COUNT):
         if chr_rev_corr[k] not in (src[0], tar):
-            for ii in range(0, CHR_CHANGE_LIMIT+1):
-                for jj in range(0, DIR_CHANGE_LIMIT+1):
+            for ii in range(0, CHR_CHANGE_LIMIT + 1):
+                for jj in range(0, DIR_CHANGE_LIMIT + 1):
                     H.remove_node((chr_rev_corr[k], ii, jj))
-    # print(src[0], tar)
+
     path_compress = defaultdict(list)
-    for ii in range(0, CHR_CHANGE_LIMIT+1):
-        for jj in range(0, DIR_CHANGE_LIMIT+1):
+    for ii in range(0, CHR_CHANGE_LIMIT + 1):
+        for jj in range(0, DIR_CHANGE_LIMIT + 1):
             I = copy.deepcopy(H)
             if src[0] != tar:
-                for iii in range(0, CHR_CHANGE_LIMIT+1):
-                    for jjj in range(0, DIR_CHANGE_LIMIT+1):
+                for iii in range(0, CHR_CHANGE_LIMIT + 1):
+                    for jjj in range(0, DIR_CHANGE_LIMIT + 1):
                         if iii or jjj:
                             I.remove_node((src[0], iii, jjj))
-                        if iii!=ii or jjj!=jj:
+                        if iii != ii or jjj != jj:
                             I.remove_node((tar, iii, jjj))
             else:
-                for iii in range(0, CHR_CHANGE_LIMIT+1):
-                    for jjj in range(0, DIR_CHANGE_LIMIT+1):
-                        if (iii!=ii or jjj!=jj) and (iii + jjj != 0):
+                for iii in range(0, CHR_CHANGE_LIMIT + 1):
+                    for jjj in range(0, DIR_CHANGE_LIMIT + 1):
+                        if (iii != ii or jjj != jj) and (iii + jjj != 0):
                             if I.has_node((tar, iii, jjj)):
                                 I.remove_node((tar, iii, jjj))
-            # print(ii, jj)
-            if nx.has_path(I, src, (tar, ii, jj)):
-                # print(src, (tar, ii, jj))
-                for path in nx.shortest_simple_paths(I, source=src, target=(tar, ii, jj), weight = 'weight'):
-                      # for k in path:
-                    #     print(k)
-                    calc_weight = nx.path_weight(I, path, 'weight')
-                    #print(cnt, calc_weight)
-                    path_len = len(path)
-                    path_counter = Counter()
-                    if path_len == 1:
-                        continue
-                    # 양끝 전처리
-                    if contig_data[path[1][1]][CTG_NAM] == contig_data[path[2][1]][CTG_NAM]:
-                        path_counter[contig_data[path[1][1]][CHR_NAM]]+=\
+
+            # networkx 그래프 I를 graph-tool 그래프로 변환
+            F = nx2gt(I)
+
+            # graph-tool에서 'id' 속성을 이용해 source와 target vertex 찾기
+            s = find_vertex_by_id(F, src)
+            t = find_vertex_by_id(F, (tar, ii, jj))
+
+            if gt.shortest_distance(F, source=s, target=t) == float('inf'):
+                continue
+
+            for path_vertices in gt.all_paths(F, s, t):
+                path = [eval(F.vp['id'][v]) for v in path_vertices]
+
+                path_len = len(path)
+                if path_len == 1:
+                    continue
+
+                # path_counter 계산 (contig_data 관련 기존 로직)
+                path_counter = Counter()
+                if contig_data[path[1][1]][CTG_NAM] == contig_data[path[2][1]][CTG_NAM]:
+                    path_counter[contig_data[path[1][1]][CHR_NAM]] += \
                         contig_data[path[1][1]][CHR_END] - contig_data[path[1][1]][CHR_STR]
 
-                    if contig_data[path[path_len-2][1]][CTG_NAM] == contig_data[path[path_len-3][1]][CTG_NAM]:
-                        path_counter[contig_data[path[path_len-2][1]][CHR_NAM]]+=\
-                        contig_data[path[path_len-2][1]][CHR_END] - contig_data[path[path_len-2][1]][CHR_STR]
-                    contig_set =  set()
-                    contig_set.add(path[path_len-2][1])
+                if contig_data[path[path_len - 2][1]][CTG_NAM] == contig_data[path[path_len - 3][1]][CTG_NAM]:
+                    path_counter[contig_data[path[path_len - 2][1]][CHR_NAM]] += \
+                        contig_data[path[path_len - 2][1]][CHR_END] - contig_data[path[path_len - 2][1]][CHR_STR]
+                contig_set = set()
+                contig_set.add(path[path_len - 2][1])
 
-                    nclose_st_cluster_set = set()
-                    nclose_ed_cluster_set = set()
-                    cluster_overlap_flag = False
-                    for node in range(1, path_len-1):
-                        if path[node][1] in st_compress.keys() and st_compress[path[node][1]] in nclose_st_cluster_set:
-                            cluster_overlap_flag = True
+                nclose_st_cluster_set = set()
+                nclose_ed_cluster_set = set()
+                cluster_overlap_flag = False
+                for node in range(1, path_len - 1):
+                    if path[node][1] in st_compress and st_compress[path[node][1]] in nclose_st_cluster_set:
+                        cluster_overlap_flag = True
+                        break
+                    elif path[node][1] in st_compress:
+                        nclose_st_cluster_set.add(st_compress[path[node][1]])
+                    if path[node][1] in ed_compress and ed_compress[path[node][1]] in nclose_ed_cluster_set:
+                        cluster_overlap_flag = True
+                        break
+                    elif path[node][1] in ed_compress:
+                        nclose_ed_cluster_set.add(ed_compress[path[node][1]])
+                if cluster_overlap_flag:
+                    continue
+
+                censat_node_vis = 0
+                contig_overuse_flag = False
+                censat_overuse_flag = False
+                for node in range(1, path_len - 2):
+                    if path[node][1] in contig_set:
+                        contig_overuse_flag = True
+                        break
+                    contig_set.add(path[node][1])
+                    contig_s = contig_data[path[node][1]]
+                    contig_e = contig_data[path[node + 1][1]]
+                    ds = contig_s[CHR_END] - contig_s[CHR_STR]
+                    de = contig_e[CHR_END] - contig_e[CHR_STR]
+                    if contig_s[CTG_CENSAT] != '0' and contig_e[CTG_CENSAT] != '0':
+                        censat_node_vis += 1
+                        if censat_node_vis >= CENSAT_VISIT_LIMIT:
+                            censat_overuse_flag = True
                             break
-                        elif path[node][1] in st_compress.keys():
-                            nclose_st_cluster_set.add(st_compress[path[node][1]])
-                        if path[node][1] in ed_compress.keys() and ed_compress[path[node][1]] in nclose_ed_cluster_set:
-                            cluster_overlap_flag = True
-                            break
-                        elif path[node][1] in ed_compress.keys():
-                            nclose_ed_cluster_set.add(ed_compress[path[node][1]])
-                    if cluster_overlap_flag:
-                        continue
-                    
-                    censat_node_vis = 0
-                    contig_overuse_flag = False
-                    censat_overuse_flag = False
-                    for node in range(1, path_len-2):
-                        if path[node][1] in contig_set:
-                            contig_overuse_flag = True
-                            break
-                        contig_set.add(path[node][1])
-                        contig_s = contig_data[path[node][1]]
-                        contig_e = contig_data[path[node+1][1]]
-                        ds = contig_s[CHR_END] - contig_s[CHR_STR]
-                        de = contig_e[CHR_END] - contig_e[CHR_STR]
-                        if contig_s[CTG_CENSAT] != '0' and contig_e[CTG_CENSAT] != '0':
-                                censat_node_vis += 1
-                                if censat_node_vis >= CENSAT_VISIT_LIMIT:
-                                    censat_overuse_flag = True
-                                    break
-                        if contig_s[CTG_NAM] == contig_e[CTG_NAM]:
-                            if path[node][1] < path[node+1][1]:
-                                for same_contig in range(path[node][1]+1, path[node+1][1]):
-                                    path_counter[contig_data[same_contig][CHR_NAM]] += \
-                                    contig_data[same_contig][CHR_END] - contig_data[same_contig][CHR_STR]
-                            else:
-                                for same_contig in range(path[node+1][1]+1, path[node][1]):
-                                    path_counter[contig_data[same_contig][CHR_NAM]] += \
+                    if contig_s[CTG_NAM] == contig_e[CTG_NAM]:
+                        if path[node][1] < path[node + 1][1]:
+                            for same_contig in range(path[node][1] + 1, path[node + 1][1]):
+                                path_counter[contig_data[same_contig][CHR_NAM]] += \
                                     contig_data[same_contig][CHR_END] - contig_data[same_contig][CHR_STR]
                         else:
-                            if distance_checker(contig_s, contig_e)==0:
-                                path_counter[contig_s[CHR_NAM]] += \
+                            for same_contig in range(path[node + 1][1] + 1, path[node][1]):
+                                path_counter[contig_data[same_contig][CHR_NAM]] += \
+                                    contig_data[same_contig][CHR_END] - contig_data[same_contig][CHR_STR]
+                    else:
+                        if distance_checker(contig_s, contig_e) == 0:
+                            path_counter[contig_s[CHR_NAM]] += \
                                 ds + de - overlap_calculator(contig_s, contig_e)
-                            else:  
-                                ds = contig_s[CHR_END] - contig_s[CHR_STR]
-                                de = contig_e[CHR_END] - contig_e[CHR_STR]
-                                path_counter[contig_s[CHR_NAM]] += \
-                                distance_checker(contig_s, contig_e) + ds + de
-                    if contig_overuse_flag or censat_overuse_flag:
-                        continue
-                    
-                    total_path_ref_len = sum(path_counter.values())
-
-                    ig_k_list = []
-                    for k, v in path_counter.items():
-                        if v < IGNORE_PATH_LIMIT:
-                            ig_k_list.append(k)
-                    
-                    for k in ig_k_list:
-                        del path_counter[k]
-
-                    if len(path_counter) == 0:
-                        continue
-                    
-                    ack = sorted(path_counter.items(), key=lambda x:-x[1])
-                    longest_chr = ack[0]
-                    second_chr = ack[1] if len(ack) > 1 else ack[0]
-                    
-                    flag = True
-                    flagflag = False
-                    rank = []
-                    for i in range(min(PATH_MAJOR_COMPONENT, len(ack))):
-                        if ack[i][0] in (src[0][:-1], tar[:-1]):
-                            rank.append(i)
-                    if len(rank)==2:
-                        flagflag = True
-                    elif len(rank)==1:
-                        if rank[0]<=1:
-                            flagflag = True
                         else:
-                            flagflag = False
+                            ds = contig_s[CHR_END] - contig_s[CHR_STR]
+                            de = contig_e[CHR_END] - contig_e[CHR_STR]
+                            path_counter[contig_s[CHR_NAM]] += \
+                                distance_checker(contig_s, contig_e) + ds + de
+                if contig_overuse_flag or censat_overuse_flag:
+                    continue
+
+                total_path_ref_len = sum(path_counter.values())
+                ig_k_list = [k for k, v in path_counter.items() if v < IGNORE_PATH_LIMIT]
+                for k in ig_k_list:
+                    del path_counter[k]
+                if len(path_counter) == 0:
+                    continue
+
+                ack = sorted(path_counter.items(), key=lambda x: -x[1])
+                longest_chr = ack[0]
+                second_chr = ack[1] if len(ack) > 1 else ack[0]
+
+                flag = True
+                flagflag = False
+                rank = []
+                for i in range(min(PATH_MAJOR_COMPONENT, len(ack))):
+                    if ack[i][0] in (src[0][:-1], tar[:-1]):
+                        rank.append(i)
+                if len(rank) == 2:
+                    flagflag = True
+                elif len(rank) == 1:
+                    if rank[0] <= 1:
+                        flagflag = True
                     else:
                         flagflag = False
-                    flag = flagflag
-                    #print(longest_chr[1] / total_path_ref_len)
-                    if (longest_chr[1]+second_chr[1])/total_path_ref_len < 0.5:
-                        flag=False
-                    if chr_len[longest_chr[0]] + chr_len[second_chr[0]] < total_path_ref_len:
-                        flag = False
-                    if flag:
-                        key = tuple(sorted(path_counter.keys()))
-                        flagflag = True
-                        for curr_path_counter in path_compress[key]:
-                            check = all(abs(curr_path_counter[chr_name] - path_counter[chr_name]) <= PATH_COMPRESS_LIMIT for chr_name in key)
-                            if check:
-                                flagflag = False
-                                break
-                        if flagflag:
-                            path_compress[key].append(copy.deepcopy(path_counter))
-                            cnt+=1
+                else:
+                    flagflag = False
+                flag = flagflag
+                if (longest_chr[1] + second_chr[1]) / total_path_ref_len < 0.5:
+                    flag = False
+                if chr_len[longest_chr[0]] + chr_len[second_chr[0]] < total_path_ref_len:
+                    flag = False
+                if flag:
+                    key = tuple(sorted(path_counter.keys()))
+                    flagflag = True
+                    for curr_path_counter in path_compress[key]:
+                        check = all(
+                            abs(curr_path_counter[chr_name] - path_counter[chr_name]) <= PATH_COMPRESS_LIMIT 
+                            for chr_name in key
+                        )
+                        if check:
+                            flagflag = False
+                            break
+                    if flagflag:
+                        path_compress[key].append(copy.deepcopy(path_counter))
+                        cnt += 1
 
-                            folder_name2 = folder_name
-                            os.makedirs(folder_name, exist_ok=True)
-                            file_name = folder_name2 + f"/{cnt}.paf"
-                            file_name2 = folder_name2 + f"/{cnt}.index.txt"
-                            f = open(file_name, "wt")
-                            g = open(file_name2, "wt")
+                        os.makedirs(folder_name, exist_ok=True)
+                        file_name = folder_name + f"/{cnt}.paf"
+                        file_name2 = folder_name + f"/{cnt}.index.txt"
+                        with open(file_name, "wt") as f, open(file_name2, "wt") as g:
                             for nodes in path:
-                                if type(nodes[0])==str:
+                                if isinstance(nodes[0], str):
                                     print(nodes, file=f)
                                     print(nodes, file=g)
                                 else:
-                                    f.write("\t".join(map(str, contig_data[nodes[1]])))
-                                    f.write("\n")
-                                    g.write("\t".join(map(str, nodes))+"\n")
+                                    f.write("\t".join(map(str, contig_data[nodes[1]])) + "\n")
+                                    g.write("\t".join(map(str, nodes)) + "\n")
                             print(ack, file=f)
                             print(ack, file=g)
-                            f.close()
-                            g.close()
-                            if cnt>=PAT_PATH_LIMIT:
-                                return ((src[0], tar), cnt)
-                            
-                    if calc_weight >= chr_len['chr1'] * 1.5:
-                        break
-    
+
+                        if cnt >= PAT_PATH_LIMIT:
+                            return ((src[0], tar), cnt)
+
     return ((src[0], tar), cnt)
+
 
 tar_ind_list = []
 for i in range(contig_data_size, contig_data_size + 2*CHROMOSOME_COUNT):
@@ -1359,7 +1475,7 @@ def init_worker(shared_graph):
     global G
     G = shared_graph
 
-# cnt_list = process_map(run_graph, tar_ind_list, max_workers=48, chunksize=1)
+
 THREAD=args.thread
 
 tot_cnt = TOT_PATH_LIMIT
