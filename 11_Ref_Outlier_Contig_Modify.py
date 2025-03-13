@@ -1,6 +1,14 @@
 import argparse
 import os
 import re
+import logging
+
+logging.basicConfig(
+    format='%(asctime)s %(levelname)s:%(message)s',
+    level=logging.INFO,
+    datefmt='%m/%d/%Y %I:%M:%S %p',
+)
+logging.info("11_Ref_Outlier_Contig_Modify start")
 
 CTG_NAM = 0
 CTG_LEN = 1
@@ -27,7 +35,7 @@ CTG_GLOBALIDX = 21
 
 K=1000
 
-CHUKJI_LIMIT = 50*K
+CHUKJI_LIMIT = -1
 
 def import_origin_data(file_path : list) -> list :
     contig_data = []
@@ -250,9 +258,9 @@ while s<contig_data_size:
             
     s = e+1
 
-print(f"Forward-directed outlier contig count : {cntfj}")
-print(f"Backward-directed outlier contig count : {cntbj}")
-print(f"Total count : {cntfj + cntbj}")
+logging.info(f"Forward-directed outlier contig count : {cntfj}")
+logging.info(f"Backward-directed outlier contig count : {cntbj}")
+logging.info(f"Total count : {cntfj + cntbj}")
 
 
 

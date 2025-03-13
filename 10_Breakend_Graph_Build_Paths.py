@@ -10,6 +10,14 @@ import glob
 import networkx as nx
 
 from tqdm import tqdm
+import logging
+
+logging.basicConfig(
+    format='%(asctime)s %(levelname)s:%(message)s',
+    level=logging.INFO,
+    datefmt='%m/%d/%Y %I:%M:%S %p',
+)
+logging.info("10_Breakend_Graph_Build_Paths start")
 
 CTG_NAM = 0
 CTG_LEN = 1

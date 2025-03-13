@@ -4,6 +4,14 @@ import numpy as np
 import copy
 import itertools
 import re
+import logging
+
+logging.basicConfig(
+    format='%(asctime)s %(levelname)s:%(message)s',
+    level=logging.INFO,
+    datefmt='%m/%d/%Y %I:%M:%S %p',
+)
+logging.info("00_Contig_Preprocessing start")
 
 from collections import defaultdict
 from collections import Counter
@@ -785,7 +793,7 @@ def find_mainflow(contig_data : list) -> dict:
     return mainflow_dict
     
 
-def preprocess_contig(contig_data : list, telo_label : list, ref_qry_ratio : dict, repeat_label : list) -> list :
+def preprocess_contig(contig_data : list, telo_label : list, ref_qry_ratio : dict, repeat_label : list, telo_connect_info : set) -> list :
     checker = 0
     contig_data_size = len(contig_data)-1
     curr_contig_first_fragment = contig_data[0]
@@ -801,7 +809,7 @@ def preprocess_contig(contig_data : list, telo_label : list, ref_qry_ratio : dic
     for i in range(1, contig_data_size+1):
         len_count[contig_data[i-1][CTG_NAM]]+=contig_data[i-1][CHR_END]-contig_data[i-1][CHR_STR]
         cnt+=1
-        if telo_label[i-1][0] != '0':
+        if telo_label[i-1][0] != '0'  or ((i-1) in telo_connect_info):
             is_telo = True
         if contig_data[i-1][CHR_NAM]!='chrM':
             chrM_flag = False
@@ -846,7 +854,7 @@ def preprocess_contig(contig_data : list, telo_label : list, ref_qry_ratio : dic
     contig_data = contig_data[:-1]
     return [using_contig_list, contig_type, contig_terminal_node, len_count]
 
-def alt_preprocess_contig(contig_data : list, telo_label : list, ref_qry_ratio : dict, repeat_label : list) -> list :
+def alt_preprocess_contig(contig_data : list, telo_label : list, ref_qry_ratio : dict, repeat_label : list, telo_connect_info : set) -> list :
     checker = 0
     contig_data_size = len(contig_data)-1
     curr_contig_first_fragment = contig_data[0]
@@ -862,7 +870,7 @@ def alt_preprocess_contig(contig_data : list, telo_label : list, ref_qry_ratio :
     for i in range(1, contig_data_size+1):
         len_count[contig_data[i-1][CTG_NAM]]+=contig_data[i-1][CHR_END]-contig_data[i-1][CHR_STR]
         cnt+=1
-        if telo_label[i-1][0] != '0':
+        if telo_label[i-1][0] != '0' or ((i-1) in telo_connect_info):
             is_telo = True
         if contig_data[i-1][CHR_NAM] != 'chrM':
             chrM_flag = False
@@ -871,6 +879,8 @@ def alt_preprocess_contig(contig_data : list, telo_label : list, ref_qry_ratio :
             if repeat_label[i-1][0]!='0':
                 is_front_back_repeat = True
             curr_contig_name = contig_data[i-1][CTG_NAM]
+            if curr_contig_name == 'atg021443l':
+                t=1
             curr_contig_end_fragment = contig_data[i-1]
             if curr_contig_first_fragment[CHR_NAM] != curr_contig_end_fragment[CHR_NAM]:
                 checker = 1
@@ -981,7 +991,7 @@ def weighted_avg_meandepth(chrom_df, region_start, region_end):
     return weighted_sum / total_weight if total_weight > 0 else None
 
 
-def find_breakend_centromere(repeat_censat_data : dict, chr_len : list, df : pd.DataFrame):
+def find_breakend_centromere(repeat_censat_data : dict, chr_len : dict, df : pd.DataFrame):
     results = []
 
     # Remove unused Y
@@ -1074,7 +1084,7 @@ def find_breakend_centromere(repeat_censat_data : dict, chr_len : list, df : pd.
     result_df = result_df[result_df['weighted_ratio']>=BREAKEND_CEN_RATIO_THRESHOLD]
 
     censat_bnd_chr_list = sorted(set(result_df['chr']), key=lambda t : chr2int(t))
-    print(f'Breakend censat chr : {" ".join(censat_bnd_chr_list)}')
+    logging.info(f'Breakend censat chr : {" ".join(censat_bnd_chr_list)}')
 
     right_df = result_df[result_df['right_weighted_meandepth'] > result_df['left_weighted_meandepth']]
     left_df = result_df[result_df['left_weighted_meandepth'] > result_df['right_weighted_meandepth']]
@@ -1191,14 +1201,17 @@ def pass_pipeline(pre_contig_data, telo_dict, telo_bound_dict, repeat_data, repe
         telo_preprocessed_contig, report_case, telo_connect_info = preprocess_telo(contig_data, node_label)
 
         new_contig_data = []
-
+        telcon_set = set()
+        idxcnt = 0
         for i in telo_preprocessed_contig:
             temp_list = contig_data[i]
             if i in telo_connect_info:
                 temp_list.append(telo_connect_info[i])
+                telcon_set.add(idxcnt)
             else:
                 temp_list.append("0")
             new_contig_data.append(temp_list)
+            idxcnt+=1
 
         
         new_node_repeat_label = label_repeat_node(new_contig_data, repeat_data)
@@ -1209,7 +1222,7 @@ def pass_pipeline(pre_contig_data, telo_dict, telo_bound_dict, repeat_data, repe
         preprocess_result, \
         preprocess_contig_type, \
         preprocess_terminal_nodes, \
-        len_counter = preprocess_contig(new_contig_data, new_node_telo_label, ref_qry_ratio, new_node_repeat_label)
+        len_counter = preprocess_contig(new_contig_data, new_node_telo_label, ref_qry_ratio, new_node_repeat_label, telcon_set)
         preprocess_result = set(preprocess_result)
         new_contig_data = new_contig_data[0:-1]
         contig_data_size = len(new_contig_data)
@@ -1261,7 +1274,16 @@ def pass_pipeline(pre_contig_data, telo_dict, telo_bound_dict, repeat_data, repe
 
     final_ref_qry_ratio = calc_ratio(final_contig)
 
-    final_using_contig, final_ctg_typ, final_preprocess_terminal_nodes, _ = preprocess_contig(final_contig, final_telo_node_label, final_ref_qry_ratio, final_contig_repeat_label)
+    final_telo_connect = set()
+
+    for v, i in enumerate(final_contig):
+        try:
+            if i[CTG_TELCON] != '0':
+                final_telo_connect.add(v)
+        except:
+            pass
+
+    final_using_contig, final_ctg_typ, final_preprocess_terminal_nodes, _ = preprocess_contig(final_contig, final_telo_node_label, final_ref_qry_ratio, final_contig_repeat_label, final_telo_connect)
 
     final_contig = final_contig[:-1]
 
@@ -1301,8 +1323,8 @@ def main():
 
     original_node_count = 0
 
-    #t = "python 00_Contig_Preprocessing.py 20_acc_pipe/OZ.p/OZ.p.aln.paf public_data/chm13v2.0_telomere.bed public_data/chm13v2.0.fa.fai public_data/chm13v2.0_repeat.m.bed public_data/chm13v2.0_censat_v2.1.m.bed /home/hyunwoo/51g_cancer_denovo/51_depth_data/OZ.win.stat.gz --alt 20_acc_pipe/OZ.a/OZ.a.aln.paf".split()
-    #args = parser.parse_args(t[2:])
+    # t = "python 00_Contig_Preprocessing.py 20_acc_pipe/U2OS_telo.p/U2OS_telo.p.aln.paf public_data/chm13v2.0_telomere.bed public_data/chm13v2.0.fa.fai public_data/chm13v2.0_repeat.m.bed public_data/chm13v2.0_censat_v2.1.m.bed /home/hyunwoo/51g_cancer_denovo/51_depth_data/U2OS_telo.win.stat.gz --alt 20_acc_pipe/U2OS_telo.a/U2OS_telo.a.aln.paf".split()
+    # args = parser.parse_args(t[2:])
 
     PAF_FILE_PATH = []
     if args.alt is None:
@@ -1345,20 +1367,23 @@ def main():
     telo_preprocessed_contig, report_case, telo_connect_info = preprocess_telo(contig_data, node_label)
 
     new_contig_data = []
-
+    telcon_set = set()
+    idxcnt = 0
     for i in telo_preprocessed_contig:
         temp_list = contig_data[i]
         if i in telo_connect_info:
             temp_list.append(telo_connect_info[i])
+            telcon_set.add(idxcnt)
         else:
             temp_list.append("0")
         new_contig_data.append(temp_list)
+        idxcnt+=1
 
-    with open("telo_preprocess_contig.txt", "wt") as f:
-        for i in new_contig_data:
-            for j in i:
-                print(j, end="\t", file=f)
-            print("", file=f)
+    # with open("telo_preprocess_contig.txt", "wt") as f:
+    #     for i in new_contig_data:
+    #         for j in i:
+    #             print(j, end="\t", file=f)
+    #         print("", file=f)
     
     new_node_repeat_label = label_repeat_node(new_contig_data, repeat_data)
     new_node_repeat_censat_label = label_repeat_node(new_contig_data, repeat_censat_data)
@@ -1368,7 +1393,7 @@ def main():
     preprocess_result, \
     preprocess_contig_type, \
     preprocess_terminal_nodes, \
-    len_counter = preprocess_contig(new_contig_data, new_node_telo_label, ref_qry_ratio, new_node_repeat_label)
+    len_counter = preprocess_contig(new_contig_data, new_node_telo_label, ref_qry_ratio, new_node_repeat_label, telcon_set)
     preprocess_result = set(preprocess_result)
     new_contig_data = new_contig_data[0:-1]
     contig_data_size = len(new_contig_data)
@@ -1406,7 +1431,17 @@ def main():
 
     final_ref_qry_ratio = calc_ratio(final_contig)
 
-    final_using_contig, final_ctg_typ, final_preprocess_terminal_nodes, _ = preprocess_contig(final_contig, final_telo_node_label, final_ref_qry_ratio, final_contig_repeat_label)
+    final_telo_connect = set()
+
+    for v, i in enumerate(final_contig):
+        try:
+            if i[CTG_TELCON] != '0':
+                final_telo_connect.add(v)
+        except:
+            pass
+
+
+    final_using_contig, final_ctg_typ, final_preprocess_terminal_nodes, _ = preprocess_contig(final_contig, final_telo_node_label, final_ref_qry_ratio, final_contig_repeat_label, final_telo_connect)
 
     final_contig = final_contig[:-1]
 
@@ -1428,13 +1463,17 @@ def main():
         node_label = label_node(contig_data, telo_dict)
         telo_preprocessed_contig, report_case, telo_connect_info = preprocess_telo(contig_data, node_label)
         new_contig_data = []
+        telcon_set = set()
+        idxcnt = 0
         for i in telo_preprocessed_contig:
             temp_list = contig_data[i]
             if i in telo_connect_info:
                 temp_list.append(telo_connect_info[i])
+                telcon_set.add(idxcnt)
             else:
                 temp_list.append("0")
             new_contig_data.append(temp_list)
+            idxcnt+=1
         alt_telo_ppc_contig = []
         new_node_telo_label = label_node(new_contig_data, telo_dict)
         new_node_repeat_label = label_repeat_node(new_contig_data, repeat_data)
@@ -1444,7 +1483,7 @@ def main():
         preprocess_result, \
         preprocess_contig_type, \
         preprocess_terminal_nodes, \
-        alt_len_counter = alt_preprocess_contig(new_contig_data, new_node_telo_label, ref_qry_ratio, new_node_repeat_label)
+        alt_len_counter = alt_preprocess_contig(new_contig_data, new_node_telo_label, ref_qry_ratio, new_node_repeat_label, telcon_set)
         new_contig_data = new_contig_data[0:-1]
         contig_data_size = len(new_contig_data)
         bias = cnt
@@ -1478,9 +1517,18 @@ def main():
 
         alt_final_telo_node_label = label_node(alt_final_contig, telo_dict)
 
+        alt_final_telo_connect = set()
+
+        for v, i in enumerate(alt_final_contig):
+            try:
+                if i[CTG_TELCON] != '0':
+                    alt_final_telo_connect.add(v)
+            except:
+                pass
+
         alt_final_ref_qry_ratio = calc_ratio(alt_final_contig)
 
-        alt_final_using_contig, alt_final_ctg_typ, alt_final_preprocess_terminal_nodes, _ = alt_preprocess_contig(alt_final_contig, alt_final_telo_node_label, alt_final_ref_qry_ratio, alt_final_repeat_node_label)
+        alt_final_using_contig, alt_final_ctg_typ, alt_final_preprocess_terminal_nodes, _ = alt_preprocess_contig(alt_final_contig, alt_final_telo_node_label, alt_final_ref_qry_ratio, alt_final_repeat_node_label, alt_final_telo_connect)
         
         alt_final_contig = alt_final_contig[:-1]
         
@@ -1563,7 +1611,9 @@ def main():
     add_node_count = len(final_break_contig) + len(final_cen_vtg_contig)
     s = 0
     r_l = len(real_final_contig)
-    print(f"Original PAF file length : {original_node_count}, Final preprocessed PAF file length: {r_l}, Number of virtual contigs added on preprocessing : {add_node_count}")
+    logging.info(f"Original PAF file length : {original_node_count}")
+    logging.info(f"Final preprocessed PAF file length: {r_l}")
+    logging.info(f"Number of virtual contigs added on preprocessing : {add_node_count}")
     contig = set()
     while s<r_l:
         e=real_final_contig[s][CTG_ENDND]

@@ -15,6 +15,13 @@ import os
 from multiprocessing import Pool
 from tqdm import tqdm
 from functools import partial
+import logging
+logging.basicConfig(
+    format='%(asctime)s %(levelname)s:%(message)s',
+    level=logging.INFO,
+    datefmt='%m/%d/%Y %I:%M:%S %p',
+)
+logging.info("02_Build_Breakend_Graph start")
 
 CTG_NAM = 0
 CTG_LEN = 1
@@ -47,7 +54,7 @@ INF = 1000000000
 BUFFER = 10000000
 CHROMOSOME_COUNT = 23
 K = 1000
-CHUKJI_LIMIT = 50*K
+CHUKJI_LIMIT = -1
 BND_CONTIG_BOUND = 0.1
 TOT_PATH_LIMIT = 50*K
 PAT_PATH_LIMIT = 5*K
@@ -1099,8 +1106,9 @@ with open(f"{PREFIX}/bnd_only_graph.txt", "wt") as f:
 
 
 save_loc = PREFIX + '/00_raw'
-print("Now saving results in folder : " + PREFIX)
-print(f"NClose node count : {nclose_node_count}, Telomere connected node count : {telo_node_count}")
+logging.info("Now saving results in folder : " + PREFIX)
+logging.info(f"NClose node count : {nclose_node_count}")
+logging.info(f"Telomere connected node count : {telo_node_count}")
 
 def make_graph(CHR_CHANGE_LIMIT):
     G = nx.DiGraph()
@@ -1342,8 +1350,9 @@ def run_graph(data, CHR_CHANGE_LIMIT):
                 if contig_data[path[path_len - 2][1]][CTG_NAM] == contig_data[path[path_len - 3][1]][CTG_NAM]:
                     path_counter[contig_data[path[path_len - 2][1]][CHR_NAM]] += \
                         contig_data[path[path_len - 2][1]][CHR_END] - contig_data[path[path_len - 2][1]][CHR_STR]
-                contig_set = set()
-                contig_set.add(path[path_len - 2][1])
+                
+                contig_set = Counter()
+                contig_set[path[path_len - 2][1]] += 1
 
                 nclose_st_cluster_set = set()
                 nclose_ed_cluster_set = set()
@@ -1366,10 +1375,11 @@ def run_graph(data, CHR_CHANGE_LIMIT):
                 contig_overuse_flag = False
                 censat_overuse_flag = False
                 for node in range(1, path_len - 2):
-                    if path[node][1] in contig_set:
+                    contig_set[path[node][1]] += 1
+                    if contig_set[path[node][1]] >= 3:
                         contig_overuse_flag = True
                         break
-                    contig_set.add(path[node][1])
+                    
                     contig_s = contig_data[path[node][1]]
                     contig_e = contig_data[path[node + 1][1]]
                     ds = contig_s[CHR_END] - contig_s[CHR_STR]
@@ -1507,16 +1517,16 @@ while tot_cnt >= TOT_PATH_LIMIT and CHR_CHANGE_LIMIT_PREFIX > 0:
                 break
     
     if tot_cnt >= TOT_PATH_LIMIT:
-        print(f'CHR_CHANGE_LIMIT : {CHR_CHANGE_LIMIT_PREFIX} failed')
+        logging.info(f'CHR_CHANGE_LIMIT : {CHR_CHANGE_LIMIT_PREFIX} failed')
         CHR_CHANGE_LIMIT_PREFIX -= 1
 
 
 if CHR_CHANGE_LIMIT_PREFIX == 0:
-    print('Cancer is too divergent.')
-    print('Breakend path failed')
+    logging.info('Cancer is too divergent.')
+    logging.info('Breakend path failed')
     exit(1)
 
-print(f'CHR_CHANGE_LIMIT : {CHR_CHANGE_LIMIT_PREFIX} sucess')
+logging.info(f'CHR_CHANGE_LIMIT : {CHR_CHANGE_LIMIT_PREFIX} success')
 
 cancer_prefix = os.path.basename(PREPROCESSED_PAF_FILE_PATH).split('.')[0]
 
@@ -1525,7 +1535,7 @@ with open(f'{PREFIX}/report.txt', 'a') as f:
     cnt = sum(i[1] for i in cnt_list)
     print(cancer_prefix, file=f)
     print(cnt, file=f)
-    print(f"Total path count : {cnt}")
+    logging.info(f"Total path count : {cnt}")
     for (st, nd), c in sorted(cnt_list, key=lambda x:-x[1]):
         if c > 0:
             print(st, nd, c, file=f)

@@ -3,6 +3,15 @@ import argparse
 import pandas as pd
 from collections import defaultdict
 from collections import Counter
+import logging
+
+logging.basicConfig(
+    format='%(asctime)s %(levelname)s:%(message)s',
+    level=logging.INFO,
+    datefmt='%m/%d/%Y %I:%M:%S %p',
+)
+logging.info("01_Contig_Build_Graph start")
+
 
 CTG_NAM = 0
 CTG_LEN = 1

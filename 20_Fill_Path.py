@@ -8,6 +8,14 @@ import copy
 
 from tqdm import tqdm
 from concurrent.futures import ProcessPoolExecutor, as_completed
+import logging
+
+logging.basicConfig(
+    format='%(asctime)s %(levelname)s:%(message)s',
+    level=logging.INFO,
+    datefmt='%m/%d/%Y %I:%M:%S %p',
+)
+logging.info("20_Fill_Path start")
 
 CTG_NAM = 0
 CTG_LEN = 1
@@ -584,6 +592,6 @@ with ProcessPoolExecutor(max_workers=THREAD) as executor:
             futures.append(executor.submit(fill_path, index_file_path))
         
 
-# 제출된 작업들이 완료될 때까지 진행 상황을 tqdm으로 표시합니다.
-for future in tqdm(as_completed(futures), total=len(futures), desc='Fill gap and modify path data', disable=not sys.stdout.isatty()):
-    pass
+    # 제출된 작업들이 완료될 때까지 진행 상황을 tqdm으로 표시합니다.
+    for future in tqdm(as_completed(futures), total=len(futures), desc='Fill gap and modify path data', disable=not sys.stdout.isatty()):
+        pass

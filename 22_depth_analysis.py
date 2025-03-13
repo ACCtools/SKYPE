@@ -9,6 +9,15 @@ import glob
 from tqdm import tqdm
 from scipy.optimize import nnls
 from concurrent.futures import ProcessPoolExecutor, as_completed
+import logging
+
+logging.basicConfig(
+    format='%(asctime)s %(levelname)s:%(message)s',
+    level=logging.INFO,
+    datefmt='%m/%d/%Y %I:%M:%S %p',
+)
+logging.info("22_depth_analysis start")
+
 
 ABS_MAX_COVERAGE_RATIO = 3
 MAX_PATH_CNT = 100
@@ -171,7 +180,7 @@ for i in tqdm(range(1, bclen//4 + 1), desc='Parse coverage from backward-directe
     vec_list.append(ov+bv)
 
 
-print("Regression analysis is ongoing...")
+logging.info("Regression analysis is ongoing...")
 
 A = np.vstack(filter_vec_list).T
 B = main_filter_vec
@@ -181,10 +190,10 @@ weights, loss = nnls(A, B)
 error = np.linalg.norm(A @ weights - B)
 b_norm = np.linalg.norm(B)
 
-print(f'Error : {round(error, 4)}')
-print(f'Norm error : {round(error / b_norm, 4)}')
+logging.info(f'Error : {round(error, 4)}')
+logging.info(f'Norm error : {round(error / b_norm, 4)}')
 
-print("Forming result images...")
+logging.info("Forming result images...")
 
 A = np.vstack(vec_list)
 B = main_vec
@@ -348,3 +357,5 @@ plt.title("Circos-like Plot: Coverage and Top 50 Components")
 plt.legend(loc='upper right', bbox_to_anchor=(1.3, 1.1), fontsize='small')
 plt.tight_layout()
 plt.savefig(f'{PREFIX}/virtual_chromosome_circosplot.png')
+
+logging.info("end")

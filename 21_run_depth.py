@@ -6,6 +6,15 @@ import subprocess
 
 from tqdm import tqdm
 from concurrent.futures import ProcessPoolExecutor, as_completed
+import logging
+
+logging.basicConfig(
+    format='%(asctime)s %(levelname)s:%(message)s',
+    level=logging.INFO,
+    datefmt='%m/%d/%Y %I:%M:%S %p',
+)
+logging.info("21_run_depth start")
+
 
 parser = argparse.ArgumentParser(description="SKYPE run depth program")
 
