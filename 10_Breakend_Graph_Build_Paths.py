@@ -488,8 +488,9 @@ def connect_nclose_telo(contig_data : list, using_node : list, type_3_graph : di
     
     return full_bnd_graph
 
-def connect_path(folder_path, index_file_path, cnt, contig_data, G):
+def connect_path(folder_path, index_file_path, contig_data, G):
     os.makedirs(f"{folder_path}/", exist_ok=True)
+    cnt = int(index_file_path.split(".")[-3].split("/")[-1])
     with open(f"{folder_path}/{cnt}.paf", "wt") as g, \
          open(f"{folder_path}/{cnt}.index.txt", "wt") as h:
         bnd_index_path = import_index_path(index_file_path)
@@ -607,15 +608,12 @@ def main():
         for edge in bnd_connected_graph[node]:
             G.add_weighted_edges_from([(node, tuple(edge[:-1]), edge[-1])])
 
-    cnt=0
     chr_chr_folder_path = glob.glob(BREAKEND_GRAPH_PATH_FILE_PREFIX+"/00_raw/*")
     for folder_path in tqdm(chr_chr_folder_path, desc='Build breakend graph', disable=not sys.stdout.isatty()):
         index_file_paths = glob.glob(folder_path + "/*index*")
-        cnt = 0
         for index_file_path in index_file_paths:
             chr_folder = index_file_path.split('/')[-2]
-            cnt+=1
-            connect_path(f'{args.prefix}/10_fill/{chr_folder}', index_file_path, cnt, contig_data, G)
+            connect_path(f'{args.prefix}/10_fill/{chr_folder}', index_file_path, contig_data, G)
             
             
 

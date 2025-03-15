@@ -482,7 +482,6 @@ else:
     paf_file.append(primary_paf)
     paf_file.append(alt_paf)
 
-
 PREPROCESSED_PAF_FILE_PATH = args.ppc_paf_file_path
 
 contig_data = import_data2(PREPROCESSED_PAF_FILE_PATH)
@@ -512,8 +511,6 @@ def fill_path(index_file_path):
         full_connected_path_len = len(full_connected_path)
         vcnt = 0
         for i in range(1, full_connected_path_len):
-            if i==full_connected_path_len-1:
-                t=1
             curr_contig = path_contig[-1]
             next_contig = contig_data[full_connected_path[i][1]]
             if curr_contig[CHR_NAM] == next_contig[CHR_NAM] and curr_contig[CTG_NAM] != next_contig[CTG_NAM] \

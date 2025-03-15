@@ -1064,7 +1064,7 @@ with open(f"{PREFIX}/compressed_nclose_nodes_list.txt", "wt") as f:
         ed_flag = False
         if (('=', i[0]), ('=', i[1])) in nclose_start_compress:
             st_flag = True
-        if (('=', i[0]), ('=', i[1])) in nclose_start_compress:
+        if (('=', i[0]), ('=', i[1])) in nclose_end_compress:
             ed_flag = True
         for pair in nclose_type[i]:
             contig_a = contig_data[pair[0]]
