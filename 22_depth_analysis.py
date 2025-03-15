@@ -407,10 +407,10 @@ parser.add_argument("prefix",
 parser.add_argument("-t", "--thread", 
                     help="Number of thread", type=int)
 
-# args = parser.parse_args()
+args = parser.parse_args()
 
-t = "python 22_depth_analysis.py /home/hyunwoo/51g_cancer_denovo/51_depth_data/KKU-100.win.stat.gz public_data/chm13v2.0.fa.fai public_data/chm13v2.0_cytobands_allchrs.bed 30_skype_pipe/KKU-100_05_36_56 -t 25"
-args = parser.parse_args(t.split()[2:])
+# t = "python 22_depth_analysis.py /home/hyunwoo/51g_cancer_denovo/51_depth_data/KKU-100.win.stat.gz public_data/chm13v2.0.fa.fai public_data/chm13v2.0_cytobands_allchrs.bed 30_skype_pipe/KKU-100_05_36_56 -t 25"
+# args = parser.parse_args(t.split()[2:])
 
 PREFIX = args.prefix
 THREAD = args.thread
