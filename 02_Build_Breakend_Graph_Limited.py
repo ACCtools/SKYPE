@@ -63,7 +63,7 @@ CHR_CHANGE_LIMIT_PREFIX = 7
 DIR_CHANGE_LIMIT = 1
 CENSAT_VISIT_LIMIT = 2
 
-
+BND_OVERUSE_CNT = 2
 PATH_MAJOR_COMPONENT = 3
 NCLOSE_COMPRESS_LIMIT = 50*K
 NCLOSE_MERGE_LIMIT = 1*K
@@ -1376,7 +1376,7 @@ def run_graph(data, CHR_CHANGE_LIMIT):
                 censat_overuse_flag = False
                 for node in range(1, path_len - 2):
                     contig_set[path[node][1]] += 1
-                    if contig_set[path[node][1]] >= 3:
+                    if contig_set[path[node][1]] >= BND_OVERUSE_CNT:
                         contig_overuse_flag = True
                         break
                     

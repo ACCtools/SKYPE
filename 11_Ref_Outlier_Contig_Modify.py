@@ -261,6 +261,3 @@ while s<contig_data_size:
 logging.info(f"Forward-directed outlier contig count : {cntfj}")
 logging.info(f"Backward-directed outlier contig count : {cntbj}")
 logging.info(f"Total count : {cntfj + cntbj}")
-
-
-

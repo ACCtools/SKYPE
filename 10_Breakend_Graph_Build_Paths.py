@@ -10,6 +10,7 @@ import glob
 import networkx as nx
 
 from tqdm import tqdm
+from concurrent.futures import ProcessPoolExecutor, as_completed
 import logging
 
 logging.basicConfig(
@@ -488,7 +489,13 @@ def connect_nclose_telo(contig_data : list, using_node : list, type_3_graph : di
     
     return full_bnd_graph
 
-def connect_path(folder_path, index_file_path, contig_data, G):
+def connect_path_folder(folder_path):
+    index_file_paths = glob.glob(folder_path + "/*index*")
+    for index_file_path in index_file_paths:
+        chr_folder = index_file_path.split('/')[-2]
+        connect_path(f'{prefix}/10_fill/{chr_folder}', index_file_path)
+
+def connect_path(folder_path, index_file_path):
     os.makedirs(f"{folder_path}/", exist_ok=True)
     cnt = int(index_file_path.split(".")[-3].split("/")[-1])
     with open(f"{folder_path}/{cnt}.paf", "wt") as g, \
@@ -505,9 +512,10 @@ def connect_path(folder_path, index_file_path, contig_data, G):
             print(contig_data[s], file=g)
             print(tuple(bnd_index_path[i-1][0:2]), file=h)
             if contig_data[s][CTG_NAM] != contig_data[e][CTG_NAM]:
-                if nx.has_path(G, source=(DIR_OUT, s), target=(DIR_IN, e)):
-                    path = nx.shortest_path(G, source=(DIR_OUT, s), target=(DIR_IN, e), weight='weight')
+                if nx.has_path(G_obj, source=(DIR_OUT, s), target=(DIR_IN, e)):
+                    path = nx.shortest_path(G_obj, source=(DIR_OUT, s), target=(DIR_IN, e), weight='weight')
                     for node in path[1:-1]:
+                        assert(contig_data[node[1]][CTG_TYP] == 3)
                         print(contig_data[node[1]], file=g)
                         print(tuple(node[0:2]), file=h)
             else:
@@ -524,6 +532,12 @@ def connect_path(folder_path, index_file_path, contig_data, G):
         print(tuple((DIR_IN, last_path_idx)), file=h)
         print(end_telo, file=g)
                     
+def pool_init(contig_data_, G, prefix_):
+    global G_obj, contig_data, prefix
+
+    G_obj = G
+    contig_data = contig_data_
+    prefix = prefix_
 
 def main():
     parser = argparse.ArgumentParser(description="Find breakend contigs with contig data and map data")
@@ -538,6 +552,9 @@ def main():
     parser.add_argument("prefix", 
                     help="Pefix for pipeline")
     
+    parser.add_argument("-t", "--thread", 
+                    help="Number of thread", type=int)
+    
     args = parser.parse_args()
 
     graph_data = args.graph_file_txt
@@ -549,6 +566,8 @@ def main():
     NCLOSE_FILE_PATH = f"{args.prefix}/nclose_nodes_index.txt"
 
     VIRTUAL_TYPE_3_PATH = f"{args.prefix}/virtual_ordinary_contig.txt"
+
+    THREAD = args.thread
     
     contig_data = import_data2(PREPROCESSED_PAF_FILE_PATH)
     virtual_type_3_data = import_data2(VIRTUAL_TYPE_3_PATH)
@@ -609,14 +628,15 @@ def main():
             G.add_weighted_edges_from([(node, tuple(edge[:-1]), edge[-1])])
 
     chr_chr_folder_path = glob.glob(BREAKEND_GRAPH_PATH_FILE_PREFIX+"/00_raw/*")
-    for folder_path in tqdm(chr_chr_folder_path, desc='Build breakend graph', disable=not sys.stdout.isatty()):
-        index_file_paths = glob.glob(folder_path + "/*index*")
-        for index_file_path in index_file_paths:
-            chr_folder = index_file_path.split('/')[-2]
-            connect_path(f'{args.prefix}/10_fill/{chr_folder}', index_file_path, contig_data, G)
-            
-            
 
+    with ProcessPoolExecutor(max_workers=THREAD, initializer=pool_init, initargs=(contig_data, G, args.prefix)) as executor:
+        futures = []
+        for folder_path in chr_chr_folder_path:
+            futures.append(executor.submit(connect_path_folder, folder_path))
+    
+        # 제출된 작업들이 완료될 때까지 진행 상황을 tqdm으로 표시합니다.
+        for future in tqdm(as_completed(futures), total=len(futures), desc='Fill breakend graph', disable=not sys.stdout.isatty()):
+            pass
 
 if __name__ == "__main__":
     main()

@@ -1638,10 +1638,6 @@ def main():
             for j in i:
                 print(j, end="\t", file=f)
             print("", file=f)
-            
-    
-
-    
 
 if __name__ == "__main__":
     main()

@@ -1,6 +1,8 @@
 import numpy as np
 import pandas as pd
+import seaborn as sns
 import matplotlib.pyplot as plt
+import matplotlib as mpl
 
 import sys
 import logging
@@ -15,9 +17,13 @@ from scipy.signal import butter, filtfilt
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
 from pycirclize import Circos
+from matplotlib.lines import Line2D
 from matplotlib.projections.polar import PolarAxes
 from pycirclize.track import Track
 from collections import defaultdict
+
+import ast
+from collections import Counter
 
 logging.basicConfig(
     format='%(asctime)s %(levelname)s:%(message)s',
@@ -28,10 +34,43 @@ logging.info("22_depth_analysis start")
 
 np.seterr(invalid='ignore')
 
+CTG_NAM = 0
+CTG_LEN = 1
+CTG_STR = 2
+CTG_END = 3
+CTG_DIR = 4
+CHR_NAM = 5
+CHR_LEN = 6
+CHR_STR = 7
+CHR_END = 8
+CTG_MAPQ = 9
+CTG_TYP = 10
+CTG_STRND = 11
+CTG_ENDND = 12
+CTG_TELCHR = 13
+CTG_TELDIR = 14
+CTG_TELCON = 15
+CTG_RPTCHR = 16
+CTG_RPTCASE = 17
+CTG_MAINFLOWDIR = 18
+CTG_MAINFLOWCHR = 19
+
 ABS_MAX_COVERAGE_RATIO = 3
 K = 1000
 M = K * 1000
 MAX_PATH_CNT = 100
+
+def import_index_path(file_path : str) -> list:
+    index_file = open(file_path, "r")
+    index_data = []
+    for curr_index in index_file:
+        curr_index.rstrip()
+        if curr_index[0] == '(':
+            index_data.append(ast.literal_eval(curr_index))
+        elif curr_index[0] != '[':
+            temp_list = curr_index.split("\t")
+            index_data.append(tuple((int(temp_list[0]), int(temp_list[1]))))
+    return index_data
 
 def extract_groups(lst):
     if not lst:
@@ -370,6 +409,20 @@ def rebin_dataframe_B(df: pd.DataFrame, n: int) -> np.array:
     return np.hstack(ans_B)
 
 
+def import_data2(file_path : str) -> list :
+    paf_file = open(file_path, "r")
+    contig_data = []
+    for curr_contig in paf_file:
+        temp_list = curr_contig.split("\t")
+        int_induce_idx = [CTG_LEN, CTG_STR, CTG_END, \
+                          CHR_LEN, CHR_STR, CHR_END, \
+                          CTG_MAPQ, CTG_TYP, CTG_STRND, CTG_ENDND,]
+        for i in int_induce_idx:
+            temp_list[i] = int(temp_list[i])
+        contig_data.append(tuple(temp_list))
+    return contig_data
+
+
 bpath = 'public_data/chm13v2.0_censat_v2.1.m.bed'
 
 
@@ -391,6 +444,9 @@ bed_data = import_bed(bpath)
 
 parser = argparse.ArgumentParser(description="SKYPE depth analysis")
 
+parser.add_argument("ppc_paf_file_path", 
+                        help="Path to the preprocessed PAF file.")
+
 parser.add_argument("main_stat_loc", 
                     help="Cancer coverage location file")
 
@@ -409,13 +465,14 @@ parser.add_argument("-t", "--thread",
 
 args = parser.parse_args()
 
-# t = "python 22_depth_analysis.py /home/hyunwoo/51g_cancer_denovo/51_depth_data/KKU-100.win.stat.gz public_data/chm13v2.0.fa.fai public_data/chm13v2.0_cytobands_allchrs.bed 30_skype_pipe/KKU-100_05_36_56 -t 25"
+# t = "python 22_depth_analysis.py 20_acc_pipe/KKU-100.p/KKU-100.p.aln.paf.ppc.paf /home/hyunwoo/51g_cancer_denovo/51_depth_data/KKU-100.win.stat.gz public_data/chm13v2.0.fa.fai public_data/chm13v2.0_cytobands_allchrs.bed 30_skype_pipe/KKU-100_05_36_56 -t 25"
 # args = parser.parse_args(t.split()[2:])
 
 PREFIX = args.prefix
 THREAD = args.thread
 CHROMOSOME_INFO_FILE_PATH = args.reference_fai_path
 main_stat_loc = args.main_stat_loc
+PREPROCESSED_PAF_FILE_PATH = args.ppc_paf_file_path
 
 # HuH-28의 /home/hyunwoo/51g_cancer_denovo/51_depth_data/HuH-28.win.stat.gz를 읽어서 모든 경우 chr, st set을 가지고온다 (나머지 없는 경우를 0으로 채우게)
 # chrM은 뺀다
@@ -504,7 +561,6 @@ with ProcessPoolExecutor(max_workers=THREAD) as executor:
     futures = [executor.submit(get_two_vec_list_folder, folder_path) for folder_path in chr_chr_folder_path]
     for future in tqdm(as_completed(futures), total=len(futures), desc='Parse coverage from gz files', disable=not sys.stdout.isatty()):
         fvl, vl, ll = future.result()
-
         filter_vec_list.extend(fvl)
         vec_list.extend(vl)
         tot_loc_list.extend(ll)
@@ -517,7 +573,6 @@ for i in tqdm(range(1, fclen//4 + 1), desc='Parse coverage from forward-directed
     bfv, bv = get_vec_from_stat_loc(bv_loc)
     filter_vec_list.append(ofv-bfv)
     vec_list.append(ov-bv)
-    tot_loc_list.append(ov_loc)
 
 bclen = len(glob.glob(back_contig_path+"*"))
 for i in tqdm(range(1, bclen//4 + 1), desc='Parse coverage from backward-directed outlier contig gz files', disable=not sys.stdout.isatty()):
@@ -527,7 +582,6 @@ for i in tqdm(range(1, bclen//4 + 1), desc='Parse coverage from backward-directe
     bfv, bv = get_vec_from_stat_loc(bv_loc)
     filter_vec_list.append(ofv+bfv)
     vec_list.append(ov+bv)
-    tot_loc_list.append(ov_loc)
 
 logging.info("Regression analysis is ongoing...")
 
@@ -600,6 +654,8 @@ rdf = rebin_dataframe(df, 2)
 circos = Circos(chr_len, space=3)
 circos.add_cytoband_tracks((95, 100), '../00_build_graph/public_data/chm13v2.0_cytobands_allchrs.bed')
 
+target_color = ['blue', 'red', 'gray']
+
 for sector in circos.sectors:
     sector.text(sector.name, r=107, size=8)
     sector.get_track("cytoband").xticks_by_interval(
@@ -625,7 +681,7 @@ for sector in circos.sectors:
             tchr_st_list.append(v[1])
             tchr_idx_list.append(i)
     
-    cn_track = sector.add_track((50, 90))
+    cn_track = sector.add_track((60, 93))
 
     cn_track.axis()
     cn_track.grid(y_grid_num=7, zorder=-2)
@@ -638,11 +694,144 @@ for sector in circos.sectors:
                             target_value=[0.5 * meandepth, 2 * meandepth])
     
 
-    color_track = sector.add_track((40, 45))
+    color_track = sector.add_track((53, 58))
     color_track.axis()
     line_track_circos_color(color_track, x=tchr_st_list, y1=color_label[tchr_idx_list], vmax=0.5,
-                            target_color=['blue', 'red', 'gray'],
+                            target_color=target_color,
                             target_value=[2, 4])
+    
+contig_data = import_data2(PREPROCESSED_PAF_FILE_PATH)
+
+def extract_nclose_node(nclose_path: str) -> list:
+    nclose_list = []
+    with open(nclose_path, "r") as f:
+        for line in f:
+            line = line.split()
+            nclose_list.append((int(line[1]), int(line[2])))
+    return nclose_list
+
+NCLOSE_FILE_PATH = f"{args.prefix}/nclose_nodes_index.txt"
+
+nclose_list = extract_nclose_node(NCLOSE_FILE_PATH)
+nclose_set = set(nclose_list)
+nclose_dict = dict(zip(nclose_list, range(len(nclose_list))))
+reverse_nclose_dict = dict(zip(range(len(nclose_list)), nclose_list))
+
+nclose_str_pos = dict()
+for k, v in reverse_nclose_dict.items():
+    nclose_str_pos[k] = (contig_data[v[0]][CHR_STR], contig_data[v[1]][CHR_STR])
+
+raw_path_list = []
+for i in tot_loc_list:
+    temp_str = i.split(".")[-4]
+    temp_list = temp_str.split("/")
+    temp_list[2] = "00_raw"
+    raw_path_list.append("/".join(temp_list) + ".index.txt")
+
+path_nclose_usage = []
+for i, raw_path in enumerate(raw_path_list):
+    using_nclose = Counter()
+    path = import_index_path(raw_path)
+    s = 1
+    while s < len(path)-1:
+        nclose_cand = tuple(sorted([path[s][1], path[s+1][1]]))
+        if nclose_cand in nclose_set:
+            using_nclose[nclose_dict[nclose_cand]]+=1
+            s+=2
+        else:
+            s+=1
+    path_nclose_usage.append(using_nclose)
+
+nclose_cn = defaultdict(float)
+for i, ctr in enumerate(path_nclose_usage):
+    for j, v in ctr.items():
+        nclose_cn[j] += v*weights[i]
+
+bnd_cn_data = []
+for k, v in nclose_cn.items():
+    pos1, pos2 = nclose_str_pos[k]
+    idx1, idx2 = reverse_nclose_dict[k]
+    chr_nam1 = contig_data[idx1][CHR_NAM]
+    chr_nam2 = contig_data[idx2][CHR_NAM]
+    virtual_flag = False
+    if contig_data[idx1][CTG_NAM][0] == 'v':
+        virtual_flag = True
+    
+    bnd_cn_data.append([(chr_nam1, pos1), (chr_nam2, pos2), v, virtual_flag])
+
+off = 0.03
+lower = 0
+upper = meandepth * 2
+
+cmap = sns.color_palette("rocket_r", as_cmap=True)
+
+# bnd_cn_data = [[('chr1', 60 * M), ('chr2', 30 * M), 4.6, False],
+#                [('chr13', 10 * M), ('chr21', 25 * M), 21.6, False],
+#                [('chr1', 125 * M), ('chr9', 60 * M), 13.6, True]]
+bnd_cn_data = sorted(bnd_cn_data, key=lambda t: t[2])
+print(bnd_cn_data)
+for i, (bnd_loc1, bnd_loc2, cn, is_vir) in bnd_cn_data:
+    norm_cn = np.clip((cn - lower) / (upper - lower), 0, 1)
+
+    color = cmap(norm_cn)
+    linestyle = '--' if is_vir else '-'
+    
+    if cn > 0:
+        circos.link_line(bnd_loc1, bnd_loc2, color=color, linestyle=linestyle, lw=1, zorder=-i)
+
+circos.colorbar(vmin=0, vmax=2, bounds=(1.01 + off, 0.825, 0.02, 0.1), cmap=cmap,
+                label='Breakend CN', orientation='vertical',
+                colorbar_kws=dict(format=mpl.ticker.FixedFormatter(['0', 'N', '2N']),
+                                  ticks=mpl.ticker.FixedLocator([0, 1, 2])),
+                label_kws=dict(fontsize=9,),
+                tick_kws=dict(labelsize=8,))
 
 fig = circos.plotfig(figsize=(10, 10), dpi=500)
+
+loc = 'upper left'
+
+breakend_line_handles = [
+    Line2D([], [], color="black", label="Real CN", linestyle = '-'),
+    Line2D([], [], color="green", label="SKYPE CN", linestyle = '-'),
+]
+
+breakend_line_legend = circos.ax.legend(
+    handles=breakend_line_handles,
+    loc=loc,
+    bbox_to_anchor=(0.85 + off, 1.03),
+    fontsize=8,
+    title="CN lines",
+    handlelength=2,
+)
+circos.ax.add_artist(breakend_line_legend)
+
+scatter_handles = []
+for color, label in zip(target_color, ['Sucess', 'Failed', 'Ignored']):
+    scatter_handles.append(mpl.patches.Patch(color=color, label=label))
+
+scatter_legend = circos.ax.legend(
+    loc=loc,
+    handles=scatter_handles,
+    bbox_to_anchor=(0.97 + off, 1.03),
+    fontsize=8,
+    title="Predict label",
+    handlelength=2,
+)
+circos.ax.add_artist(scatter_legend)
+
+cn_line_handles = [
+    Line2D([], [], color="black", label="Breakend", linestyle = '-'),
+    Line2D([], [], color="black", label="Virtual breakend", linestyle = '--'),
+]
+
+cn_line_legend = circos.ax.legend(
+    loc=loc,
+    handles=cn_line_handles,
+    bbox_to_anchor=(0.85 + off, 0.94),
+    fontsize=8,
+    title="Breakend lines",
+    handlelength=2,
+)
+circos.ax.add_artist(cn_line_legend)
+
 fig.savefig(f"{PREFIX}/total_cov.png")
