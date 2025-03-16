@@ -769,15 +769,15 @@ cmap = sns.color_palette("rocket_r", as_cmap=True)
 #                [('chr13', 10 * M), ('chr21', 25 * M), 21.6, False],
 #                [('chr1', 125 * M), ('chr9', 60 * M), 13.6, True]]
 bnd_cn_data = sorted(bnd_cn_data, key=lambda t: t[2])
-print(bnd_cn_data)
-for i, (bnd_loc1, bnd_loc2, cn, is_vir) in bnd_cn_data:
+
+for i, (bnd_loc1, bnd_loc2, cn, is_vir) in enumerate(bnd_cn_data):
     norm_cn = np.clip((cn - lower) / (upper - lower), 0, 1)
 
     color = cmap(norm_cn)
     linestyle = '--' if is_vir else '-'
     
     if cn > 0:
-        circos.link_line(bnd_loc1, bnd_loc2, color=color, linestyle=linestyle, lw=1, zorder=-i)
+        circos.link_line(bnd_loc1, bnd_loc2, color=color, linestyle=linestyle, lw=1, zorder=i)
 
 circos.colorbar(vmin=0, vmax=2, bounds=(1.01 + off, 0.825, 0.02, 0.1), cmap=cmap,
                 label='Breakend CN', orientation='vertical',

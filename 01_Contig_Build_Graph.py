@@ -178,20 +178,23 @@ def initial_graph_build(contig_data : list, telo_data : dict) -> list :
         curr_telo_set = set()
         now_telo = chr_rev_corr[i]
         flag = False
+        mini_telo_dist = INF
         for j in range(2):
             for _ in adjacency[j][i]:
                 # 10K 이내면 없애기
                 if i < contig_data_size + CHROMOSOME_COUNT:
+                    mini_telo_dist = min(mini_telo_dist, 0 if contig_data[_[1]][CHR_STR] < telo_data[now_telo][0] else contig_data[_[1]][CHR_STR] - telo_data[now_telo][0])
                     if contig_data[_[1]][CHR_STR] < telo_data[now_telo][0]+FORCE_TELOMERE_THRESHOLD:
                         flag = True
                 else:
+                    mini_telo_dist = min(mini_telo_dist, 0 if contig_data[_[1]][CHR_END] > telo_data[now_telo][1] else telo_data[now_telo][1] - contig_data[_[1]][CHR_END])
                     if contig_data[_[1]][CHR_END] > telo_data[now_telo][1]-FORCE_TELOMERE_THRESHOLD:
                         flag = True
                 curr_telo_set.add(_[1])
         if flag:
             continue
-        telo_dist = INF
-        telo_connect_node = 0
+        telo_dist = mini_telo_dist
+        telo_connect_node = -1
         telo_dir = 0
         temp_contig = (0, 0, 0, 0, 0, 0, 0, telo_data[now_telo][0], telo_data[now_telo][1])
         #우리가 연결하는 텔로미어 노드
@@ -214,6 +217,8 @@ def initial_graph_build(contig_data : list, telo_data : dict) -> list :
                     telo_connect_node = ed
                     telo_dist = telo_distance_checker(contig_data[ed], temp_contig)
                     telo_dir = '-'
+            if telo_connect_node < 0:
+                continue
             if telo_dir == '+':
                 adjacency[DIR_FOR][i].append([DIR_FOR, telo_connect_node, telo_dist])
                 adjacency[DIR_BAK][telo_connect_node].append([DIR_FOR, i, telo_dist])
@@ -238,6 +243,8 @@ def initial_graph_build(contig_data : list, telo_data : dict) -> list :
                     telo_connect_node = ed
                     telo_dist = telo_distance_checker(contig_data[ed], temp_contig)
                     telo_dir = '+'
+            if telo_connect_node < 0:
+                continue
             if telo_dir == '+':
                 adjacency[DIR_FOR][i].append([DIR_BAK, telo_connect_node, telo_dist])
                 adjacency[DIR_FOR][telo_connect_node].append([DIR_FOR, i, telo_dist])
