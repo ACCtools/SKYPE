@@ -49,6 +49,8 @@ BUFFER = 10000000
 CHROMOSOME_COUNT = 23
 K = 1000
 
+VIRTUAL_CONTIG_PREFIX = "virtual_contig"
+
 def import_data(file_path : list) -> list :
     contig_data = []
     int_induce_idx = [1, 2, 3, 6, 7, 8, 9, 10, 11]
@@ -354,7 +356,7 @@ def node_dir_transform(node):
 def form_virtual_contig(chr_len, chr_str, chr_end, chr_name, vcnt):
     virtual_contig = []
     N = chr_end - chr_str
-    virtual_contig = [f"virtual_contig_{vcnt}", N, 0, N]
+    virtual_contig = [f"{VIRTUAL_CONTIG_PREFIX}_{vcnt}", N, 0, N]
     virtual_contig += ['+', chr_name, chr_len, chr_str, chr_end]
     virtual_contig += [N, N, 0]
     virtual_contig += ['tp:A:P', 'cs:Z:'+f":{N}"]
@@ -466,10 +468,8 @@ parser.add_argument("--alt",
 parser.add_argument("-t", "--thread", 
                     help="Number of thread", type=int)
 
-# t = "python 20_Fill_Path.py 20_acc_pipe/HuCC-T1.p/HuCC-T1.p.aln.paf 20_acc_pipe/HuCC-T1.p/HuCC-T1.p.aln.paf.ppc.paf 30_skype_pipe/HuCC-T1_00_50_38 --alt 20_acc_pipe/HuCC-T1.a/HuCC-T1.a.aln.paf"
-# t = t.split()
 args = parser.parse_args()
-# args = parser.parse_args(t[2:])
+
 PAF_FILE_PATH = []
 paf_file = []
 if args.alt is None:
@@ -574,8 +574,8 @@ def fill_path(index_file_path):
     return
 
 
-# fill_path("30_skype_pipe/HuCC-T1_00_50_38/10_fill/chr14f_chr14b/1.index.txt")
-# exit(1)
+fill_path("30_skype_pipe/U2OS_telo_01_58_52/10_fill/chr4b_chr4b/1.index.txt")
+exit(1)
 
 THREAD=args.thread
 with ProcessPoolExecutor(max_workers=THREAD) as executor:

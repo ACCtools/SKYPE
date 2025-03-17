@@ -60,6 +60,10 @@ K = 1000
 M = K * 1000
 MAX_PATH_CNT = 100
 
+CHROMOSOME_COUNT = 23
+DIR_FOR = 1
+TELOMERE_EXPANSION = 5 * K
+
 def import_index_path(file_path : str) -> list:
     index_file = open(file_path, "r")
     index_data = []
@@ -330,6 +334,86 @@ def find_chr_len(file_path : str) -> dict:
         chr_len[curr_data[0]] = int(curr_data[1])
     return chr_len
 
+def chr_correlation_maker(contig_data):
+    chr_corr = {}
+    chr_rev_corr = {}
+    contig_data_size = len(contig_data)
+    for i in range(1, CHROMOSOME_COUNT):
+        chr_corr['chr'+str(i)+'f'] = contig_data_size + i - 1
+        chr_rev_corr[contig_data_size + i - 1] = 'chr'+str(i)+'f'
+    chr_corr['chrXf'] = contig_data_size + CHROMOSOME_COUNT - 1
+    chr_corr['chrYf'] = contig_data_size + CHROMOSOME_COUNT - 1
+    chr_rev_corr[contig_data_size + CHROMOSOME_COUNT - 1] = 'chrXf'
+    for i in range(1, CHROMOSOME_COUNT):
+        chr_corr['chr'+str(i)+'b'] = contig_data_size + CHROMOSOME_COUNT + i - 1
+        chr_rev_corr[contig_data_size + CHROMOSOME_COUNT + i - 1] = 'chr'+str(i)+'b'
+    chr_corr['chrXb'] = contig_data_size + 2*CHROMOSOME_COUNT - 1
+    chr_corr['chrYb'] = contig_data_size + 2*CHROMOSOME_COUNT - 1
+    chr_rev_corr[contig_data_size + 2*CHROMOSOME_COUNT - 1] = 'chrXb'
+    return chr_corr, chr_rev_corr
+
+def import_graph_data(file_path : str) -> dict :
+    graph_file = open(file_path, "r")
+    graph_adjacency = {}
+    cnt = 0
+    for curr_edge in graph_file:
+        l, r = curr_edge.split(":")
+        r.lstrip()
+        r.rstrip(',')
+        r = ast.literal_eval('['+r+']')
+        if cnt==0:
+            cnt+=1
+        l = ast.literal_eval(l)
+        graph_adjacency[l] = r
+
+    return graph_adjacency
+
+def import_telo_data(file_path : str, chr_len : dict) -> dict :
+    fai_file = open(file_path, "r")
+    telo_data = [(0,1)]
+    for curr_data in fai_file:
+        temp_list = curr_data.split("\t")
+        int_induce_idx = [1, 2]
+        for i in int_induce_idx:
+            temp_list[i] = int(temp_list[i])
+        if temp_list[0]!=telo_data[-1][0]:
+            temp_list[2]+=TELOMERE_EXPANSION
+            temp_list.append('f')
+        else:
+            if temp_list[1]>chr_len[temp_list[0]]/2:
+                temp_list[1]-=TELOMERE_EXPANSION
+                temp_list.append('b')
+            else:
+                temp_list.append('f')
+                temp_list[2]+=TELOMERE_EXPANSION
+        telo_data.append(tuple(temp_list))
+    return telo_data[1:]
+
+def distance_checker(node_a : tuple, node_b : tuple) -> int :
+    if max(int(node_a[0]), int(node_b[0])) < min(int(node_a[1]), int(node_b[1])):
+        return 0   
+    else:
+        return min(abs(int(node_b[0]) - int(node_a[1])), abs(int(node_b[1]) - int(node_a[0])))
+    
+def chr2int(x):
+    chrXY2int = {'chrX' : 24, 'chrY' : 25}
+    if x in chrXY2int:
+        return chrXY2int[x]
+    else:
+        return int(x[3:])
+
+def extract_telomere_connect_contig(contig_data : list, graph_adjacency : dict) -> list:
+    chr_corr, chr_rev_corr = chr_correlation_maker(contig_data)
+    contig_data_size = len(contig_data)
+    telomere_connect_contig = []
+    for i in range(contig_data_size, contig_data_size+2*CHROMOSOME_COUNT):
+        for j in graph_adjacency[(DIR_FOR, i)]:
+            telomere_connect_contig.append((chr_rev_corr[i], j[1]))
+    
+    return telomere_connect_contig
+
+
+
 def rebin_dataframe(df: pd.DataFrame, n: int) -> pd.DataFrame:
     """
     Group rows in the DataFrame into bins spanning n consecutive units.
@@ -447,8 +531,14 @@ parser = argparse.ArgumentParser(description="SKYPE depth analysis")
 parser.add_argument("ppc_paf_file_path", 
                         help="Path to the preprocessed PAF file.")
 
+parser.add_argument("graph_file_txt", 
+                    help="Path to the graph text file.")
+
 parser.add_argument("main_stat_loc", 
                     help="Cancer coverage location file")
+
+parser.add_argument("telomere_bed_path", 
+                        help="Path to the telomere information file.")
 
 parser.add_argument("reference_fai_path", 
                     help="Path to the chromosome information file.")
@@ -465,13 +555,15 @@ parser.add_argument("-t", "--thread",
 
 args = parser.parse_args()
 
-# t = "python 22_depth_analysis.py 20_acc_pipe/KKU-100.p/KKU-100.p.aln.paf.ppc.paf /home/hyunwoo/51g_cancer_denovo/51_depth_data/KKU-100.win.stat.gz public_data/chm13v2.0.fa.fai public_data/chm13v2.0_cytobands_allchrs.bed 30_skype_pipe/KKU-100_05_36_56 -t 25"
+# t = "python 22_depth_analysis.py 20_acc_pipe/HuH-28.p/HuH-28.p.aln.paf.ppc.paf 20_acc_pipe/HuH-28.p/HuH-28.p.aln.paf.ppc.paf.op.graph.txt /home/hyunwoo/51g_cancer_denovo/51_depth_data/HuH-28.win.stat.gz public_data/chm13v2.0_telomere.bed public_data/chm13v2.0.fa.fai public_data/chm13v2.0_cytobands_allchrs.bed 30_skype_pipe/HuH-28_01_20_30 -t 25"
 # args = parser.parse_args(t.split()[2:])
 
 PREFIX = args.prefix
 THREAD = args.thread
 CHROMOSOME_INFO_FILE_PATH = args.reference_fai_path
+graph_data = args.graph_file_txt
 main_stat_loc = args.main_stat_loc
+TELOMERE_INFO_FILE_PATH = args.telomere_bed_path
 PREPROCESSED_PAF_FILE_PATH = args.ppc_paf_file_path
 
 # HuH-28의 /home/hyunwoo/51g_cancer_denovo/51_depth_data/HuH-28.win.stat.gz를 읽어서 모든 경우 chr, st set을 가지고온다 (나머지 없는 경우를 0으로 채우게)
@@ -479,6 +571,13 @@ PREPROCESSED_PAF_FILE_PATH = args.ppc_paf_file_path
 RATIO_OUTLIER_FOLDER = f"{PREFIX}/11_ref_ratio_outliers/"
 front_contig_path = RATIO_OUTLIER_FOLDER+"front_jump/"
 back_contig_path = RATIO_OUTLIER_FOLDER+"back_jump/"
+
+contig_data = import_data2(PREPROCESSED_PAF_FILE_PATH)
+
+graph_path = f"{PREFIX}/"
+graph_data = args.graph_file_txt
+graph_adjacency = import_graph_data(graph_data)
+telo_connected_node = extract_telomere_connect_contig(contig_data, graph_adjacency)
 
 
 df = pd.read_csv(main_stat_loc, compression='gzip', comment='#', sep='\t', names=['chr', 'st', 'nd', 'length', 'covsite', 'totaldepth', 'cov', 'meandepth'])
@@ -700,7 +799,6 @@ for sector in circos.sectors:
                             target_color=target_color,
                             target_value=[2, 4])
     
-contig_data = import_data2(PREPROCESSED_PAF_FILE_PATH)
 
 def extract_nclose_node(nclose_path: str) -> list:
     nclose_list = []
@@ -785,6 +883,49 @@ circos.colorbar(vmin=0, vmax=2, bounds=(1.01 + off, 0.825, 0.02, 0.1), cmap=cmap
                                   ticks=mpl.ticker.FixedLocator([0, 1, 2])),
                 label_kws=dict(fontsize=9,),
                 tick_kws=dict(labelsize=8,))
+
+telo_data = import_telo_data(TELOMERE_INFO_FILE_PATH, chr_len)
+telo_dict = defaultdict(list)
+for _ in telo_data:
+    telo_dict[_[0]].append(_[1:])
+
+telo_fb_dict = defaultdict(list)
+for k, v in telo_dict.items():
+    for i in v:
+        telo_fb_dict[k+i[-1]].append([i[0], i[1]])
+
+chr_inf = max(chr_len.values())
+chr_fb_len_dict = defaultdict(list)
+
+for chr_dir, node_id in telo_connected_node:
+    telo_len = chr_inf
+    for telo_bed in telo_fb_dict[chr_dir]:
+        telo_len = min(telo_len, distance_checker(tuple(telo_bed), (contig_data[node_id][CHR_STR], contig_data[node_id][CHR_END])))
+    chr_fb_len_dict[chr_dir].append((node_id, telo_len, chr_dir))
+
+telo_len_data = []
+for chr_dir, telo_len_list in chr_fb_len_dict.items():
+    s_telo_len_list = sorted(telo_len_list, key=lambda t: t[1])
+    telo_len_data.extend(filter(lambda t: t[1] > 0, s_telo_len_list[1:]))
+
+need_label = defaultdict(list)
+for node_id, telo_len, chr_dir in telo_len_data:
+    need_label[chr_dir[:-1]].append((node_id, chr_dir[-1]))
+
+for sector in circos.sectors:
+    track1 = sector.add_track((58.2, 59.8))
+    for j in need_label[sector.name]:
+        if j[1]=='f':
+            # Prevent out of range
+            try:
+                track1.arrow(contig_data[j[0]][CHR_STR], contig_data[j[0]][CHR_STR] + 15*M, fc="black")
+            except:
+                pass
+        else:
+            try:
+                track1.arrow(contig_data[j[0]][CHR_END], contig_data[j[0]][CHR_END] - 15*M, fc="black")
+            except:
+                pass
 
 fig = circos.plotfig(figsize=(10, 10), dpi=500)
 
