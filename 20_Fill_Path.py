@@ -642,4 +642,4 @@ with ProcessPoolExecutor(max_workers=THREAD) as executor:
 
     # 제출된 작업들이 완료될 때까지 진행 상황을 tqdm으로 표시합니다.
     for future in tqdm(as_completed(futures), total=len(futures), desc='Fill gap and modify path data', disable=not sys.stdout.isatty() and not args.progress):
-        t = future.result()
+        future.result()

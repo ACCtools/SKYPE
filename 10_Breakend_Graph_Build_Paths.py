@@ -639,7 +639,7 @@ def main():
     
         # 제출된 작업들이 완료될 때까지 진행 상황을 tqdm으로 표시합니다.
         for future in tqdm(as_completed(futures), total=len(futures), desc='Fill breakend graph', disable=not sys.stdout.isatty() and not args.progress):
-            pass
+            future.result()
 
 if __name__ == "__main__":
     main()
