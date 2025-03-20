@@ -301,22 +301,6 @@ def chr_correlation_maker(contig_data):
     chr_rev_corr[contig_data_size + 2*CHROMOSOME_COUNT - 1] = 'chrXb'
     return chr_corr, chr_rev_corr
 
-def import_graph_data(file_path : str) -> dict :
-    graph_file = open(file_path, "r")
-    graph_adjacency = {}
-    cnt = 0
-    for curr_edge in graph_file:
-        l, r = curr_edge.split(":")
-        r.lstrip()
-        r.rstrip(',')
-        r = ast.literal_eval('['+r+']')
-        if cnt==0:
-            cnt+=1
-        l = ast.literal_eval(l)
-        graph_adjacency[l] = r
-    graph_file.close()
-    return graph_adjacency
-
 def import_telo_data(file_path : str, chr_len : dict) -> dict :
     fai_file = open(file_path, "r")
     telo_data = [(0,1)]
@@ -352,13 +336,15 @@ def chr2int(x):
     else:
         return int(x[3:])
 
-def extract_telomere_connect_contig(contig_data : list, graph_adjacency : dict) -> list:
-    chr_corr, chr_rev_corr = chr_correlation_maker(contig_data)
-    contig_data_size = len(contig_data)
+def extract_telomere_connect_contig(telo_info_path : str) -> list:
     telomere_connect_contig = []
-    for i in range(contig_data_size, contig_data_size+2*CHROMOSOME_COUNT):
-        for j in graph_adjacency[(DIR_FOR, i)]:
-            telomere_connect_contig.append((chr_rev_corr[i], j[1]))
+    with open(telo_info_path) as f:
+        for curr_data in f:
+            curr_data = curr_data.rstrip()
+            temp_list = curr_data.split("\t")
+            chr_info = temp_list[0]
+            contig_id = ast.literal_eval(temp_list[1])
+            telomere_connect_contig.append((chr_info, contig_id[1]))
     
     return telomere_connect_contig
 
@@ -480,9 +466,6 @@ parser.add_argument("censat_bed_path",
 parser.add_argument("ppc_paf_file_path", 
                     help="Path to the preprocessed PAF file.")
 
-parser.add_argument("graph_file_txt", 
-                    help="Path to the graph text file.")
-
 parser.add_argument("main_stat_loc", 
                     help="Cancer coverage location file")
 
@@ -515,7 +498,6 @@ bed_data = import_bed(args.censat_bed_path)
 PREFIX = args.prefix
 THREAD = args.thread
 CHROMOSOME_INFO_FILE_PATH = args.reference_fai_path
-graph_data = args.graph_file_txt
 main_stat_loc = args.main_stat_loc
 TELOMERE_INFO_FILE_PATH = args.telomere_bed_path
 PREPROCESSED_PAF_FILE_PATH = args.ppc_paf_file_path
@@ -523,13 +505,10 @@ PREPROCESSED_PAF_FILE_PATH = args.ppc_paf_file_path
 RATIO_OUTLIER_FOLDER = f"{PREFIX}/11_ref_ratio_outliers/"
 front_contig_path = RATIO_OUTLIER_FOLDER+"front_jump/"
 back_contig_path = RATIO_OUTLIER_FOLDER+"back_jump/"
+TELO_CONNECT_NODES_INFO_PATH = PREFIX+"/telomere_connected_list.txt"
 
 contig_data = import_data2(PREPROCESSED_PAF_FILE_PATH)
-
-graph_path = f"{PREFIX}/"
-graph_data = args.graph_file_txt
-graph_adjacency = import_graph_data(graph_data)
-telo_connected_node = extract_telomere_connect_contig(contig_data, graph_adjacency)
+telo_connected_node = extract_telomere_connect_contig(TELO_CONNECT_NODES_INFO_PATH)
 
 df = pd.read_csv(main_stat_loc, compression='gzip', comment='#', sep='\t', names=['chr', 'st', 'nd', 'length', 'covsite', 'totaldepth', 'cov', 'meandepth'])
 df = df.query('chr != "chrM"')

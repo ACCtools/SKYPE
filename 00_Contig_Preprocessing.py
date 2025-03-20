@@ -3,7 +3,7 @@ import pandas as pd
 import numpy as np
 import copy
 import itertools
-import re
+import os
 import logging
 
 logging.basicConfig(
@@ -121,7 +121,6 @@ def import_repeat_data(file_path : str) -> dict :
     fai_file.close()
     return repeat_data
 
-
 def import_censat_repeat_data(file_path : str) -> dict :
     fai_file = open(file_path, "r")
     repeat_data = defaultdict(list)
@@ -132,11 +131,6 @@ def import_censat_repeat_data(file_path : str) -> dict :
             repeat_data[temp_list[0]].append(ref_data)
     fai_file.close()
     return repeat_data
-
-
-def ctg_name_to_int(ctg_name):
-    return re.search(r'\d+$', ctg_name[:-1]).group()
-
 
 def distance_checker(node_a : tuple, node_b : tuple) -> int :
     if max(int(node_a[CHR_STR]), int(node_b[CHR_STR])) < min(int(node_a[CHR_END]), int(node_b[CHR_END])):
@@ -409,7 +403,7 @@ def subtelo_cut(contig_data : list, node_label : list, subnode_label : list) -> 
                 front_telo_bound+=1
         if not end_telcon:
             while end_telo_bound>=curr_contig_st and subnode_label[end_telo_bound][0] != '0':
-                if node_label[front_telo_bound][0] != '0':
+                if node_label[end_telo_bound][0] != '0':
                     end_block_contain_telo = True
                 end_telo_bound-=1
         for_cut = False
@@ -435,33 +429,33 @@ def subtelo_cut(contig_data : list, node_label : list, subnode_label : list) -> 
             tcnt+=1
             if for_cut:
                 temp_list = copy.deepcopy(contig_data[st])
-                temp_list[CTG_NAM] = 'ttg'+f"{tcnt:0{6}d}l"
+                temp_list[CTG_NAM] = f'subtelomere_cut_contig_{tcnt}'
                 temp_list[CTG_STRND] = idx
                 temp_list[CTG_ENDND] = idx + l
                 temp_list[CTG_TELCON] = front_dest
                 telo_preprocessed_contig.append(temp_list)
             else:
                 temp_list = copy.deepcopy(contig_data[st])
-                temp_list[CTG_NAM] = 'ttg'+f"{tcnt:0{6}d}l"
+                temp_list[CTG_NAM] = f'subtelomere_cut_contig_{tcnt}'
                 temp_list[CTG_STRND] = idx
                 temp_list[CTG_ENDND] = idx + l
                 telo_preprocessed_contig.append(temp_list)
             for i in range(st+1, ed):
                 temp_list = copy.deepcopy(contig_data[i])
-                temp_list[CTG_NAM] = 'ttg'+f"{tcnt:0{6}d}l"
+                temp_list[CTG_NAM] = f'subtelomere_cut_contig_{tcnt}'
                 temp_list[CTG_STRND] = idx
                 temp_list[CTG_ENDND] = idx + l
                 telo_preprocessed_contig.append(temp_list)
             if bak_cut:
                 temp_list = copy.deepcopy(contig_data[ed])
-                temp_list[CTG_NAM] = 'ttg'+f"{tcnt:0{6}d}l"
+                temp_list[CTG_NAM] = f'subtelomere_cut_contig_{tcnt}'
                 temp_list[CTG_STRND] = idx
                 temp_list[CTG_ENDND] = idx + l
                 temp_list[CTG_TELCON] = end_dest
                 telo_preprocessed_contig.append(temp_list)
             else:
                 temp_list = copy.deepcopy(contig_data[ed])
-                temp_list[CTG_NAM] = 'ttg'+f"{tcnt:0{6}d}l"
+                temp_list[CTG_NAM] = f'subtelomere_cut_contig_{tcnt}'
                 temp_list[CTG_STRND] = idx
                 temp_list[CTG_ENDND] = idx + l
                 telo_preprocessed_contig.append(temp_list)
@@ -550,7 +544,7 @@ def initial_graph_build(contig_data : list, telo_data : dict) -> list :
         if flag:
             continue
         telo_dist = mini_telo_dist
-        telo_connect_node = 0
+        telo_connect_node = INF
         telo_dir = 0
         temp_contig = (0, 0, 0, 0, 0, 0, 0, telo_data[now_telo][0], telo_data[now_telo][1])
         #우리가 연결하는 텔로미어 노드
@@ -573,12 +567,13 @@ def initial_graph_build(contig_data : list, telo_data : dict) -> list :
                     telo_connect_node = ed
                     telo_dist = telo_distance_checker(contig_data[ed], temp_contig)
                     telo_dir = '-'
-            if telo_dir == '+':
-                adjacency[DIR_FOR][i].append([DIR_FOR, telo_connect_node, telo_dist])
-                adjacency[DIR_BAK][telo_connect_node].append([DIR_FOR, i, telo_dist])
-            else:
-                adjacency[DIR_FOR][i].append([DIR_BAK, telo_connect_node, telo_dist])
-                adjacency[DIR_FOR][telo_connect_node].append([DIR_FOR, i, telo_dist])
+            if telo_connect_node != INF:
+                if telo_dir == '+':
+                    adjacency[DIR_FOR][i].append([DIR_FOR, telo_connect_node, telo_dist])
+                    adjacency[DIR_BAK][telo_connect_node].append([DIR_FOR, i, telo_dist])
+                else:
+                    adjacency[DIR_FOR][i].append([DIR_BAK, telo_connect_node, telo_dist])
+                    adjacency[DIR_FOR][telo_connect_node].append([DIR_FOR, i, telo_dist])
         else:
             for st, ed in end_node_list:
                 if contig_data[st][CHR_NAM] == now_telo[0:-1] \
@@ -597,14 +592,15 @@ def initial_graph_build(contig_data : list, telo_data : dict) -> list :
                     telo_connect_node = ed
                     telo_dist = telo_distance_checker(contig_data[ed], temp_contig)
                     telo_dir = '+'
-            if telo_dir == '+':
-                adjacency[DIR_FOR][i].append([DIR_BAK, telo_connect_node, telo_dist])
-                adjacency[DIR_FOR][telo_connect_node].append([DIR_FOR, i, telo_dist])
-                adjacency[DIR_BAK][telo_connect_node].append([DIR_FOR, i, telo_dist])
-            else:
-                adjacency[DIR_FOR][i].append([DIR_FOR, telo_connect_node, telo_dist])
-                adjacency[DIR_BAK][telo_connect_node].append([DIR_FOR, i, telo_dist])
-                adjacency[DIR_FOR][telo_connect_node].append([DIR_FOR, i, telo_dist])
+            if telo_connect_node != INF:
+                if telo_dir == '+':
+                    adjacency[DIR_FOR][i].append([DIR_BAK, telo_connect_node, telo_dist])
+                    adjacency[DIR_FOR][telo_connect_node].append([DIR_FOR, i, telo_dist])
+                    adjacency[DIR_BAK][telo_connect_node].append([DIR_FOR, i, telo_dist])
+                else:
+                    adjacency[DIR_FOR][i].append([DIR_FOR, telo_connect_node, telo_dist])
+                    adjacency[DIR_BAK][telo_connect_node].append([DIR_FOR, i, telo_dist])
+                    adjacency[DIR_FOR][telo_connect_node].append([DIR_FOR, i, telo_dist])
     return adjacency
 
 def edge_optimization(contig_data : list, contig_adjacency : list, telo_dict : dict) -> list :
@@ -631,9 +627,7 @@ def edge_optimization(contig_data : list, contig_adjacency : list, telo_dict : d
                 if edge[1] >= contig_data_size or i >= contig_data_size:
                     optimized_adjacency[_][i].append(edge)
                     continue
-                a = (ctg_name_to_int(contig_data[i][CTG_NAM]))
-                b = (ctg_name_to_int(contig_data[edge[1]][CTG_NAM]))
-                if int(a)>int(b):
+                if contig_data[i][CTG_STRND]>contig_data[edge[1]][CTG_STRND]:
                     contig_pair_nodes[(contig_data[edge[1]][CTG_NAM], contig_data[i][CTG_NAM])] \
                     .append([edge[1], i])
                 else:
@@ -655,12 +649,12 @@ def edge_optimization(contig_data : list, contig_adjacency : list, telo_dict : d
     for i in range(2):
         for j in range(contig_data_size):
             first_contig_name = contig_data[j][CTG_NAM]
-            fcn_int = int(ctg_name_to_int(first_contig_name))
+            fcn_int = contig_data[j][CTG_STRND]
             for edge in contig_adjacency[i][j]:
                 if edge[1] >= contig_data_size:
                     continue
                 second_contig_name = contig_data[edge[1]][CTG_NAM]
-                scn_int = int(ctg_name_to_int(second_contig_name))
+                scn_int = contig_data[edge[1]][CTG_STRND]
                 if fcn_int == scn_int:
                     optimized_adjacency[i][j].append(edge)
                 elif fcn_int < scn_int:
@@ -710,13 +704,15 @@ def edge_optimization(contig_data : list, contig_adjacency : list, telo_dict : d
         
     telo_connected_set = set()
     telo_connected_dict = dict()
+    telo_connected_graph_dict = defaultdict(list)
     for j in range(2):
         for i in range(contig_data_size, contig_data_size + 2*(CHROMOSOME_COUNT)):
             for k in optimized_adjacency[j][i]:
                 telo_connected_set.add(k[1])
                 telo_connected_dict[k[1]] = chr_rev_corr[i]
+                telo_connected_graph_dict[chr_rev_corr[i]].append(k)
 
-    return telo_connected_set, telo_connected_dict
+    return telo_connected_set, telo_connected_dict, telo_connected_graph_dict
 
 def calc_ratio(contig_data : list) -> dict:
     contig_data_size = len(contig_data)
@@ -884,8 +880,6 @@ def alt_preprocess_contig(contig_data : list, telo_label : list, ref_qry_ratio :
             if repeat_label[i-1][0]!='0':
                 is_front_back_repeat = True
             curr_contig_name = contig_data[i-1][CTG_NAM]
-            if curr_contig_name == 'atg021443l':
-                t=1
             curr_contig_end_fragment = contig_data[i-1]
             if curr_contig_first_fragment[CHR_NAM] != curr_contig_end_fragment[CHR_NAM]:
                 checker = 1
@@ -1094,6 +1088,7 @@ def find_breakend_centromere(repeat_censat_data : dict, chr_len : dict, df : pd.
     right_df = result_df[result_df['right_weighted_meandepth'] > result_df['left_weighted_meandepth']]
     left_df = result_df[result_df['left_weighted_meandepth'] > result_df['right_weighted_meandepth']]
     vtg_list = []
+    prefix = "virtual_censat_contig"
     cnt = 0
     for row1, row2 in itertools.combinations(right_df.itertuples(index = False), 2):
         cnt+=1
@@ -1101,11 +1096,11 @@ def find_breakend_centromere(repeat_censat_data : dict, chr_len : dict, df : pd.
         mid_row1_censat = int(row1.repeat_start_0 + row1.repeat_end_0)//2
         mid_row2_censat = int(row2.repeat_start_0 + row2.repeat_end_0)//2
 
-        temp_node1 = ['vtg'+f"{cnt:0{6}d}l", N, 0, N//2, '+', row1.chr, 
+        temp_node1 = [f'{prefix}_{cnt}', N, 0, N//2, '+', row1.chr, 
                      chr_len[row1.chr], mid_row1_censat - N//2, mid_row1_censat, 
                      60, 1, (cnt-1)*2, (cnt-1)*2+1, 0, 0, 0, 0, 0, 0, '+', row1.chr, f"2.{(cnt-1)*2}"]
         
-        temp_node2 = ['vtg'+f"{cnt:0{6}d}l", N, N//2, N, '+', row2.chr,
+        temp_node2 = [f'{prefix}_{cnt}', N, N//2, N, '+', row2.chr,
                      chr_len[row2.chr], mid_row2_censat, mid_row2_censat + N//2, 
                      60, 1, (cnt-1)*2, (cnt-1)*2+1, 0, 0, 0, 0, 0, 0, '+', row1.chr, f"2.{(cnt-1)*2+1}"]
         
@@ -1119,11 +1114,11 @@ def find_breakend_centromere(repeat_censat_data : dict, chr_len : dict, df : pd.
         mid_row1_censat = int(row1.repeat_start_0 + row1.repeat_end_0)//2
         mid_row2_censat = int(row2.repeat_start_0 + row2.repeat_end_0)//2
 
-        temp_node1 = ['vtg'+f"{cnt:0{6}d}l", N, 0, N//2, '+', row1.chr, 
+        temp_node1 = [f'{prefix}_{cnt}', N, 0, N//2, '+', row1.chr, 
                      chr_len[row1.chr], mid_row1_censat - N//2, mid_row1_censat, 
                      60, 1, (cnt-1)*2, (cnt-1)*2+1, 0, 0, 0, 0, 0, 0, '+', row1.chr, f"2.{(cnt-1)*2}"]
         
-        temp_node2 = ['vtg'+f"{cnt:0{6}d}l", N, N//2, N, '+', row2.chr,
+        temp_node2 = [f'{prefix}_{cnt}', N, N//2, N, '+', row2.chr,
                      chr_len[row2.chr], mid_row2_censat, mid_row2_censat + N//2, 
                      60, 1, (cnt-1)*2, (cnt-1)*2+1, 0, 0, 0, 0, 0, 0, '+', row1.chr, f"2.{(cnt-1)*2+1}"]
         
@@ -1137,11 +1132,11 @@ def find_breakend_centromere(repeat_censat_data : dict, chr_len : dict, df : pd.
             mid_row1_censat = int(row1.repeat_start_0 + row1.repeat_end_0)//2
             mid_row2_censat = int(row2.repeat_start_0 + row2.repeat_end_0)//2
 
-            temp_node1 = ['vtg'+f"{cnt:0{6}d}l", N, 0, N//2, '+', row1.chr, 
+            temp_node1 = [f'{prefix}_{cnt}', N, 0, N//2, '+', row1.chr, 
                      chr_len[row1.chr], mid_row1_censat - N//2, mid_row1_censat, 
                      60, 1, (cnt-1)*2, (cnt-1)*2+1, 0, 0, 0, 0, 0, 0, '+', row1.chr, f"2.{(cnt-1)*2}"]
         
-            temp_node2 = ['vtg'+f"{cnt:0{6}d}l", N, N//2, N, '+', row2.chr,
+            temp_node2 = [f'{prefix}_{cnt}', N, N//2, N, '+', row2.chr,
                      chr_len[row2.chr], mid_row2_censat, mid_row2_censat + N//2, 
                      60, 1, (cnt-1)*2, (cnt-1)*2+1, 0, 0, 0, 0, 0, 0, '-', row1.chr, f"2.{(cnt-1)*2+1}"]
             
@@ -1155,6 +1150,7 @@ def break_double_telomere_contig(contig_data : list, telo_connected_set : set):
     vtg_list = []
     idx = 0
     count = 0
+    tot_cur_ctg_cnt = 0
     contig_data_size = len(contig_data)
     while s<contig_data_size:
         e = contig_data[s][CTG_ENDND]
@@ -1171,17 +1167,21 @@ def break_double_telomere_contig(contig_data : list, telo_connected_set : set):
                 st+=1
             while ed >= s and contig_data[ed][CTG_TELDIR] == '0':
                 ed-=1
+            if s <= st:
+                tot_cur_ctg_cnt+=1
             for i in range(s, st+1):
                 temp_list = copy.deepcopy(contig_data[i])
-                temp_list[CTG_NAM] = 'f' + temp_list[CTG_NAM][1:]
+                temp_list[CTG_NAM] = f'telomere_middle_cut_contig_{tot_cur_ctg_cnt}'
                 temp_list[CTG_STRND] = idx
                 temp_list[CTG_ENDND] = idx + st - s
                 vtg_list.append(temp_list)
                 count+=1
             idx += st-s+1
+            if ed<=e:
+                tot_cur_ctg_cnt+=1
             for i in range(ed, e+1):
                 temp_list = copy.deepcopy(contig_data[i])
-                temp_list[CTG_NAM] = 'b' + temp_list[CTG_NAM][1:]
+                temp_list[CTG_NAM] = f'telomere_middle_cut_contig_{tot_cur_ctg_cnt}'
                 temp_list[CTG_STRND] = idx
                 temp_list[CTG_ENDND] = idx + e - ed
                 vtg_list.append(temp_list)
@@ -1320,6 +1320,8 @@ def main():
                         help="Path to the censat repeat information file.")
     parser.add_argument("main_stat_path", 
                         help="Path to the main stat file.")
+    parser.add_argument("prefix", 
+                    help="Pefix for pipeline")
     parser.add_argument("--alt", 
                         help="Path to an alternative PAF file (optional).")
     parser.add_argument("--progress", 
@@ -1329,6 +1331,10 @@ def main():
     args = parser.parse_args()
 
     original_node_count = 0
+
+    PREFIX = args.prefix
+
+    os.makedirs(PREFIX, exist_ok=True)
 
     # t = "python 00_Contig_Preprocessing.py 20_acc_pipe/U2OS_telo.p/U2OS_telo.p.aln.paf public_data/chm13v2.0_telomere.bed public_data/chm13v2.0.fa.fai public_data/chm13v2.0_repeat.m.bed public_data/chm13v2.0_censat_v2.1.m.bed /home/hyunwoo/51g_cancer_denovo/51_depth_data/U2OS_telo.win.stat.gz --alt 20_acc_pipe/U2OS_telo.a/U2OS_telo.a.aln.paf".split()
     # args = parser.parse_args(t[2:])
@@ -1579,7 +1585,7 @@ def main():
 
     adjacency = initial_graph_build(real_final_contig, telo_bound_dict)
 
-    telo_connected_node, telo_connected_dict = edge_optimization(real_final_contig, adjacency, telo_bound_dict)
+    telo_connected_node, telo_connected_dict, _ = edge_optimization(real_final_contig, adjacency, telo_bound_dict)
 
     # for i in range(total_len):
     #     if i in telo_connected_node:
@@ -1639,6 +1645,28 @@ def main():
     
     # for i in contig:
     #     print(i)
+
+    adjacency = initial_graph_build(real_final_contig, telo_bound_dict)
+
+    telo_connected_node, telo_connected_dict, telo_connected_graph_dict = edge_optimization(real_final_contig, adjacency, telo_bound_dict)
+
+    rev_telo_connected_dict = defaultdict(list)
+
+    for i in telo_connected_dict:
+        rev_telo_connected_dict[telo_connected_dict[i]].append(i)
+    
+    with open(f"{PREFIX}/telomere_connected_list_readable.txt", "wt") as f:
+        for i in rev_telo_connected_dict:
+            print(i, file=f)
+            for j in rev_telo_connected_dict[i]:
+                print(tuple(real_final_contig[j]), file=f)
+            print("", file=f)
+    
+    with open(f"{PREFIX}/telomere_connected_list.txt", "wt") as f:
+        for i in telo_connected_graph_dict:
+            for j in telo_connected_graph_dict[i]:
+                print(i, tuple(j), sep = "\t", file=f)
+
 
     with open(PREPROCESSED_PAF_FILE_PATH, "wt") as f:
         for i in real_final_contig:

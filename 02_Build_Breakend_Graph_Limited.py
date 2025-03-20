@@ -16,6 +16,7 @@ from multiprocessing import Pool
 from tqdm import tqdm
 from functools import partial
 import logging
+
 logging.basicConfig(
     format='%(asctime)s %(levelname)s:%(message)s',
     level=logging.INFO,
@@ -73,22 +74,6 @@ IGNORE_PATH_LIMIT = 50*K
 NON_REPEAT_NOISE_RATIO=0.1
 
 CENSAT_COMPRESSABLE_THRESHOLD = 1000*K
-
-def import_data(file_path : str) -> dict :
-    graph_file = open(file_path, "r")
-    graph_adjacency = {}
-    cnt = 0
-    for curr_edge in graph_file:
-        l, r = curr_edge.split(":")
-        r.lstrip()
-        r.rstrip(',')
-        r = ast.literal_eval('['+r+']')
-        if cnt==0:
-            cnt+=1
-        l = ast.literal_eval(l)
-        graph_adjacency[l] = r
-    graph_file.close()
-    return graph_adjacency
 
 def import_data2(file_path : str) -> list :
     paf_file = open(file_path, "r")
@@ -689,26 +674,15 @@ def make_virtual_ord_ctg(contig_data, fake_bnd):
         s = e+1
     return virtual_ctg
 
-def extract_telomere_connect_contig(contig_data : list, graph_adjacency : dict) -> dict:
-    chr_corr = {}
-    chr_rev_corr = {}
-    contig_data_size = len(contig_data)
-    for i in range(1, CHROMOSOME_COUNT):
-        chr_corr['chr'+str(i)+'f'] = contig_data_size + i - 1
-        chr_rev_corr[contig_data_size + i - 1] = 'chr'+str(i)+'f'
-    chr_corr['chrXf'] = contig_data_size + CHROMOSOME_COUNT - 1
-    chr_corr['chrYf'] = contig_data_size + CHROMOSOME_COUNT - 1
-    chr_rev_corr[contig_data_size + CHROMOSOME_COUNT - 1] = 'chrXf'
-    for i in range(1, CHROMOSOME_COUNT):
-        chr_corr['chr'+str(i)+'b'] = contig_data_size + CHROMOSOME_COUNT + i - 1
-        chr_rev_corr[contig_data_size + CHROMOSOME_COUNT + i - 1] = 'chr'+str(i)+'b'
-    chr_corr['chrXb'] = contig_data_size + 2*CHROMOSOME_COUNT - 1
-    chr_corr['chrYb'] = contig_data_size + 2*CHROMOSOME_COUNT - 1
-    chr_rev_corr[contig_data_size + 2*CHROMOSOME_COUNT - 1] = 'chrXb'
+def extract_telomere_connect_contig(telo_info_path : str) -> dict:
     telomere_connect_contig = defaultdict(list)
-    for i in range(contig_data_size, contig_data_size+2*CHROMOSOME_COUNT):
-        for j in graph_adjacency[(DIR_FOR, i)]:
-            telomere_connect_contig[chr_rev_corr[i]].append(j)
+    with open(telo_info_path) as f:
+        for curr_data in f:
+            curr_data = curr_data.rstrip()
+            temp_list = curr_data.split("\t")
+            chr_info = temp_list[0]
+            contig_id = ast.literal_eval(temp_list[1])
+            telomere_connect_contig[chr_info].append(contig_id)
     
     return telomere_connect_contig
     
@@ -905,8 +879,6 @@ parser.add_argument("reference_fai_path",
                         help="Path to the chromosome information file.")
 parser.add_argument("censat_bed_path", 
                     help="Path to the censat repeat information file.")
-parser.add_argument("graph_file_txt", 
-                    help="Path to the graph text file.")
 parser.add_argument("prefix", 
                     help="Pefix for pipeline")
 parser.add_argument("--orignal_paf_loc", nargs='+',
@@ -922,7 +894,6 @@ args = parser.parse_args()
 # t = t.split(" ")
 # args = parser.parse_args(t[2:])
 
-graph_data = args.graph_file_txt
 PREPROCESSED_PAF_FILE_PATH = args.ppc_paf_file_path
 CHROMOSOME_INFO_FILE_PATH = args.reference_fai_path
 ORIGNAL_PAF_LOC_LIST = args.orignal_paf_loc
@@ -931,6 +902,8 @@ CENSAT_PATH = args.censat_bed_path
 chr_len = find_chr_len(CHROMOSOME_INFO_FILE_PATH)
 contig_data = import_data2(PREPROCESSED_PAF_FILE_PATH)
 PREFIX = args.prefix
+
+TELO_CONNECT_NODES_INFO_PATH = PREFIX+"/telomere_connected_list.txt"
 
 os.makedirs(PREFIX, exist_ok=True)
 
@@ -951,10 +924,7 @@ chr_corr['chrXb'] = contig_data_size + 2*CHROMOSOME_COUNT - 1
 chr_corr['chrYb'] = contig_data_size + 2*CHROMOSOME_COUNT - 1
 chr_rev_corr[contig_data_size + 2*CHROMOSOME_COUNT - 1] = 'chrXb'
 
-graph_adjacency = import_data(graph_data)
-
-telo_contig = extract_telomere_connect_contig(contig_data, graph_adjacency)
-
+telo_contig = extract_telomere_connect_contig(TELO_CONNECT_NODES_INFO_PATH)
 
 telo_set = set()
 
@@ -1090,14 +1060,6 @@ with open(f"{PREFIX}/compressed_nclose_nodes_list.txt", "wt") as f:
 
 nclose_node_count = 0
 telo_node_count = 0
-
-with open(f"{PREFIX}/telomere_connected_list.txt", "wt") as f:
-    for i in telo_contig:
-        print(i, file=f)
-        for j in telo_contig[i]:
-            telo_node_count += 1
-            print(contig_data[j[1]], file=f)
-        print("", file=f)
 
 
 bnd_graph_adjacency = initialize_bnd_graph(contig_data, nclose_nodes, telo_contig)

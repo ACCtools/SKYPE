@@ -59,22 +59,6 @@ DEPTH_THREAD=1
 NCLOSE_COMPRESS_LIMIT = 50*K
 VIRTUAL_CONTIG_PREFIX = "virtual_contig"
 
-def import_data(file_path : str) -> dict :
-    graph_file = open(file_path, "r")
-    graph_adjacency = {}
-    cnt = 0
-    for curr_edge in graph_file:
-        l, r = curr_edge.split(":")
-        r.lstrip()
-        r.rstrip(',')
-        r = ast.literal_eval('['+r+']')
-        if cnt==0:
-            cnt+=1
-        l = ast.literal_eval(l)
-        graph_adjacency[l] = r
-    graph_file.close()
-    return graph_adjacency
-
 def import_data2(file_path : str) -> list :
     paf_file = open(file_path, "r")
     contig_data = []

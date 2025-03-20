@@ -1,4 +1,3 @@
-import re
 import sys
 import argparse
 import os
@@ -50,22 +49,6 @@ CHROMOSOME_COUNT = 23
 K = 1000
 
 NCLOSE_COMPRESS_LIMIT = 50*K
-
-def import_data(file_path : str) -> dict :
-    graph_file = open(file_path, "r")
-    graph_adjacency = {}
-    cnt = 0
-    for curr_edge in graph_file:
-        l, r = curr_edge.split(":")
-        r.lstrip()
-        r.rstrip(',')
-        r = ast.literal_eval('['+r+']')
-        if cnt==0:
-            cnt+=1
-        l = ast.literal_eval(l)
-        graph_adjacency[l] = r
-    graph_file.close()
-    return graph_adjacency
 
 def import_data2(file_path : str) -> list :
     paf_file = open(file_path, "r")
@@ -129,12 +112,15 @@ def chr_correlation_maker(contig_data):
     chr_rev_corr[contig_data_size + 2*CHROMOSOME_COUNT - 1] = 'chrXb'
     return chr_corr, chr_rev_corr
     
-def extract_telomere_connect_contig(contig_data : list, graph_adjacency : dict) -> list:
-    contig_data_size = len(contig_data)
+def extract_telomere_connect_contig(telo_info_path : str) -> list:
     telomere_connect_contig = []
-    for i in range(contig_data_size, contig_data_size+2*CHROMOSOME_COUNT):
-        for j in graph_adjacency[(DIR_FOR, i)]:
-            telomere_connect_contig.append(j[1])
+    with open(telo_info_path) as f:
+        for curr_data in f:
+            curr_data = curr_data.rstrip()
+            temp_list = curr_data.split("\t")
+            chr_info = temp_list[0]
+            contig_id = ast.literal_eval(temp_list[1])
+            telomere_connect_contig.append(contig_id[1])
     
     return telomere_connect_contig
 
@@ -202,8 +188,7 @@ def find_using_node(contig_data, node_label):
             using_node.append(i)
     return using_node
 
-
-def graph_build(contig_data : list, contig_adjacency : list, linkability_label : list) -> list :
+def graph_build(contig_adjacency : list, linkability_label : list) -> list :
     contig_data_size = len(contig_data)
     gap_contig_adjacency = [[[[], []] for __ in range(contig_data_size)] for _ in range(2)]
     for i in range(contig_data_size):
@@ -384,9 +369,6 @@ def graph_build(contig_data : list, contig_adjacency : list, linkability_label :
                     contig_adjacency[i][j].append(gap_contig_adjacency[i][j][k])
     return contig_adjacency
 
-def ctg_name_to_int(ctg_name):
-    return re.search(r'\d+$', ctg_name[:-1]).group()
-
 def edge_optimization(contig_data : list, contig_adjacency : list) -> list :
     contig_pair_nodes = defaultdict(list)
     contig_data_size = len(contig_data)
@@ -394,9 +376,7 @@ def edge_optimization(contig_data : list, contig_adjacency : list) -> list :
     for _ in range(2):
         for i in range(contig_data_size):
             for edge in contig_adjacency[_][i]:
-                a = (ctg_name_to_int(contig_data[i][CTG_NAM]))
-                b = (ctg_name_to_int(contig_data[edge[1]][CTG_NAM]))
-                if int(a)>int(b):
+                if contig_data[i][CTG_STRND]>contig_data[edge[1]][CTG_STRND]:
                     contig_pair_nodes[(contig_data[edge[1]][CTG_NAM], contig_data[i][CTG_NAM])] \
                     .append([edge[1], i])
                 else:
@@ -417,10 +397,10 @@ def edge_optimization(contig_data : list, contig_adjacency : list) -> list :
     for i in range(2):
         for j in range(contig_data_size):
             first_contig_name = contig_data[j][CTG_NAM]
-            fcn_int = int(ctg_name_to_int(first_contig_name))
+            fcn_int = contig_data[j][CTG_STRND]
             for edge in contig_adjacency[i][j]:
                 second_contig_name = contig_data[edge[1]][CTG_NAM]
-                scn_int = int(ctg_name_to_int(second_contig_name))
+                scn_int = contig_data[edge[1]][CTG_STRND]
                 if fcn_int == scn_int:
                     optimized_adjacency[i][j].append(edge)
                 elif fcn_int < scn_int:
@@ -512,8 +492,8 @@ def connect_path(folder_path, index_file_path):
             print(contig_data[s], file=g)
             print(tuple(bnd_index_path[i-1][0:2]), file=h)
             if contig_data[s][CTG_NAM] != contig_data[e][CTG_NAM]:
-                if nx.has_path(G_obj, source=(DIR_OUT, s), target=(DIR_IN, e)):
-                    path = nx.shortest_path(G_obj, source=(DIR_OUT, s), target=(DIR_IN, e), weight='weight')
+                if nx.has_path(G, source=(DIR_OUT, s), target=(DIR_IN, e)):
+                    path = nx.shortest_path(G, source=(DIR_OUT, s), target=(DIR_IN, e), weight='weight')
                     for node in path[1:-1]:
                         assert(contig_data[node[1]][CTG_TYP] == 3)
                         print(contig_data[node[1]], file=g)
@@ -532,116 +512,102 @@ def connect_path(folder_path, index_file_path):
         print(tuple((DIR_IN, last_path_idx)), file=h)
         print(end_telo, file=g)
                     
-def pool_init(contig_data_, G, prefix_):
-    global G_obj, contig_data, prefix
 
-    G_obj = G
-    contig_data = contig_data_
-    prefix = prefix_
+parser = argparse.ArgumentParser(description="Find breakend contigs with contig data and map data")
 
-def main():
-    parser = argparse.ArgumentParser(description="Find breakend contigs with contig data and map data")
-    
-    # 위치 인자 정의
-    parser.add_argument("ppc_paf_file_path", 
-                        help="Path to the preprocessed PAF file.")
-    
-    parser.add_argument("graph_file_txt", 
-                    help="Path to the graph text file.")
+# 위치 인자 정의
+parser.add_argument("ppc_paf_file_path", 
+                    help="Path to the preprocessed PAF file.")
 
-    parser.add_argument("prefix", 
-                    help="Pefix for pipeline")
-    
-    parser.add_argument("-t", "--thread", 
-                        help="Number of thread", type=int)
-    
-    parser.add_argument("--progress", 
-                        help="Show progress bar", action='store_true')
-    
-    args = parser.parse_args()
+parser.add_argument("prefix", 
+                help="Pefix for pipeline")
 
-    graph_data = args.graph_file_txt
+parser.add_argument("-t", "--thread", 
+                    help="Number of thread", type=int)
 
-    PREPROCESSED_PAF_FILE_PATH = args.ppc_paf_file_path
+parser.add_argument("--progress", 
+                    help="Show progress bar", action='store_true')
 
-    BREAKEND_GRAPH_PATH_FILE_PREFIX = args.prefix
+args = parser.parse_args()
 
-    NCLOSE_FILE_PATH = f"{args.prefix}/nclose_nodes_index.txt"
+PREPROCESSED_PAF_FILE_PATH = args.ppc_paf_file_path
 
-    VIRTUAL_TYPE_3_PATH = f"{args.prefix}/virtual_ordinary_contig.txt"
+BREAKEND_GRAPH_PATH_FILE_PREFIX = args.prefix
+prefix = args.prefix
 
-    THREAD = args.thread
-    
-    contig_data = import_data2(PREPROCESSED_PAF_FILE_PATH)
-    virtual_type_3_data = import_data2(VIRTUAL_TYPE_3_PATH)
-    #contig_data += virtual_type_3_data
-    contig_data_size = len(contig_data)
-    
-    init_graph_adjacency = initial_graph_build(contig_data)
-    link_label = node_label(contig_data)
-    ord_graph_adjacency = graph_build(contig_data, init_graph_adjacency, link_label)
+TELO_CONNECT_NODES_INFO_PATH = prefix+"/telomere_connected_list.txt"
 
-    using_node = find_using_node(contig_data, link_label)
+NCLOSE_FILE_PATH = f"{args.prefix}/nclose_nodes_index.txt"
 
-    with open(f"{BREAKEND_GRAPH_PATH_FILE_PREFIX}/non_opt_bnd_connect_graph.txt", "wt") as f:
-        for dir in range(2):
-            for node in range(contig_data_size):
-                print((dir, node), ":", ord_graph_adjacency[dir][node], file=f)
-    opt_ord_graph_adjacency = edge_optimization(contig_data, ord_graph_adjacency)
-    type_3_graph = defaultdict(list)
-    with open(f"{BREAKEND_GRAPH_PATH_FILE_PREFIX}/opt_bnd_connect_graph.txt", "wt") as f:
-        for dir in range(2):
-            for node in range(contig_data_size):
-                print((dir, node), ":", opt_ord_graph_adjacency[dir][node], file=f)
-                for edge in opt_ord_graph_adjacency[dir][node]:
-                    type_3_graph[(dir, node)].append(edge)
+VIRTUAL_TYPE_3_PATH = f"{args.prefix}/virtual_ordinary_contig.txt"
 
-    graph_adjacency = import_data(graph_data)
+THREAD = args.thread
 
-    bnd_contig = extract_bnd_contig(contig_data)
+contig_data = import_data2(PREPROCESSED_PAF_FILE_PATH)
+virtual_type_3_data = import_data2(VIRTUAL_TYPE_3_PATH)
+#contig_data += virtual_type_3_data
+contig_data_size = len(contig_data)
 
-    telo_contig = extract_telomere_connect_contig(contig_data, graph_adjacency)
+init_graph_adjacency = initial_graph_build(contig_data)
+link_label = node_label(contig_data)
+ord_graph_adjacency = graph_build(init_graph_adjacency, link_label)
 
-    nclose_nodes = extract_nclose_node(NCLOSE_FILE_PATH)
+using_node = find_using_node(contig_data, link_label)
 
-    bnd_connected_graph = connect_nclose_telo(contig_data, using_node, type_3_graph, nclose_nodes, telo_contig)
-    node_cnt = 0
-    edge_cnt = 0
-    with open(f"{BREAKEND_GRAPH_PATH_FILE_PREFIX}/full_bnd_connect_graph.txt", "wt") as f:
-        for _ in bnd_connected_graph:
-            node_cnt += 1
-            print(_, ":", end=" ", file=f)
-            for __ in bnd_connected_graph[_]:
-                edge_cnt +=1
-                print(__, end=" ", file=f)
-            print("", file=f)
-    #print(f"Node : {node_cnt}, Edge: {edge_cnt}")
+with open(f"{BREAKEND_GRAPH_PATH_FILE_PREFIX}/non_opt_bnd_connect_graph.txt", "wt") as f:
+    for dir in range(2):
+        for node in range(contig_data_size):
+            print((dir, node), ":", ord_graph_adjacency[dir][node], file=f)
+opt_ord_graph_adjacency = edge_optimization(contig_data, ord_graph_adjacency)
+type_3_graph = defaultdict(list)
+with open(f"{BREAKEND_GRAPH_PATH_FILE_PREFIX}/opt_bnd_connect_graph.txt", "wt") as f:
+    for dir in range(2):
+        for node in range(contig_data_size):
+            print((dir, node), ":", opt_ord_graph_adjacency[dir][node], file=f)
+            for edge in opt_ord_graph_adjacency[dir][node]:
+                type_3_graph[(dir, node)].append(edge)
 
-    G = nx.DiGraph()
-    
-    for node in telo_contig + nclose_nodes:
-        G.add_node((DIR_IN, node))
-        G.add_node((DIR_OUT, node))
+bnd_contig = extract_bnd_contig(contig_data)
 
-    for node in bnd_connected_graph:
-        G.add_node(node)
-        for edge in bnd_connected_graph[node]:
-            G.add_node(tuple(edge[:-1]))
+telo_contig = extract_telomere_connect_contig(TELO_CONNECT_NODES_INFO_PATH)
 
-    for node in bnd_connected_graph:
-        for edge in bnd_connected_graph[node]:
-            G.add_weighted_edges_from([(node, tuple(edge[:-1]), edge[-1])])
+nclose_nodes = extract_nclose_node(NCLOSE_FILE_PATH)
 
-    chr_chr_folder_path = glob.glob(BREAKEND_GRAPH_PATH_FILE_PREFIX+"/00_raw/*")
+bnd_connected_graph = connect_nclose_telo(contig_data, using_node, type_3_graph, nclose_nodes, telo_contig)
+node_cnt = 0
+edge_cnt = 0
+with open(f"{BREAKEND_GRAPH_PATH_FILE_PREFIX}/full_bnd_connect_graph.txt", "wt") as f:
+    for _ in bnd_connected_graph:
+        node_cnt += 1
+        print(_, ":", end=" ", file=f)
+        for __ in bnd_connected_graph[_]:
+            edge_cnt +=1
+            print(__, end=" ", file=f)
+        print("", file=f)
+#print(f"Node : {node_cnt}, Edge: {edge_cnt}")
 
-    with ProcessPoolExecutor(max_workers=THREAD, initializer=pool_init, initargs=(contig_data, G, args.prefix)) as executor:
-        futures = []
-        for folder_path in chr_chr_folder_path:
-            futures.append(executor.submit(connect_path_folder, folder_path))
-    
-        # 제출된 작업들이 완료될 때까지 진행 상황을 tqdm으로 표시합니다.
-        for future in tqdm(as_completed(futures), total=len(futures), desc='Fill breakend graph', disable=not sys.stdout.isatty() and not args.progress):
-            future.result()
+G = nx.DiGraph()
 
-if __name__ == "__main__":
-    main()
+for node in telo_contig + nclose_nodes:
+    G.add_node((DIR_IN, node))
+    G.add_node((DIR_OUT, node))
+
+for node in bnd_connected_graph:
+    G.add_node(node)
+    for edge in bnd_connected_graph[node]:
+        G.add_node(tuple(edge[:-1]))
+
+for node in bnd_connected_graph:
+    for edge in bnd_connected_graph[node]:
+        G.add_weighted_edges_from([(node, tuple(edge[:-1]), edge[-1])])
+
+chr_chr_folder_path = glob.glob(BREAKEND_GRAPH_PATH_FILE_PREFIX+"/00_raw/*")
+
+with ProcessPoolExecutor(max_workers=THREAD) as executor:
+    futures = []
+    for folder_path in chr_chr_folder_path:
+        futures.append(executor.submit(connect_path_folder, folder_path))
+
+    # 제출된 작업들이 완료될 때까지 진행 상황을 tqdm으로 표시합니다.
+    for future in tqdm(as_completed(futures), total=len(futures), desc='Fill breakend graph', disable=not sys.stdout.isatty() and not args.progress):
+        future.result()
