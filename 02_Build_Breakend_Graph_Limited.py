@@ -60,7 +60,7 @@ BND_CONTIG_BOUND = 0.1
 TOT_PATH_LIMIT = 500*K
 PAT_PATH_LIMIT = 5*K
 
-CHR_CHANGE_LIMIT_PREFIX = 7
+CHR_CHANGE_LIMIT_PREFIX = 4
 DIR_CHANGE_LIMIT = 1
 CENSAT_VISIT_LIMIT = 2
 
@@ -926,10 +926,12 @@ chr_rev_corr[contig_data_size + 2*CHROMOSOME_COUNT - 1] = 'chrXb'
 
 telo_contig = extract_telomere_connect_contig(TELO_CONNECT_NODES_INFO_PATH)
 
+telo_node_count = 0
 telo_set = set()
 
 for i in telo_contig:
     for j in telo_contig[i]:
+        telo_node_count+=1
         telo_set.add(j[1])
 
 rpt_con = extract_all_repeat_contig(contig_data, CTG_RPTCASE, NON_REPEAT_NOISE_RATIO)
@@ -1059,7 +1061,6 @@ with open(f"{PREFIX}/compressed_nclose_nodes_list.txt", "wt") as f:
 
 
 nclose_node_count = 0
-telo_node_count = 0
 
 
 bnd_graph_adjacency = initialize_bnd_graph(contig_data, nclose_nodes, telo_contig)

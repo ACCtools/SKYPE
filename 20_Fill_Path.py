@@ -503,13 +503,10 @@ cnt=0
 PATH_FILE_FOLDER = f"{args.prefix}/10_fill/"
 TYPE_4_PATH_FILE_FOLDER = f"{args.prefix}/11_ref_ratio_outliers/"
 
-# fpath = "13_breakend_connect_graph/HuH-28.bnd_path.00:05:20/chr18f_chr18b"
-# ifpath = "13_breakend_connect_graph/HuH-28.bnd_path.00:05:20/chr18f_chr18b/1.index.txt"
-
-# fill_path((fpath, ifpath, 1, contig_data, paf_file))
-
-# exit(1)
-
+def fill_path_folder(folder_path):
+    index_file_paths = glob.glob(folder_path + "/*index*")
+    for index_file_path in index_file_paths:
+            fill_path(index_file_path)
 
 def fill_path(index_file_path):
     temp_file = index_file_path.split("/")[:-1]
@@ -635,10 +632,7 @@ with ProcessPoolExecutor(max_workers=THREAD) as executor:
     # print(chr_chr_folder_path)
     # chr_chr_folder_path = ["30_skype_pipe/Caki-1_03_52_36/10_fill/chr17f_chr17b"]
     for folder_path in chr_chr_folder_path:
-        index_file_paths = glob.glob(folder_path + "/*index*")
-        for index_file_path in index_file_paths:
-            futures.append(executor.submit(fill_path, index_file_path))
-        
+        futures.append(executor.submit(fill_path_folder, folder_path))
 
     # 제출된 작업들이 완료될 때까지 진행 상황을 tqdm으로 표시합니다.
     for future in tqdm(as_completed(futures), total=len(futures), desc='Fill gap and modify path data', disable=not sys.stdout.isatty() and not args.progress):
