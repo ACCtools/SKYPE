@@ -9,7 +9,7 @@ import logging
 logging.basicConfig(
     format='%(asctime)s %(levelname)s:%(message)s',
     level=logging.INFO,
-    datefmt='%m/%d/%Y %I:%M:%S %p',
+    datefmt='%m/%d/%Y %I:%M:%S %p'
 )
 logging.info("00_Contig_Preprocessing start")
 
@@ -87,6 +87,7 @@ def find_chr_len(file_path : str) -> dict:
     for curr_data in chr_data_file:
         curr_data = curr_data.split("\t")
         chr_len[curr_data[0]] = int(curr_data[1])
+    chr_data_file.close()
     return chr_len
 
 def import_telo_data(file_path : str, chr_len : dict) -> dict :
@@ -108,6 +109,7 @@ def import_telo_data(file_path : str, chr_len : dict) -> dict :
                 temp_list.append('f')
                 temp_list[2]+=TELOMERE_EXPANSION
         telo_data.append(tuple(temp_list))
+    fai_file.close()
     return telo_data[1:]
 
 def import_repeat_data(file_path : str) -> dict :
@@ -116,6 +118,7 @@ def import_repeat_data(file_path : str) -> dict :
     for curr_data in fai_file:
         temp_list = curr_data.split("\t")
         repeat_data[temp_list[0]].append((int(temp_list[1]), int(temp_list[2])))
+    fai_file.close()
     return repeat_data
 
 
@@ -127,6 +130,7 @@ def import_censat_repeat_data(file_path : str) -> dict :
         ref_data = (int(temp_list[1]), int(temp_list[2]))
         if abs(ref_data[1] - ref_data[0]) > CENSAT_COMPRESSABLE_THRESHOLD:
             repeat_data[temp_list[0]].append(ref_data)
+    fai_file.close()
     return repeat_data
 
 
@@ -1320,6 +1324,8 @@ def main():
                         help="Path to the main stat file.")
     parser.add_argument("--alt", 
                         help="Path to an alternative PAF file (optional).")
+    parser.add_argument("--progress", 
+                        help="Show progress bar", action='store_true')
 
     # 인자 파싱
     args = parser.parse_args()

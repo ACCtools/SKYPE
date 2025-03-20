@@ -65,7 +65,7 @@ CENSAT_VISIT_LIMIT = 2
 
 BND_OVERUSE_CNT = 2
 PATH_MAJOR_COMPONENT = 3
-NCLOSE_COMPRESS_LIMIT = 50*K
+NCLOSE_COMPRESS_LIMIT = 100*K
 NCLOSE_MERGE_LIMIT = 1*K
 ALL_REPEAT_NCLOSE_COMPRESS_LIMIT = 500*K
 PATH_COMPRESS_LIMIT = 50*K
@@ -87,7 +87,7 @@ def import_data(file_path : str) -> dict :
             cnt+=1
         l = ast.literal_eval(l)
         graph_adjacency[l] = r
-
+    graph_file.close()
     return graph_adjacency
 
 def import_data2(file_path : str) -> list :
@@ -102,6 +102,7 @@ def import_data2(file_path : str) -> list :
         for i in int_induce_idx:
             temp_list[i] = int(temp_list[i])
         contig_data.append(tuple(temp_list))
+    paf_file.close()
     return contig_data
 
 def div_orignial_paf(file_path : str) -> list:
@@ -114,7 +115,6 @@ def div_orignial_paf(file_path : str) -> list:
                 not_using_contig.add(a[0])
             if int(a[11]) < 60:
                 not_using_contig.add(a[0])
-            
     return not_using_contig
 
 def import_repeat_data(file_path : str) -> dict :
@@ -125,6 +125,7 @@ def import_repeat_data(file_path : str) -> dict :
         ref_data = (int(temp_list[1]), int(temp_list[2]))
         if abs(ref_data[1] - ref_data[0]) > CENSAT_COMPRESSABLE_THRESHOLD:
             repeat_data[temp_list[0]].append(ref_data)
+    fai_file.close()
     return repeat_data
 
 def find_chr_len(file_path : str) -> dict:
@@ -133,6 +134,7 @@ def find_chr_len(file_path : str) -> dict:
     for curr_data in chr_data_file:
         curr_data = curr_data.split("\t")
         chr_len[curr_data[0]] = int(curr_data[1])
+    chr_data_file.close()
     return chr_len
 
 def extract(contig : list) -> list:
@@ -345,7 +347,8 @@ def extract_nclose_node(contig_data : list, bnd_contig : set, repeat_contig_name
                         st_idx = i-maxcombo+1
                         ed_idx = i
                 nclose_list = []
-                if max_chr not in ((contig_data[s][CTG_DIR], contig_data[s][CHR_NAM]), (contig_data[e][CTG_DIR], contig_data[e][CHR_NAM])):
+                if max_chr not in ((contig_data[s][CTG_DIR], contig_data[s][CHR_NAM]), (contig_data[e][CTG_DIR], contig_data[e][CHR_NAM])) \
+                    and st_idx != ed_idx:
                     st_chr = (contig_data[st][CTG_DIR], contig_data[st][CHR_NAM])
                     ed_chr = (contig_data[st_idx][CTG_DIR], contig_data[st_idx][CHR_NAM])
                     nclose_list.append([st, st_chr, st_idx, ed_chr])
@@ -910,6 +913,8 @@ parser.add_argument("--orignal_paf_loc", nargs='+',
                     help="Orignal paf location to detect location (primary, alternative paf location)")
 parser.add_argument("-t", "--thread", 
                     help="Number of thread", type=int)
+parser.add_argument("--progress", 
+                    help="Show progress bar", action='store_true')
 
 args = parser.parse_args()
 
@@ -1508,7 +1513,7 @@ while tot_cnt >= TOT_PATH_LIMIT and CHR_CHANGE_LIMIT_PREFIX > 0:
         for rs in tqdm(result_iterator,
                         total=len(tar_ind_list),
                         desc=f'Build breakend construct graph <{CHR_CHANGE_LIMIT_PREFIX}>',
-                        disable=not sys.stdout.isatty()):
+                        disable=not sys.stdout.isatty() and not args.progress):
             
             cnt_list.append(rs)
             tot_cnt += rs[1]

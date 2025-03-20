@@ -1,11 +1,9 @@
 import re
 import sys
 import argparse
-import pandas as pd
 import os
 from collections import defaultdict
 import ast
-import matplotlib.pyplot as plt
 import glob
 import networkx as nx
 
@@ -66,7 +64,7 @@ def import_data(file_path : str) -> dict :
             cnt+=1
         l = ast.literal_eval(l)
         graph_adjacency[l] = r
-
+    graph_file.close()
     return graph_adjacency
 
 def import_data2(file_path : str) -> list :
@@ -80,6 +78,7 @@ def import_data2(file_path : str) -> list :
         for i in int_induce_idx:
             temp_list[i] = int(temp_list[i])
         contig_data.append(tuple(temp_list))
+    paf_file.close()
     return contig_data
 
 def import_index_path(file_path : str) -> list:
@@ -92,6 +91,7 @@ def import_index_path(file_path : str) -> list:
         elif curr_index[0] != '[':
             temp_list = curr_index.split("\t")
             index_data.append(tuple((int(temp_list[0]), int(temp_list[1]))))
+    index_file.close()
     return index_data
 
 def distance_checker(node_a : tuple, node_b : tuple) -> int :
@@ -520,11 +520,11 @@ def connect_path(folder_path, index_file_path):
                         print(tuple(node[0:2]), file=h)
             else:
                 if s<e:
-                    for i in range(s+1, e-1):
+                    for i in range(s+1, e):
                         print(contig_data[i], file=g)
                         print(tuple((DIR_FOR, i)), file=h)
                 else:
-                    for i in range(e-1, s, -1):
+                    for i in range(s-1, e, -1):
                         print(contig_data[i], file=g)
                         print(tuple((DIR_BAK, i)), file=h)
         last_path_idx = bnd_index_path[-1][1]
@@ -553,7 +553,10 @@ def main():
                     help="Pefix for pipeline")
     
     parser.add_argument("-t", "--thread", 
-                    help="Number of thread", type=int)
+                        help="Number of thread", type=int)
+    
+    parser.add_argument("--progress", 
+                        help="Show progress bar", action='store_true')
     
     args = parser.parse_args()
 
@@ -635,7 +638,7 @@ def main():
             futures.append(executor.submit(connect_path_folder, folder_path))
     
         # 제출된 작업들이 완료될 때까지 진행 상황을 tqdm으로 표시합니다.
-        for future in tqdm(as_completed(futures), total=len(futures), desc='Fill breakend graph', disable=not sys.stdout.isatty()):
+        for future in tqdm(as_completed(futures), total=len(futures), desc='Fill breakend graph', disable=not sys.stdout.isatty() and not args.progress):
             pass
 
 if __name__ == "__main__":

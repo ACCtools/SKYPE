@@ -62,6 +62,7 @@ def import_data(file_path : str) -> list :
         for i in int_induce_idx:
             temp_list[i] = int(temp_list[i])
         contig_data.append(tuple(temp_list))
+    paf_file.close()
     return contig_data
 
 def find_chr_len(file_path : str) -> dict:
@@ -70,6 +71,7 @@ def find_chr_len(file_path : str) -> dict:
     for curr_data in chr_data_file:
         curr_data = curr_data.split("\t")
         chr_len[curr_data[0]] = int(curr_data[1])
+    chr_data_file.close()
     return chr_len
 
 

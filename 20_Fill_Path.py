@@ -76,6 +76,7 @@ def import_data2(file_path : str) -> list :
         for i in int_induce_idx:
             temp_list[i] = int(temp_list[i])
         contig_data.append(tuple(temp_list))
+    paf_file.close()
     return contig_data
 
 def import_index_path(file_path : str) -> list:
@@ -231,6 +232,12 @@ def trim_cs_right_extended(cs, keep_ref):
             new_ops.append( ("+", val) )
             query_consumed += len(val)
     return construct_cs(new_ops), query_consumed
+
+def inclusive_checker_pair(contig_node : tuple, telomere_node : tuple) -> bool :
+    if int(telomere_node[0]) <= int(contig_node[0]) and int(contig_node[1]) <= int(telomere_node[1]):
+        return True
+    else:
+        return False
 
 def trim_cs_left_extended(cs, trim_ref):
     """
@@ -468,6 +475,12 @@ parser.add_argument("--alt",
 parser.add_argument("-t", "--thread", 
                     help="Number of thread", type=int)
 
+parser.add_argument("--progress", 
+                    help="Show progress bar", action='store_true')
+
+# t = "20_Fill_Path.py 20_acc_pipe/U2OS_telo.p/U2OS_telo.p.aln.paf 20_acc_pipe/U2OS_telo.p/U2OS_telo.p.aln.paf.ppc.paf 30_skype_pipe/U2OS_telo_14_25_58 --alt 20_acc_pipe/U2OS_telo.a/U2OS_telo.a.aln.paf -t 25"
+# args = parser.parse_args(t.split()[1:])
+
 args = parser.parse_args()
 
 PAF_FILE_PATH = []
@@ -517,17 +530,26 @@ def fill_path(index_file_path):
             or (curr_contig[CHR_NAM] == next_contig[CHR_NAM] and (full_connected_path[i-1][0] in (2, 3) or full_connected_path[i][0] in (2, 3))):
                 dist = distance_checker(curr_contig, next_contig)
                 if dist > 0:
-                    vcnt += 1
                     if curr_contig[CHR_END] < next_contig[CHR_STR]:
-                        new_contig = form_virtual_contig(curr_contig[CHR_LEN], curr_contig[CHR_END], next_contig[CHR_STR], curr_contig[CHR_NAM], vcnt)
-                        new_next_contig = form_normal_contig(next_contig, paf_file)
-                        path_contig.append(new_contig)
-                        path_contig.append(new_next_contig)
+                        if curr_contig[CTG_NAM] != next_contig[CTG_NAM]:
+                            vcnt += 1
+                            new_contig = form_virtual_contig(curr_contig[CHR_LEN], curr_contig[CHR_END], next_contig[CHR_STR], curr_contig[CHR_NAM], vcnt)
+                            new_next_contig = form_normal_contig(next_contig, paf_file)
+                            path_contig.append(new_contig)
+                            path_contig.append(new_next_contig)
+                        else:
+                            new_next_contig = form_normal_contig(next_contig, paf_file)
+                            path_contig.append(new_next_contig)
                     else:
-                        new_contig = form_virtual_contig(curr_contig[CHR_LEN], next_contig[CHR_END], curr_contig[CHR_STR], curr_contig[CHR_NAM], vcnt)
-                        new_next_contig = form_normal_contig(next_contig, paf_file)
-                        path_contig.append(new_contig)
-                        path_contig.append(new_next_contig)
+                        if curr_contig[CTG_NAM] != next_contig[CTG_NAM]:
+                            vcnt += 1
+                            new_contig = form_virtual_contig(curr_contig[CHR_LEN], next_contig[CHR_END], curr_contig[CHR_STR], curr_contig[CHR_NAM], vcnt)
+                            new_next_contig = form_normal_contig(next_contig, paf_file)
+                            path_contig.append(new_contig)
+                            path_contig.append(new_next_contig)
+                        else:
+                            new_next_contig = form_normal_contig(next_contig, paf_file)
+                            path_contig.append(new_next_contig)
                 elif curr_contig[CHR_END] == next_contig[CHR_STR] or curr_contig[CHR_STR] == next_contig[CHR_END]:
                     new_next_contig = form_normal_contig(next_contig, paf_file)
                     path_contig.append(new_next_contig)
@@ -551,18 +573,47 @@ def fill_path(index_file_path):
                                         next_contig_rc[CTG_STR], next_contig_rc[CTG_END],
                                         next_contig_origin[9], next_contig_origin[10],
                                         next_contig_origin[13][5:]]
+                    # try:
+                    #     assert(not (inclusive_checker_pair(tuple(curr_contig_data[0:2]), tuple(next_contig_data[0:2])) \
+                    #            or inclusive_checker_pair(tuple(next_contig_data[0:2]), tuple(curr_contig_data[0:2]))))
+                    # except:
+                    #     print(tuple(curr_contig_data[0:2]), tuple(next_contig_data[0:2]))
+                    #     print(index_file_path)
+                    if full_connected_path[i-1][0] in (2, 3):
+                        is_index_inc = (next_contig[CTG_DIR]=='+' and full_connected_path[i][0]==1) or \
+                                    (next_contig[CTG_DIR]=='-' and full_connected_path[i][0]==0)
+                    elif full_connected_path[i][0] in (2, 3):
+                        is_index_inc = (curr_contig[CTG_DIR]=='+' and full_connected_path[i-1][0]==1) or \
+                                (curr_contig[CTG_DIR]=='-' and full_connected_path[i-1][0]==0)
+                    else:
+                        assert(curr_contig[CTG_NAM] != next_contig[CTG_NAM])
+                        is_index_inc = (curr_contig[CTG_DIR]=='+' and full_connected_path[i-1][0]==1) or \
+                                (curr_contig[CTG_DIR]=='-' and full_connected_path[i-1][0]==0)
 
-                    
-                    curr_paf, next_paf = adjust_paf_overlap(curr_contig_data, next_contig_data)
-                    
-                    curr_result = form_adjusted_contig(curr_contig, curr_paf)
-                    if curr_contig[CTG_DIR]=='-': 
-                        curr_result = node_dir_transform(curr_result)
-                    next_result = form_adjusted_contig(next_contig_origin, next_paf)
-                    if next_contig[CTG_DIR]=='-':
-                        next_result = node_dir_transform(next_result)
-                    path_contig[-1] = curr_result
-                    path_contig.append(next_result)
+                    if is_index_inc: # 1324 2413
+
+                        curr_paf, next_paf = adjust_paf_overlap(curr_contig_data, next_contig_data)
+                        
+                        curr_result = form_adjusted_contig(curr_contig, curr_paf)
+                        if curr_contig[CTG_DIR]=='-':
+                            curr_result = node_dir_transform(curr_result)
+                        next_result = form_adjusted_contig(next_contig_origin, next_paf)
+                        if next_contig[CTG_DIR]=='-':
+                            next_result = node_dir_transform(next_result)
+                        path_contig[-1] = curr_result
+                        path_contig.append(next_result)
+                    else:
+                        next_paf, curr_paf = adjust_paf_overlap(next_contig_data, curr_contig_data)
+                        
+                        curr_result = form_adjusted_contig(curr_contig, curr_paf)
+                        if curr_contig[CTG_DIR]=='-':
+                            curr_result = node_dir_transform(curr_result)
+                        next_result = form_adjusted_contig(next_contig_origin, next_paf)
+                        if next_contig[CTG_DIR]=='-':
+                            next_result = node_dir_transform(next_result)
+                        path_contig[-1] = curr_result
+                        path_contig.append(next_result)
+
                     
             else:
                 next_contig_origin = form_normal_contig(next_contig, paf_file)
@@ -574,8 +625,8 @@ def fill_path(index_file_path):
     return
 
 
-fill_path("30_skype_pipe/U2OS_telo_01_58_52/10_fill/chr4b_chr4b/1.index.txt")
-exit(1)
+# fill_path("30_skype_pipe/U2OS_telo_14_25_58/10_fill/chr2f_chr11f/13.index.txt")
+# exit(1)
 
 THREAD=args.thread
 with ProcessPoolExecutor(max_workers=THREAD) as executor:
@@ -590,5 +641,5 @@ with ProcessPoolExecutor(max_workers=THREAD) as executor:
         
 
     # 제출된 작업들이 완료될 때까지 진행 상황을 tqdm으로 표시합니다.
-    for future in tqdm(as_completed(futures), total=len(futures), desc='Fill gap and modify path data', disable=not sys.stdout.isatty()):
-        pass
+    for future in tqdm(as_completed(futures), total=len(futures), desc='Fill gap and modify path data', disable=not sys.stdout.isatty() and not args.progress):
+        t = future.result()

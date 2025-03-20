@@ -3,7 +3,10 @@ import pandas as pd
 import seaborn as sns
 import matplotlib.pyplot as plt
 import matplotlib as mpl
+import pickle as pkl
+import fnnlsEigen as fe
 
+import ast
 import sys
 import logging
 import argparse
@@ -12,7 +15,6 @@ import scipy.stats
 import glob
 
 from tqdm import tqdm
-from scipy.optimize import nnls
 from scipy.signal import butter, filtfilt
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
@@ -21,8 +23,6 @@ from matplotlib.lines import Line2D
 from matplotlib.projections.polar import PolarAxes
 from pycirclize.track import Track
 from collections import defaultdict
-
-import ast
 from collections import Counter
 
 logging.basicConfig(
@@ -32,7 +32,7 @@ logging.basicConfig(
 )
 logging.info("22_depth_analysis start")
 
-np.seterr(invalid='ignore')
+# np.seterr(invalid='ignore')
 
 CTG_NAM = 0
 CTG_LEN = 1
@@ -64,6 +64,9 @@ CHROMOSOME_COUNT = 23
 DIR_FOR = 1
 TELOMERE_EXPANSION = 5 * K
 
+def test():
+    return 'adasd'
+
 def import_index_path(file_path : str) -> list:
     index_file = open(file_path, "r")
     index_data = []
@@ -74,6 +77,7 @@ def import_index_path(file_path : str) -> list:
         elif curr_index[0] != '[':
             temp_list = curr_index.split("\t")
             index_data.append(tuple((int(temp_list[0]), int(temp_list[1]))))
+    index_file.close()
     return index_data
 
 def extract_groups(lst):
@@ -95,55 +99,6 @@ def extract_groups(lst):
             seen.add(num)
             current = num
     return result
-
-def rebin_dataframe(df: pd.DataFrame, n: int = 2) -> pd.DataFrame:
-    """
-    Group rows in the DataFrame into bins spanning n consecutive units.
-    The unit is determined from the 'length' of the first row in each chromosome group.
-    
-    For each group:
-      - The new start (st) is taken from the first row.
-      - The new end (nd) is taken from the last row in the group.
-      - For a complete group (n rows), values are summed.
-      - For an incomplete group (fewer than n rows), the new bin's length is the sum of the available lengths,
-        and new covsite and totaldepth are computed as the weighted average:
-            new_value = sum( value_i * length_i ) / sum(length_i)
-      - New coverage (cov) is computed as (new_covsite / new_length) * 100.
-      - New mean depth (meandepth) is computed as new_totaldepth / new_length.
-    
-    Parameters:
-        df (pd.DataFrame): Input DataFrame with columns ['chr', 'st', 'nd', 'length',
-                          'covsite', 'totaldepth', 'cov', 'meandepth'].
-        n (int): Number of consecutive units (rows) to combine into each bin.
-    
-    Returns:
-        pd.DataFrame: New DataFrame with binned rows.
-    """
-    new_rows = []
-    
-    # Process each chromosome separately.
-    for chrom, sub_df in df.groupby('chr'):
-        # Sort rows by starting position.
-        sub_df = sub_df.sort_values('st').reset_index(drop=True)
-        
-        # Group rows in chunks of size n.
-        for i in range(0, len(sub_df), n):
-            chunk = sub_df.iloc[i:i+n]
-            new_st = chunk['st'].iloc[0]
-            new_nd = chunk['nd'].iloc[-1]
-            
-            # Use the actual sum of lengths in the chunk.
-            sum_length = chunk['length'].sum()
-            new_meandepth = np.sum(chunk['totaldepth']) / sum_length
-            
-            new_rows.append({
-                'chr': chrom,
-                'st': new_st,
-                'nd': new_nd,
-                'meandepth': new_meandepth
-            })
-    
-    return pd.DataFrame(new_rows)
 
 def line_track_plot(
     line_track: Track,
@@ -301,13 +256,6 @@ def line_track_circos_color(
             line.set_clip_path(clip_patch)
     line_track._plot_funcs.append(plot_fill_between)
 
-def chr2int(x):
-    chrXY2int = {'chrX' : 24, 'chrY' : 25}
-    if x in chrXY2int:
-        return chrXY2int[x]
-    else:
-        return int(x[3:])
-
 def highpass_filter(data, cutoff, fs, order=3):
     """
     Butterworth high-pass filter를 이용하여 저주파 성분을 제거합니다.
@@ -332,6 +280,7 @@ def find_chr_len(file_path : str) -> dict:
     for curr_data in chr_data_file:
         curr_data = curr_data.split("\t")
         chr_len[curr_data[0]] = int(curr_data[1])
+    chr_data_file.close()
     return chr_len
 
 def chr_correlation_maker(contig_data):
@@ -365,7 +314,7 @@ def import_graph_data(file_path : str) -> dict :
             cnt+=1
         l = ast.literal_eval(l)
         graph_adjacency[l] = r
-
+    graph_file.close()
     return graph_adjacency
 
 def import_telo_data(file_path : str, chr_len : dict) -> dict :
@@ -387,6 +336,7 @@ def import_telo_data(file_path : str, chr_len : dict) -> dict :
                 temp_list.append('f')
                 temp_list[2]+=TELOMERE_EXPANSION
         telo_data.append(tuple(temp_list))
+    fai_file.close()
     return telo_data[1:]
 
 def distance_checker(node_a : tuple, node_b : tuple) -> int :
@@ -411,8 +361,6 @@ def extract_telomere_connect_contig(contig_data : list, graph_adjacency : dict) 
             telomere_connect_contig.append((chr_rev_corr[i], j[1]))
     
     return telomere_connect_contig
-
-
 
 def rebin_dataframe(df: pd.DataFrame, n: int) -> pd.DataFrame:
     """
@@ -463,7 +411,6 @@ def rebin_dataframe(df: pd.DataFrame, n: int) -> pd.DataFrame:
     
     return pd.DataFrame(new_rows)
 
-
 def rebin_dataframe_B(df: pd.DataFrame, n: int) -> np.array:
     new_rows = dict()
     
@@ -492,7 +439,6 @@ def rebin_dataframe_B(df: pd.DataFrame, n: int) -> np.array:
 
     return np.hstack(ans_B)
 
-
 def import_data2(file_path : str) -> list :
     paf_file = open(file_path, "r")
     contig_data = []
@@ -504,6 +450,7 @@ def import_data2(file_path : str) -> list :
         for i in int_induce_idx:
             temp_list[i] = int(temp_list[i])
         contig_data.append(tuple(temp_list))
+    paf_file.close()
     return contig_data
 
 
@@ -516,6 +463,7 @@ def import_bed(bed_path : str) -> dict:
     for curr_data in bed_data_file:
         curr_data = curr_data.split("\t")
         chr_len[curr_data[0]].append((int(curr_data[1]), int(curr_data[2])))
+    bed_data_file.close()
     return chr_len
 
 def inclusive_checker(tuple_a : tuple, tuple_b : tuple) -> bool :
@@ -524,12 +472,13 @@ def inclusive_checker(tuple_a : tuple, tuple_b : tuple) -> bool :
     else:
         return False
 
-bed_data = import_bed(bpath)
-
 parser = argparse.ArgumentParser(description="SKYPE depth analysis")
 
+parser.add_argument("censat_bed_path", 
+                    help="Path to the censat repeat information file.")
+
 parser.add_argument("ppc_paf_file_path", 
-                        help="Path to the preprocessed PAF file.")
+                    help="Path to the preprocessed PAF file.")
 
 parser.add_argument("graph_file_txt", 
                     help="Path to the graph text file.")
@@ -546,17 +495,22 @@ parser.add_argument("reference_fai_path",
 parser.add_argument("reference_cytobands_path", 
                     help="Path to the cytoband information file.")
 
-
 parser.add_argument("prefix", 
                     help="Pefix for pipeline")
 
 parser.add_argument("-t", "--thread", 
                     help="Number of thread", type=int)
 
+parser.add_argument("--progress", 
+                    help="Show progress bar", action='store_true')
+
 args = parser.parse_args()
 
-# t = "python 22_depth_analysis.py 20_acc_pipe/HuH-28.p/HuH-28.p.aln.paf.ppc.paf 20_acc_pipe/HuH-28.p/HuH-28.p.aln.paf.ppc.paf.op.graph.txt /home/hyunwoo/51g_cancer_denovo/51_depth_data/HuH-28.win.stat.gz public_data/chm13v2.0_telomere.bed public_data/chm13v2.0.fa.fai public_data/chm13v2.0_cytobands_allchrs.bed 30_skype_pipe/HuH-28_01_20_30 -t 25"
-# args = parser.parse_args(t.split()[2:])
+# t = "22_depth_analysis.py public_data/chm13v2.0_censat_v2.1.m.bed 20_acc_pipe/U2OS_telo.p/U2OS_telo.p.aln.paf.ppc.paf 20_acc_pipe/U2OS_telo.p/U2OS_telo.p.aln.paf.ppc.paf.op.graph.txt /home/hyunwoo/51g_cancer_denovo/51_depth_data/U2OS_telo.win.stat.gz public_data/chm13v2.0_telomere.bed public_data/chm13v2.0.fa.fai public_data/chm13v2.0_cytobands_allchrs.bed 30_skype_pipe/U2OS_telo_16_47_00 -t 30 --progress"
+
+# args = parser.parse_args(t.split()[1:])
+
+bed_data = import_bed(args.censat_bed_path)
 
 PREFIX = args.prefix
 THREAD = args.thread
@@ -566,8 +520,6 @@ main_stat_loc = args.main_stat_loc
 TELOMERE_INFO_FILE_PATH = args.telomere_bed_path
 PREPROCESSED_PAF_FILE_PATH = args.ppc_paf_file_path
 
-# HuH-28의 /home/hyunwoo/51g_cancer_denovo/51_depth_data/HuH-28.win.stat.gz를 읽어서 모든 경우 chr, st set을 가지고온다 (나머지 없는 경우를 0으로 채우게)
-# chrM은 뺀다
 RATIO_OUTLIER_FOLDER = f"{PREFIX}/11_ref_ratio_outliers/"
 front_contig_path = RATIO_OUTLIER_FOLDER+"front_jump/"
 back_contig_path = RATIO_OUTLIER_FOLDER+"back_jump/"
@@ -578,7 +530,6 @@ graph_path = f"{PREFIX}/"
 graph_data = args.graph_file_txt
 graph_adjacency = import_graph_data(graph_data)
 telo_connected_node = extract_telomere_connect_contig(contig_data, graph_adjacency)
-
 
 df = pd.read_csv(main_stat_loc, compression='gzip', comment='#', sep='\t', names=['chr', 'st', 'nd', 'length', 'covsite', 'totaldepth', 'cov', 'meandepth'])
 df = df.query('chr != "chrM"')
@@ -632,51 +583,96 @@ def get_vec_from_stat_loc(stat_loc_):
     
     return np.asarray(fv, dtype=np.float64), np.asarray(v, dtype=np.float64)
 
+def get_vec_from_ki(ki):
+    stat_loc_ = f'{output_folder}/{ki}.win.stat.gz'
+    df = pd.read_csv(stat_loc_, compression='gzip', comment='#', sep='\t', names=['chr', 'st', 'nd', 'length', 'covsite', 'totaldepth', 'cov', 'meandepth'])
+    df = df.query('chr != "chrM"')
+
+    chr_st_data = dict()
+    for l in df.itertuples(index=False):
+         chr_st_data[(l.chr, l.st)] = l.meandepth
+    
+    fv = []
+    for cs in chr_filt_st_list:
+        if cs not in chr_st_data:
+            fv.append(0)
+        else:
+            fv.append(chr_st_data[cs])
+    
+    v = []
+    for cs in chr_st_list:
+        if cs not in chr_st_data:
+            v.append(0)
+        else:
+            v.append(chr_st_data[cs])
+    
+    return ki, np.asarray(fv, dtype=np.float64), np.asarray(v, dtype=np.float64)
+
 PATH_FILE_FOLDER = f"{PREFIX}/20_depth"
 chr_chr_folder_path = sorted(glob.glob(PATH_FILE_FOLDER+"/*"))
 
-def get_two_vec_list_folder(folder_path):
-    filter_vec_list = []
-    vec_list = []
-    loc_list = []
-
-    paf_paths = sorted(glob.glob(folder_path + "/*.win.stat.gz"))
-    for stat_loc in paf_paths:
-        fv, v = get_vec_from_stat_loc(stat_loc)
-
-        filter_vec_list.append(fv)
-        vec_list.append(v)
-        loc_list.append(stat_loc)
-
-    return filter_vec_list, vec_list, loc_list
-
 main_filter_vec, main_vec = get_vec_from_stat_loc(main_stat_loc)
+
+def get_vec_from_file(data):
+    final_paf_path, key_int_list = data
+    ki = key_int_list[0]
+    
+    fv, v = vec_dict[ki]
+    fv = np.copy(fv)
+    v = np.copy(v)
+
+    for ki in key_int_list[1:]:
+        tfv, tv = vec_dict[ki]
+
+        fv += tfv
+        v += tv
+        
+    return fv, v, final_paf_path
+
+with open(f'{PREFIX}/contig_pat_vec_data.pkl', 'rb') as f:
+    paf_ans_list, key_list = pkl.load(f)
+
+vec_dict = dict()
+output_folder = f'{PREFIX}/21_pat_depth'
+with ProcessPoolExecutor(max_workers=THREAD) as executor:
+    futures = []
+    for ki in key_list:
+        futures.append(executor.submit(get_vec_from_ki, ki))
+    for future in tqdm(as_completed(futures), total=len(futures), desc='Parse depth for each seperated paths\' gz file',
+                       disable=not sys.stdout.isatty() and not args.progress):
+        i, fv, v = future.result()
+        vec_dict[i] = (fv, v)
+
 
 filter_vec_list = []
 vec_list = []
 tot_loc_list = []
+bv_loc_list = []
 
-with ProcessPoolExecutor(max_workers=THREAD) as executor:
-    futures = [executor.submit(get_two_vec_list_folder, folder_path) for folder_path in chr_chr_folder_path]
-    for future in tqdm(as_completed(futures), total=len(futures), desc='Parse coverage from gz files', disable=not sys.stdout.isatty()):
-        fvl, vl, ll = future.result()
-        filter_vec_list.extend(fvl)
-        vec_list.extend(vl)
-        tot_loc_list.extend(ll)
+for data in tqdm(paf_ans_list, desc='Recover depth from seperated paths',
+                 disable=not sys.stdout.isatty() and not args.progress):
+    fv, v, l = get_vec_from_file(data)
+    filter_vec_list.append(fv)
+    vec_list.append(v)
+    tot_loc_list.append(l)
 
 fclen = len(glob.glob(front_contig_path+"*"))
-for i in tqdm(range(1, fclen//4 + 1), desc='Parse coverage from forward-directed outlier contig gz files', disable=not sys.stdout.isatty()):
+for i in tqdm(range(1, fclen//4 + 1), desc='Parse coverage from forward-directed outlier contig gz files', disable=not sys.stdout.isatty() and not args.progress):
+    bv_paf_loc = front_contig_path+f"{i}_base.paf"
     ov_loc = front_contig_path+f"{i}.win.stat.gz"
     bv_loc = front_contig_path+f"{i}_base.win.stat.gz"
+    bv_loc_list.append(bv_paf_loc)
     ofv, ov = get_vec_from_stat_loc(ov_loc)
     bfv, bv = get_vec_from_stat_loc(bv_loc)
     filter_vec_list.append(ofv-bfv)
     vec_list.append(ov-bv)
 
 bclen = len(glob.glob(back_contig_path+"*"))
-for i in tqdm(range(1, bclen//4 + 1), desc='Parse coverage from backward-directed outlier contig gz files', disable=not sys.stdout.isatty()):
+for i in tqdm(range(1, bclen//4 + 1), desc='Parse coverage from backward-directed outlier contig gz files', disable=not sys.stdout.isatty() and not args.progress):
+    bv_paf_loc = back_contig_path+f"{i}_base.paf"
     ov_loc = back_contig_path+f"{i}.win.stat.gz"
     bv_loc = back_contig_path+f"{i}_base.win.stat.gz"
+    bv_loc_list.append(bv_paf_loc)
     ofv, ov = get_vec_from_stat_loc(ov_loc)
     bfv, bv = get_vec_from_stat_loc(bv_loc)
     filter_vec_list.append(ofv+bfv)
@@ -684,10 +680,10 @@ for i in tqdm(range(1, bclen//4 + 1), desc='Parse coverage from backward-directe
 
 logging.info("Regression analysis is ongoing...")
 
-A = np.vstack(filter_vec_list).T
-B = main_filter_vec
+A = np.ascontiguousarray(np.vstack(filter_vec_list).T)
+B = np.ascontiguousarray(main_filter_vec)
 
-weights, loss = nnls(A, B)
+weights = fe.fnnls(A, B)
 
 error = np.linalg.norm(A @ weights - B)
 b_norm = np.linalg.norm(B)
@@ -696,6 +692,7 @@ logging.info(f'Error : {round(error, 4)}')
 logging.info(f'Norm error : {round(error / b_norm, 4)}')
 
 logging.info("Forming result images...")
+
 
 # Calculate noise
 
@@ -799,7 +796,6 @@ for sector in circos.sectors:
                             target_color=target_color,
                             target_value=[2, 4])
     
-
 def extract_nclose_node(nclose_path: str) -> list:
     nclose_list = []
     with open(nclose_path, "r") as f:
@@ -821,29 +817,46 @@ for k, v in reverse_nclose_dict.items():
 
 raw_path_list = []
 for i in tot_loc_list:
-    temp_str = i.split(".")[-4]
-    temp_list = temp_str.split("/")
-    temp_list[2] = "00_raw"
-    raw_path_list.append("/".join(temp_list) + ".index.txt")
+    il = i.split("/")
+    cnt = il[-1].split('.')[0]
+    chr2chr = il[-2]
+    raw_path_list.append(f'{PREFIX}/00_raw/{chr2chr}/{cnt}.index.txt')
+
+telo_node_set = set()
+
+for chr_dir, node_id in telo_connected_node:
+    telo_node_set.add(node_id)
 
 path_nclose_usage = []
+path_telo_usage = []
 for i, raw_path in enumerate(raw_path_list):
     using_nclose = Counter()
+    using_telo = Counter()
     path = import_index_path(raw_path)
     s = 1
-    while s < len(path)-1:
+    while s < len(path)-2:
         nclose_cand = tuple(sorted([path[s][1], path[s+1][1]]))
         if nclose_cand in nclose_set:
             using_nclose[nclose_dict[nclose_cand]]+=1
             s+=2
         else:
             s+=1
+    if path[1][1] in telo_node_set:
+        using_telo[path[1][1]]+=1
+    if path[len(path)-2][1] in telo_node_set:
+        using_telo[path[len(path)-2][1]]+=1
     path_nclose_usage.append(using_nclose)
+    path_telo_usage.append(using_telo)
 
 nclose_cn = defaultdict(float)
 for i, ctr in enumerate(path_nclose_usage):
     for j, v in ctr.items():
         nclose_cn[j] += v*weights[i]
+
+telo_cn = defaultdict(float)
+for i, ctr in enumerate(path_telo_usage):
+    for j, v in ctr.items():
+        telo_cn[j] += v*weights[i]
 
 bnd_cn_data = []
 for k, v in nclose_cn.items():
@@ -856,6 +869,26 @@ for k, v in nclose_cn.items():
         virtual_flag = True
     
     bnd_cn_data.append([(chr_nam1, pos1), (chr_nam2, pos2), v, virtual_flag])
+
+non_type4_cnt = len(bnd_cn_data)
+rpll =len(raw_path_list)
+
+for i in range(rpll, len(weights)):
+    with open(bv_paf_loc, "r") as f:
+        l = f.readline()
+        l = l.rstrip()
+        l = l.split("\t")
+        chr_nam1 = l[CHR_NAM]
+        chr_nam2 = l[CHR_NAM]
+        pos1 = int(l[CHR_STR])
+        pos2 = int(l[CHR_END])
+    v = weights[i]
+    bnd_cn_data.append([(chr_nam1, pos1), (chr_nam2, pos2), v, False])
+
+a = sorted(list(telo_cn.items()), key = lambda t:t[1])
+telo_zorder_dict = {}
+for i, v in enumerate(a):
+    telo_zorder_dict[v[0]] = i
 
 off = 0.03
 lower = 0
@@ -874,7 +907,7 @@ for i, (bnd_loc1, bnd_loc2, cn, is_vir) in enumerate(bnd_cn_data):
     color = cmap(norm_cn)
     linestyle = '--' if is_vir else '-'
     
-    if cn > 0:
+    if cn >= 0:
         circos.link_line(bnd_loc1, bnd_loc2, color=color, linestyle=linestyle, lw=1, zorder=i)
 
 circos.colorbar(vmin=0, vmax=2, bounds=(1.01 + off, 0.825, 0.02, 0.1), cmap=cmap,
@@ -915,15 +948,18 @@ for node_id, telo_len, chr_dir in telo_len_data:
 for sector in circos.sectors:
     track1 = sector.add_track((58.2, 59.8))
     for j in need_label[sector.name]:
+        cn = telo_cn[j[0]]
+        norm_cn = np.clip((cn - lower) / (upper - lower), 0, 1)
+        color = cmap(norm_cn)
         if j[1]=='f':
             # Prevent out of range
             try:
-                track1.arrow(contig_data[j[0]][CHR_STR], contig_data[j[0]][CHR_STR] + 15*M, fc="black")
+                track1.arrow(contig_data[j[0]][CHR_STR], contig_data[j[0]][CHR_STR] + 15*M, fc=color, zorder=telo_zorder_dict[j[0]])
             except:
                 pass
         else:
             try:
-                track1.arrow(contig_data[j[0]][CHR_END], contig_data[j[0]][CHR_END] - 15*M, fc="black")
+                track1.arrow(contig_data[j[0]][CHR_END], contig_data[j[0]][CHR_END] - 15*M, fc=color, zorder=telo_zorder_dict[j[0]])
             except:
                 pass
 

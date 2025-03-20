@@ -1,8 +1,6 @@
 import re
 import argparse
-import pandas as pd
 from collections import defaultdict
-from collections import Counter
 import logging
 
 logging.basicConfig(
@@ -69,6 +67,7 @@ def import_telo_data(file_path : str, chr_len : dict) -> dict :
                 temp_list.append('f')
                 temp_list[2]+=TELOMERE_EXPANSION
         telo_data.append(tuple(temp_list))
+    fai_file.close()
     return telo_data[1:]
 
 def import_data(file_path : str) -> list :
@@ -82,6 +81,7 @@ def import_data(file_path : str) -> list :
         for i in int_induce_idx:
             temp_list[i] = int(temp_list[i])
         contig_data.append(tuple(temp_list))
+    paf_file.close()
     return contig_data
 
 
@@ -91,6 +91,7 @@ def find_chr_len(file_path : str) -> dict:
     for curr_data in chr_data_file:
         curr_data = curr_data.split("\t")
         chr_len[curr_data[0]] = int(curr_data[1])
+    chr_data_file.close()
     return chr_len
 
 def distance_checker(node_a : tuple, node_b : tuple) -> int :
