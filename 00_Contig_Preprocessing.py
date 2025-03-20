@@ -627,8 +627,6 @@ def edge_optimization(contig_data : list, contig_adjacency : list, telo_dict : d
     optimized_adjacency = [[[] for _ in range(contig_data_size + CHROMOSOME_COUNT*2)], [[] for _ in range(contig_data_size + CHROMOSOME_COUNT*2)]]
     for _ in range(2):
         for i in range(len(contig_data)+CHROMOSOME_COUNT*2):
-            if i==7121:
-                t=1
             for edge in contig_adjacency[_][i]:
                 if edge[1] >= contig_data_size or i >= contig_data_size:
                     optimized_adjacency[_][i].append(edge)

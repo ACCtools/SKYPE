@@ -579,8 +579,10 @@ def main():
     
     init_graph_adjacency = initial_graph_build(contig_data)
     link_label = node_label(contig_data)
-    using_node = find_using_node(contig_data, link_label)
     ord_graph_adjacency = graph_build(contig_data, init_graph_adjacency, link_label)
+
+    using_node = find_using_node(contig_data, link_label)
+
     with open(f"{BREAKEND_GRAPH_PATH_FILE_PREFIX}/non_opt_bnd_connect_graph.txt", "wt") as f:
         for dir in range(2):
             for node in range(contig_data_size):

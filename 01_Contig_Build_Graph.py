@@ -166,8 +166,6 @@ def initial_graph_build(contig_data : list, telo_data : dict) -> list :
                     adjacency[DIR_BAK][curr_contig_ed].append([DIR_FOR, dest, 0])
                     adjacency[DIR_FOR][dest].append([DIR_BAK, curr_contig_ed, 0])
 
-
-
         curr_contig_st = curr_contig_ed + 1
     '''
     If telomere node has 0 connection, connect with closest node with same chromosome type.
@@ -474,7 +472,7 @@ def graph_build(contig_data : list, contig_adjacency : list, linkability_label :
             for j in range(k, total_contig_count):
                 if linkability_label[j] != 0 \
                 and contig_data[i][CHR_NAM] == contig_data[j][CHR_NAM] \
-                and contig_data[i][CTG_NAM] != contig_data[j][CTG_NAM] :
+                and contig_data[i][CTG_NAM] != contig_data[j][CTG_NAM]:
                     if (inclusive_checker(contig_data[i], contig_data[j]) or inclusive_checker(contig_data[j], contig_data[i]))\
                     and (contig_data[i][CTG_ENDND] - contig_data[i][CTG_STRND] == 0 or contig_data[j][CTG_ENDND] - contig_data[j][CTG_STRND] == 0):
                         continue
@@ -784,10 +782,7 @@ def main():
     contig_data_size = len(contig_data)
 
     contig_adjacency = initial_graph_build(contig_data, telo_dict)
-
     label = node_label(contig_data)
-
-
     contig_adjacency = graph_build(contig_data, contig_adjacency, label)
 
     optimized_adjacency = edge_optimization(contig_data, contig_adjacency, telo_dict)
