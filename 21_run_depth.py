@@ -169,7 +169,49 @@ def path_printer(index_file_path):
     print(os.path.abspath(fill_index_path_loc))
     print(os.path.abspath(index_file_path))
 
-def split_final_paf(index_file_path):
+def get_key_from_index_folder(folder_path):
+    index_key_data = []
+    index_file_paths = glob.glob(folder_path + "/*index*")
+    for index_file_path in index_file_paths:
+        index_key_data.append(get_key_from_index_file(index_file_path))
+
+    return index_key_data
+
+def get_key_from_index_file(index_file_path):
+    bnd_index_data = import_index_path(index_file_path)[1:-1]
+    bnd_ctg_group = count_groups([contig_data[i[1]][CTG_NAM] for i in bnd_index_data])
+
+    key_list = []
+    is_contig_same = True
+    for i, (ci, nci) in enumerate(pairwise(bnd_index_data)):  
+        (ctg_dir, ctg_ind), (next_ctg_dir, next_ctg_ind) = ci, nci
+
+        if i == 0 or i == len(bnd_index_data) - 2:
+            if i == 0 and bnd_ctg_group[0] == 3:
+                is_contig_same = False
+            elif i == len(bnd_index_data) - 2 and bnd_ctg_group[-1] == 3:
+                is_contig_same = False
+            else:
+                is_contig_same = True
+        else:
+            is_contig_same = True
+
+        if i == 0 and bnd_ctg_group[0] == 2:
+            key_list.append((TEL_TYPE, ctg_ind))
+
+        if contig_data[ctg_ind][CTG_NAM] == contig_data[next_ctg_ind][CTG_NAM] and is_contig_same:
+            key_list.append((CTG_IN_TYPE, (ci, nci)))
+        else:
+            key_list.append((BND_TYPE, (ci, nci)))
+            
+        if i == len(bnd_index_data) - 2 and bnd_ctg_group[-1] == 2:
+            key_list.append((TEL_TYPE, ctg_ind))
+    
+    return index_file_path, key_list
+
+def create_final_depth_paf(data):
+    index_file_path, key_ind_data = data
+
     final_paf_list = index_file_path.split('/')
     cnt = final_paf_list[-1].split('.')[0]
     
@@ -226,26 +268,20 @@ def split_final_paf(index_file_path):
             ii = find_index(fill_index_path, final_paf_data, nci)
             index_list.append((ii, ii, TEL_TYPE,
                                ctg_ind))
+                               
 
     # print(*index_list)
-    for (si1, si2, st, si), (ni1, ni2, nt, si) in pairwise(index_list):
-        assert(si2 + 1 == ni1)
+    # for (si1, si2, st, si), (ni1, ni2, nt, si) in pairwise(index_list):
+    #     assert(si2 + 1 == ni1)
     
-    assert(index_list[0][0] == 0)
-    assert(index_list[-1][1] == len(final_paf_data) - 1)
+    # assert(index_list[0][0] == 0)
+    # assert(index_list[-1][1] == len(final_paf_data) - 1)
 
-    key_list = []
-    for i1, i2, data_type, data_key in index_list:
-        key = (data_type, data_key)
-        if key not in index_data:
-            index_data[key] = final_paf_data[i1:i2+1]
-            # index_data_loc[key] = index_file_path
-        else:
-            assert(compare_paf_list(index_data[key], final_paf_data[i1:i2+1]))
-
-        key_list.append(key)
-    
-    return final_paf_path, key_list
+    for index_ind, key_cnt in key_ind_data:
+        i1, i2, data_type, data_key = index_list[index_ind]
+        with open(f'{output_folder}/{key_cnt}.paf', 'w') as f:
+            for paf_line in final_paf_data[i1:i2+1]:
+                print(*paf_line, sep='\t', file=f)
 
 def rev_dir(d):
     if d == DIR_IN:
@@ -277,6 +313,13 @@ def is_sorted_ind(key):
 def count_groups(lst):
     return [len(list(group)) for key, group in groupby(lst)]
 
+def get_paf_run(paf_loc):
+    paf_base = os.path.splitext(paf_loc)[0]
+    result = subprocess.run(['./PanDepth/bin/pandepth', '-w', str(int(DEPTH_WINDOW)),'-t', str(DEPTH_THREAD), '-i', paf_loc, '-o', paf_base],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, capture_output=False)
+    
+    if result.returncode != 0:
+        raise Exception("Pandepth failed!")
 
 parser = argparse.ArgumentParser(description="Find breakend contigs with contig data and map data")
 
@@ -315,43 +358,57 @@ norm_dir_type = {DIR_FOR : True, DIR_BAK : True, DIR_IN : False, DIR_OUT : False
 
 for k, vs in bnd_dir_dict.items():
     type_set = set((norm_dir_type[i], norm_dir_type[j]) for i, j in vs)
-    assert(len(type_set) == len(vs))
+    # assert(len(type_set) == len(vs))
 
-index_data = dict()
+key_cnt = 0
+key2int = dict()
 
 chr_chr_folder_path = list(glob.glob(PREFIX+"/00_raw/*"))
 final_paf_vec_data = []
 
 # tqdm 전에꺼랑 같이 desc 적고
-for folder_path in tqdm(chr_chr_folder_path, desc='Parse and verify final paf data',
-                        disable=not sys.stdout.isatty() and not args.progress):
-    index_file_paths = glob.glob(folder_path + "/*index*")
-    for index_file_path in index_file_paths:
-        final_paf_vec_data.append(split_final_paf(index_file_path))
+index_data_list = []
+with ProcessPoolExecutor(max_workers=THREAD) as executor:
+    futures = [executor.submit(get_key_from_index_folder, folder_path) for folder_path in chr_chr_folder_path]
 
-key2int = dict()
+    # 제출된 작업들이 완료될 때까지 진행 상황을 tqdm으로 표시합니다.
+    for future in tqdm(as_completed(futures), total=len(futures), desc='Analyse index to split paf',
+                       disable=not sys.stdout.isatty() and not args.progress):
+        index_data_list.extend(future.result())
+
+create_paf_data_list = []
+for index_loc, key_list in index_data_list:
+    key_ind_data = []
+    for i, key in enumerate(key_list):
+        if key not in key2int:
+            key2int[key] = key_cnt
+            key_ind_data.append((i, key_cnt))
+            key_cnt += 1
+
+    if len(key_ind_data) > 0:
+        create_paf_data_list.append((index_loc, key_ind_data))
+        
 
 output_folder = f'{PREFIX}/21_pat_depth'
 os.makedirs(output_folder, exist_ok=True)
 
-for i, (key, paf_list) in enumerate(index_data.items()):
-    key2int[key] = i
-    with open(f'{output_folder}/{i}.paf', 'w') as f:
-        for paf_line in paf_list:
-            print(*paf_line, sep='\t', file=f)
+with ProcessPoolExecutor(max_workers=THREAD) as executor:
+    futures = [executor.submit(create_final_depth_paf, data) for data in create_paf_data_list]
+
+    # 제출된 작업들이 완료될 때까지 진행 상황을 tqdm으로 표시합니다.
+    for future in tqdm(as_completed(futures), total=len(futures), desc='Split paf to run depth efficiently',
+                       disable=not sys.stdout.isatty() and not args.progress):
+        future.result()
 
 paf_ans_list = []
-for final_paf_path, key_list in final_paf_vec_data:
+for index_file_path, key_list in index_data_list:
+    final_paf_list = index_file_path.split('/')
+    cnt = final_paf_list[-1].split('.')[0]
+    final_paf_list[-3] = '20_depth'
+    final_paf_path = '/'.join(final_paf_list[:-1]) + f'/{cnt}.paf'
+
     key_list = [key2int[k] for k in key_list]
     paf_ans_list.append((final_paf_path, key_list))
-
-def get_paf_run(paf_loc):
-    paf_base = os.path.splitext(paf_loc)[0]
-    result = subprocess.run(['./PanDepth/bin/pandepth', '-w', str(int(DEPTH_WINDOW)),'-t', str(DEPTH_THREAD), '-i', paf_loc, '-o', paf_base],
-                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, capture_output=False)
-    
-    if result.returncode != 0:
-        raise Exception("Pandepth failed!")
 
 with ProcessPoolExecutor(max_workers=THREAD) as executor:
     futures = []

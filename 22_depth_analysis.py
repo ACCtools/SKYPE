@@ -560,7 +560,7 @@ def get_vec_from_stat_loc(stat_loc_):
         else:
             v.append(chr_st_data[cs])
     
-    return np.asarray(fv, dtype=np.float64), np.asarray(v, dtype=np.float64)
+    return np.ascontiguousarray(fv, dtype=np.float64), np.ascontiguousarray(v, dtype=np.float64)
 
 def get_vec_from_ki(ki):
     stat_loc_ = f'{output_folder}/{ki}.win.stat.gz'
@@ -622,8 +622,15 @@ with ProcessPoolExecutor(max_workers=THREAD) as executor:
         i, fv, v = future.result()
         vec_dict[i] = (fv, v)
 
+fclen = len(glob.glob(front_contig_path+"*"))
+bclen = len(glob.glob(back_contig_path+"*"))
 
-filter_vec_list = []
+m = np.shape(main_filter_vec)[0]
+n = len(paf_ans_list) + fclen//4 + bclen//4
+ncnt = 0
+
+A = np.zeros((m, n), dtype=np.float64)
+
 vec_list = []
 tot_loc_list = []
 bv_loc_list = []
@@ -631,11 +638,13 @@ bv_loc_list = []
 for data in tqdm(paf_ans_list, desc='Recover depth from seperated paths',
                  disable=not sys.stdout.isatty() and not args.progress):
     fv, v, l = get_vec_from_file(data)
-    filter_vec_list.append(fv)
+
+    A[:, ncnt] = fv
+    ncnt += 1
     vec_list.append(v)
+
     tot_loc_list.append(l)
 
-fclen = len(glob.glob(front_contig_path+"*"))
 for i in tqdm(range(1, fclen//4 + 1), desc='Parse coverage from forward-directed outlier contig gz files', disable=not sys.stdout.isatty() and not args.progress):
     bv_paf_loc = front_contig_path+f"{i}_base.paf"
     ov_loc = front_contig_path+f"{i}.win.stat.gz"
@@ -643,10 +652,11 @@ for i in tqdm(range(1, fclen//4 + 1), desc='Parse coverage from forward-directed
     bv_loc_list.append(bv_paf_loc)
     ofv, ov = get_vec_from_stat_loc(ov_loc)
     bfv, bv = get_vec_from_stat_loc(bv_loc)
-    filter_vec_list.append(ofv-bfv)
+
+    A[:, ncnt] = ofv-bfv
+    ncnt += 1
     vec_list.append(ov-bv)
 
-bclen = len(glob.glob(back_contig_path+"*"))
 for i in tqdm(range(1, bclen//4 + 1), desc='Parse coverage from backward-directed outlier contig gz files', disable=not sys.stdout.isatty() and not args.progress):
     bv_paf_loc = back_contig_path+f"{i}_base.paf"
     ov_loc = back_contig_path+f"{i}.win.stat.gz"
@@ -654,13 +664,15 @@ for i in tqdm(range(1, bclen//4 + 1), desc='Parse coverage from backward-directe
     bv_loc_list.append(bv_paf_loc)
     ofv, ov = get_vec_from_stat_loc(ov_loc)
     bfv, bv = get_vec_from_stat_loc(bv_loc)
-    filter_vec_list.append(ofv+bfv)
+
+    A[:, ncnt] = ofv+bfv
+    ncnt += 1
     vec_list.append(ov+bv)
 
 logging.info("Regression analysis is ongoing...")
 
-A = np.ascontiguousarray(np.vstack(filter_vec_list).T)
-B = np.ascontiguousarray(main_filter_vec)
+# A = np.ascontiguousarray(np.vstack(filter_vec_list).T)
+B = main_filter_vec
 
 weights = fe.fnnls(A, B)
 

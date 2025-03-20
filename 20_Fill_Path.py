@@ -503,10 +503,10 @@ cnt=0
 PATH_FILE_FOLDER = f"{args.prefix}/10_fill/"
 TYPE_4_PATH_FILE_FOLDER = f"{args.prefix}/11_ref_ratio_outliers/"
 
-def fill_path_folder(folder_path):
-    index_file_paths = glob.glob(folder_path + "/*index*")
-    for index_file_path in index_file_paths:
-            fill_path(index_file_path)
+# def fill_path_folder(folder_path):
+#     index_file_paths = glob.glob(folder_path + "/*index*")
+#     for index_file_path in index_file_paths:
+#             fill_path(index_file_path)
 
 def fill_path(index_file_path):
     temp_file = index_file_path.split("/")[:-1]
@@ -576,10 +576,10 @@ def fill_path(index_file_path):
                     # except:
                     #     print(tuple(curr_contig_data[0:2]), tuple(next_contig_data[0:2]))
                     #     print(index_file_path)
-                    if full_connected_path[i-1][0] in (2, 3):
+                    if full_connected_path[i-1][0] in {2, 3}:
                         is_index_inc = (next_contig[CTG_DIR]=='+' and full_connected_path[i][0]==1) or \
                                     (next_contig[CTG_DIR]=='-' and full_connected_path[i][0]==0)
-                    elif full_connected_path[i][0] in (2, 3):
+                    elif full_connected_path[i][0] in {2, 3}:
                         is_index_inc = (curr_contig[CTG_DIR]=='+' and full_connected_path[i-1][0]==1) or \
                                 (curr_contig[CTG_DIR]=='-' and full_connected_path[i-1][0]==0)
                     else:
@@ -629,10 +629,10 @@ THREAD=args.thread
 with ProcessPoolExecutor(max_workers=THREAD) as executor:
     futures = []
     chr_chr_folder_path = glob.glob(PATH_FILE_FOLDER+"*")
-    # print(chr_chr_folder_path)
-    # chr_chr_folder_path = ["30_skype_pipe/Caki-1_03_52_36/10_fill/chr17f_chr17b"]
     for folder_path in chr_chr_folder_path:
-        futures.append(executor.submit(fill_path_folder, folder_path))
+        index_file_paths = glob.glob(folder_path + "/*index*")
+        for index_file_path in index_file_paths:
+            futures.append(executor.submit(fill_path, index_file_path))
 
     # 제출된 작업들이 완료될 때까지 진행 상황을 tqdm으로 표시합니다.
     for future in tqdm(as_completed(futures), total=len(futures), desc='Fill gap and modify path data', disable=not sys.stdout.isatty() and not args.progress):

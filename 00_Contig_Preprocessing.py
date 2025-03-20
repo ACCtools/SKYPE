@@ -1656,17 +1656,17 @@ def main():
     
     break_contig = break_double_telomere_contig(real_final_contig, telo_connected_node)
 
-    if len(final_break_contig) > 0:
+    if len(break_contig) > 0:
         final_break_contig = pass_pipeline(break_contig, telo_dict, telo_bound_dict, repeat_data, repeat_censat_data, False)
     else:
         final_break_contig = []
 
-    if len(final_cen_vtg_contig) > 0:
+    if len(cen_vtg_contig) > 0:
         final_cen_vtg_contig = pass_pipeline(cen_vtg_contig, telo_dict, telo_bound_dict, repeat_data, repeat_censat_data, False)
     else:
         final_cen_vtg_contig = []
 
-    if len(final_subtelo_ppc_node) > 0:
+    if len(subtelo_ppc_node) > 0:
         final_subtelo_ppc_node = pass_pipeline(subtelo_ppc_node, telo_dict, telo_bound_dict, repeat_data, repeat_censat_data, True)
     else:
         final_subtelo_ppc_node = []
