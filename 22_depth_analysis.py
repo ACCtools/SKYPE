@@ -440,10 +440,6 @@ def import_data2(file_path : str) -> list :
     paf_file.close()
     return contig_data
 
-
-bpath = 'public_data/chm13v2.0_censat_v2.1.m.bed'
-
-
 def import_bed(bed_path : str) -> dict:
     bed_data_file = open(bed_path, "r")
     chr_len = collections.defaultdict(list)
@@ -471,7 +467,7 @@ parser.add_argument("main_stat_loc",
                     help="Cancer coverage location file")
 
 parser.add_argument("telomere_bed_path", 
-                        help="Path to the telomere information file.")
+                    help="Path to the telomere information file.")
 
 parser.add_argument("reference_fai_path", 
                     help="Path to the chromosome information file.")
@@ -561,7 +557,7 @@ def get_vec_from_stat_loc(stat_loc_):
         else:
             v.append(chr_st_data[cs])
     
-    return np.asarray(fv, dtype=np.float64), np.asarray(v, dtype=np.float64)
+    return np.asarray(fv, dtype=np.float32), np.asarray(v, dtype=np.float32)
 
 def get_vec_from_ki(ki):
     stat_loc_ = f'{output_folder}/{ki}.win.stat.gz'
@@ -586,7 +582,7 @@ def get_vec_from_ki(ki):
         else:
             v.append(chr_st_data[cs])
     
-    return ki, np.asarray(fv, dtype=np.float64), np.asarray(v, dtype=np.float64)
+    return ki, np.asarray(fv, dtype=np.float32), np.asarray(v, dtype=np.float32)
 
 PATH_FILE_FOLDER = f"{PREFIX}/20_depth"
 chr_chr_folder_path = sorted(glob.glob(PATH_FILE_FOLDER+"/*"))
@@ -626,11 +622,11 @@ with ProcessPoolExecutor(max_workers=THREAD) as executor:
 fclen = len(glob.glob(front_contig_path+"*"))
 bclen = len(glob.glob(back_contig_path+"*"))
 
-m = np.shape(main_filter_vec)[0]
-n = len(paf_ans_list) + fclen//4 + bclen//4
-ncnt = 0
+# m = np.shape(main_filter_vec)[0]
+# n = len(paf_ans_list) + fclen//4 + bclen//4
+# ncnt = 0
 
-A = np.zeros((m, n), dtype=np.float64)
+# A = np.zeros((m, n), dtype=np.float32)
 
 filter_vec_list = []
 vec_list = []
@@ -680,11 +676,13 @@ for i in tqdm(range(1, bclen//4 + 1), desc='Parse coverage from backward-directe
 A = np.vstack(filter_vec_list).T
 B = main_filter_vec
 
+filter_vec_list = None
+
 # Run julia for NNLS
 jl.seval('using NonNegLeastSquares, LinearAlgebra')
 jl.BLAS.set_num_threads(THREAD)
-A_jl = jl.convert(jl.Matrix[jl.Float64], A)
-B_jl = jl.convert(jl.Vector[jl.Float64], B)
+A_jl = jl.convert(jl.Matrix[jl.Float32], A)
+B_jl = jl.convert(jl.Vector[jl.Float32], B)
 
 logging.info("Regression analysis is ongoing...")
 weights = jl.vec(jl.nonneg_lsq(A_jl, B_jl, alg=jl.Symbol("fnnls")))
@@ -759,7 +757,7 @@ del chr_len['chrM']
 rdf = rebin_dataframe(df, 2)
 
 circos = Circos(chr_len, space=3)
-circos.add_cytoband_tracks((95, 100), '../00_build_graph/public_data/chm13v2.0_cytobands_allchrs.bed')
+circos.add_cytoband_tracks((95, 100), args.reference_cytobands_path)
 
 target_color = ['blue', 'red', 'gray']
 

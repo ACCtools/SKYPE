@@ -659,17 +659,13 @@ def create_final_depth_paf(data):
     else:
         # Never happen
         assert(False)
-    if key==(1, ((1, 6739), (1, 6740))):
-        #print(key_cnt)
-        t=1
+
     if len(raw_contig_list) > 0:
         process_raw_contig_list(raw_contig_list, key_cnt)
     else:
         # Create empty file
         with open(f'{output_folder}/{key_cnt}.paf', 'w') as f:
             pass
-    import shutil
-    shutil.copy(f'{output_folder}/{key_cnt}.paf', f'test_22_copy/{key}')
 
 def rev_dir(d):
     if d == DIR_IN:

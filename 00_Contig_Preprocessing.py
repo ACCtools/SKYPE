@@ -57,10 +57,10 @@ FORCE_TELOMERE_THRESHOLD = 10*K
 TELOMERE_CLUSTER_THRESHOLD = 500*K
 SUBTELOMERE_LENGTH = 500*K
 
-LOW_FLANK_SIZE_BP = 5*M
-HIGH_FLANK_SIZE_BP = 10*M
 MIN_FLANK_SIZE_BP = 1*M
-BREAKEND_CEN_RATIO_THRESHOLD = 1.3
+
+WEAK_BREAKEND_CEN_RATIO_THRESHOLD = 1.3
+BREAKEND_CEN_RATIO_THRESHOLD = 1.5
 
 def dbg() :
     print("hi")
@@ -1073,7 +1073,7 @@ def find_breakend_centromere(repeat_censat_data : dict, chr_len : dict, df : pd.
         chrom_df = df[df['chr'] == chrom]
         if chrom_df.empty:
             continue
-
+        
         for rep in intervals:
             rep_start_0, rep_end_0 = rep  # 0-indexed 좌표
             
@@ -1081,7 +1081,8 @@ def find_breakend_centromere(repeat_censat_data : dict, chr_len : dict, df : pd.
             final_left_weighted = -1
             final_right_weighted = -1
 
-            for FLANK_SIZE_BP in [HIGH_FLANK_SIZE_BP, LOW_FLANK_SIZE_BP]:
+            weak_cnt = 0
+            for FLANK_SIZE_BP in [5 * M, 10 * M, 20 * M]:
                 # 좌측 flanking: repeat의 1-indexed 시작은 rep_start_0 + 1
                 if rep_start_0 > 0:
                     left_flank_end = rep_start_0  # repeat 시작 전 마지막 base (1-indexed)
@@ -1127,9 +1128,14 @@ def find_breakend_centromere(repeat_censat_data : dict, chr_len : dict, df : pd.
                     final_weighted_ratio = weighted_ratio
                     final_left_weighted = left_weighted
                     final_right_weighted = right_weighted
-            
+
+                if WEAK_BREAKEND_CEN_RATIO_THRESHOLD < weighted_ratio:
+                    weak_cnt += 1
+
             if final_weighted_ratio == -1:
                 continue
+            
+            baseline = WEAK_BREAKEND_CEN_RATIO_THRESHOLD if weak_cnt >= 2 else BREAKEND_CEN_RATIO_THRESHOLD 
 
             results.append({
                 'chr': chrom,
@@ -1138,10 +1144,11 @@ def find_breakend_centromere(repeat_censat_data : dict, chr_len : dict, df : pd.
                 'left_weighted_meandepth': final_left_weighted,
                 'right_weighted_meandepth': final_right_weighted,
                 'weighted_ratio': final_weighted_ratio,
+                'baseline' : baseline
             })
 
     result_df = pd.DataFrame(results)
-    result_df = result_df[result_df['weighted_ratio']>=BREAKEND_CEN_RATIO_THRESHOLD]
+    result_df = result_df[result_df['weighted_ratio']>=result_df['baseline']]
 
     censat_bnd_chr_list = sorted(set(result_df['chr']), key=lambda t : chr2int(t))
     logging.info(f'Breakend censat chr : {" ".join(censat_bnd_chr_list)}')
@@ -1252,8 +1259,6 @@ def break_double_telomere_contig(contig_data : list, telo_connected_set : set):
 
 
 def pass_pipeline(pre_contig_data, telo_dict, telo_bound_dict, repeat_data, repeat_censat_data, telo_ppc_passed):
-    if pre_contig_data[0][CTG_NAM][0]=='v':
-        t=1
     if not telo_ppc_passed:
         if len(pre_contig_data)==0:
             return []
