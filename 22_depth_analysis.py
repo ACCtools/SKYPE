@@ -4,7 +4,6 @@ import seaborn as sns
 import matplotlib.pyplot as plt
 import matplotlib as mpl
 import pickle as pkl
-import fnnlsEigen as fe
 
 import ast
 import sys
@@ -24,6 +23,8 @@ from matplotlib.projections.polar import PolarAxes
 from pycirclize.track import Track
 from collections import defaultdict
 from collections import Counter
+
+from juliacall import Main as jl
 
 logging.basicConfig(
     format='%(asctime)s %(levelname)s:%(message)s',
@@ -560,7 +561,7 @@ def get_vec_from_stat_loc(stat_loc_):
         else:
             v.append(chr_st_data[cs])
     
-    return np.ascontiguousarray(fv, dtype=np.float64), np.ascontiguousarray(v, dtype=np.float64)
+    return np.asarray(fv, dtype=np.float64), np.asarray(v, dtype=np.float64)
 
 def get_vec_from_ki(ki):
     stat_loc_ = f'{output_folder}/{ki}.win.stat.gz'
@@ -631,6 +632,7 @@ ncnt = 0
 
 A = np.zeros((m, n), dtype=np.float64)
 
+filter_vec_list = []
 vec_list = []
 tot_loc_list = []
 bv_loc_list = []
@@ -639,8 +641,7 @@ for data in tqdm(paf_ans_list, desc='Recover depth from seperated paths',
                  disable=not sys.stdout.isatty() and not args.progress):
     fv, v, l = get_vec_from_file(data)
 
-    A[:, ncnt] = fv
-    ncnt += 1
+    filter_vec_list.append(fv)
     vec_list.append(v)
 
     tot_loc_list.append(l)
@@ -653,8 +654,7 @@ for i in tqdm(range(1, fclen//4 + 1), desc='Parse coverage from forward-directed
     ofv, ov = get_vec_from_stat_loc(ov_loc)
     bfv, bv = get_vec_from_stat_loc(bv_loc)
 
-    A[:, ncnt] = ofv-bfv
-    ncnt += 1
+    filter_vec_list.append(ofv-bfv)
     vec_list.append(ov-bv)
 
 for i in tqdm(range(1, bclen//4 + 1), desc='Parse coverage from backward-directed outlier contig gz files', disable=not sys.stdout.isatty() and not args.progress):
@@ -665,16 +665,25 @@ for i in tqdm(range(1, bclen//4 + 1), desc='Parse coverage from backward-directe
     ofv, ov = get_vec_from_stat_loc(ov_loc)
     bfv, bv = get_vec_from_stat_loc(bv_loc)
 
-    A[:, ncnt] = ofv+bfv
-    ncnt += 1
+    filter_vec_list.append(ofv+bfv)
     vec_list.append(ov+bv)
 
-logging.info("Regression analysis is ongoing...")
-
-# A = np.ascontiguousarray(np.vstack(filter_vec_list).T)
+A = np.vstack(filter_vec_list).T
 B = main_filter_vec
 
-weights = fe.fnnls(A, B)
+# Run julia for NNLS
+jl.seval('using NonNegLeastSquares, LinearAlgebra')
+jl.BLAS.set_num_threads(THREAD)
+A_jl = jl.convert(jl.Matrix[jl.Float64], A)
+B_jl = jl.convert(jl.Vector[jl.Float64], B)
+
+logging.info("Regression analysis is ongoing...")
+weights = jl.vec(jl.nonneg_lsq(A_jl, B_jl, alg=jl.Symbol("fnnls")))
+
+# Free julia memory
+A_jl = jl.nothing
+B_jl = jl.nothing
+jl.GC.gc()
 
 error = np.linalg.norm(A @ weights - B)
 b_norm = np.linalg.norm(B)
