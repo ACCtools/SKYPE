@@ -646,6 +646,13 @@ for data in tqdm(paf_ans_list, desc='Recover depth from seperated paths',
 
     tot_loc_list.append(l)
 
+raw_path_list = []
+for i in tot_loc_list:
+    il = i.split("/")
+    cnt = il[-1].split('.')[0]
+    chr2chr = il[-2]
+    raw_path_list.append(f'{PREFIX}/00_raw/{chr2chr}/{cnt}.index.txt')
+
 for i in tqdm(range(1, fclen//4 + 1), desc='Parse coverage from forward-directed outlier contig gz files', disable=not sys.stdout.isatty() and not args.progress):
     bv_paf_loc = front_contig_path+f"{i}_base.paf"
     ov_loc = front_contig_path+f"{i}.win.stat.gz"
@@ -656,6 +663,7 @@ for i in tqdm(range(1, fclen//4 + 1), desc='Parse coverage from forward-directed
 
     filter_vec_list.append(ofv-bfv)
     vec_list.append(ov-bv)
+    tot_loc_list.append(bv_paf_loc)
 
 for i in tqdm(range(1, bclen//4 + 1), desc='Parse coverage from backward-directed outlier contig gz files', disable=not sys.stdout.isatty() and not args.progress):
     bv_paf_loc = back_contig_path+f"{i}_base.paf"
@@ -667,6 +675,7 @@ for i in tqdm(range(1, bclen//4 + 1), desc='Parse coverage from backward-directe
 
     filter_vec_list.append(ofv+bfv)
     vec_list.append(ov+bv)
+    tot_loc_list.append(bv_paf_loc)
 
 A = np.vstack(filter_vec_list).T
 B = main_filter_vec
@@ -685,6 +694,7 @@ A_jl = jl.nothing
 B_jl = jl.nothing
 jl.GC.gc()
 
+weights = np.asarray(weights)
 error = np.linalg.norm(A @ weights - B)
 b_norm = np.linalg.norm(B)
 
@@ -693,7 +703,8 @@ logging.info(f'Norm error : {round(error / b_norm, 4)}')
 
 logging.info("Forming result images...")
 
-
+with open(f'{PREFIX}/depth_weight.pkl', 'wb') as f:
+    pkl.dump((tot_loc_list, weights), f)
 # Calculate noise
 
 grouped_data = defaultdict(lambda: {"positions": [], "values": []})
@@ -814,13 +825,6 @@ reverse_nclose_dict = dict(zip(range(len(nclose_list)), nclose_list))
 nclose_str_pos = dict()
 for k, v in reverse_nclose_dict.items():
     nclose_str_pos[k] = (contig_data[v[0]][CHR_STR], contig_data[v[1]][CHR_STR])
-
-raw_path_list = []
-for i in tot_loc_list:
-    il = i.split("/")
-    cnt = il[-1].split('.')[0]
-    chr2chr = il[-2]
-    raw_path_list.append(f'{PREFIX}/00_raw/{chr2chr}/{cnt}.index.txt')
 
 telo_node_set = set()
 
