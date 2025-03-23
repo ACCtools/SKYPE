@@ -1,6 +1,7 @@
 import numpy as np
 import pandas as pd
 import seaborn as sns
+import fnnlsEigen as fe 
 import matplotlib.pyplot as plt
 import matplotlib as mpl
 import pickle as pkl
@@ -24,7 +25,6 @@ from pycirclize.track import Track
 from collections import defaultdict
 from collections import Counter
 
-from juliacall import Main as jl
 
 logging.basicConfig(
     format='%(asctime)s %(levelname)s:%(message)s',
@@ -513,12 +513,13 @@ df = df.query('chr != "chrM"')
 meandepth = np.median(df['meandepth'])
 chr_order_list = extract_groups(list(df['chr']))
 
-chr_st_list = []
-chr_flag_list = []
 chr_filt_st_list = []
+chr_no_filt_st_list = []
 
-for l in df.itertuples(index=False):
-    chr_st_list.append((l.chr, l.st))
+chr_filt_idx_list = []
+chr_no_filt_idx_list = []
+
+for ind, l in enumerate(df.itertuples(index=False)):
     flag = True
     if l.meandepth > ABS_MAX_COVERAGE_RATIO * meandepth:
         flag = False
@@ -530,10 +531,16 @@ for l in df.itertuples(index=False):
                     break
         if not flag:
             break
+    
     if flag:
         chr_filt_st_list.append((l.chr, l.st))
-    
-    chr_flag_list.append(flag)
+        chr_filt_idx_list.append(ind)
+    else:
+        chr_no_filt_st_list.append((l.chr, l.st))
+        chr_no_filt_idx_list.append(ind)
+
+
+filter_len = len(chr_filt_st_list)
 
 def get_vec_from_stat_loc(stat_loc_):
     df = pd.read_csv(stat_loc_, compression='gzip', comment='#', sep='\t', names=['chr', 'st', 'nd', 'length', 'covsite', 'totaldepth', 'cov', 'meandepth'])
@@ -543,21 +550,20 @@ def get_vec_from_stat_loc(stat_loc_):
     for l in df.itertuples(index=False):
          chr_st_data[(l.chr, l.st)] = l.meandepth
     
-    fv = []
-    for cs in chr_filt_st_list:
-        if cs not in chr_st_data:
-            fv.append(0)
-        else:
-            fv.append(chr_st_data[cs])
-    
     v = []
-    for cs in chr_st_list:
+    for cs in chr_filt_st_list:
         if cs not in chr_st_data:
             v.append(0)
         else:
             v.append(chr_st_data[cs])
     
-    return np.asarray(fv, dtype=np.float32), np.asarray(v, dtype=np.float32)
+    for cs in chr_no_filt_st_list:
+        if cs not in chr_st_data:
+            v.append(0)
+        else:
+            v.append(chr_st_data[cs])
+    
+    return np.asarray(v, dtype=np.float32)
 
 def get_vec_from_ki(ki):
     stat_loc_ = f'{output_folder}/{ki}.win.stat.gz'
@@ -568,42 +574,39 @@ def get_vec_from_ki(ki):
     for l in df.itertuples(index=False):
          chr_st_data[(l.chr, l.st)] = l.meandepth
     
-    fv = []
-    for cs in chr_filt_st_list:
-        if cs not in chr_st_data:
-            fv.append(0)
-        else:
-            fv.append(chr_st_data[cs])
-    
     v = []
-    for cs in chr_st_list:
+    for cs in chr_filt_st_list:
         if cs not in chr_st_data:
             v.append(0)
         else:
             v.append(chr_st_data[cs])
     
-    return ki, np.asarray(fv, dtype=np.float32), np.asarray(v, dtype=np.float32)
+    for cs in chr_no_filt_st_list:
+        if cs not in chr_st_data:
+            v.append(0)
+        else:
+            v.append(chr_st_data[cs])
+    
+    return ki, np.asarray(v, dtype=np.float32)
 
 PATH_FILE_FOLDER = f"{PREFIX}/20_depth"
 chr_chr_folder_path = sorted(glob.glob(PATH_FILE_FOLDER+"/*"))
 
-main_filter_vec, main_vec = get_vec_from_stat_loc(main_stat_loc)
+main_vec = get_vec_from_stat_loc(main_stat_loc)
+B = main_vec
 
 def get_vec_from_file(data):
     final_paf_path, key_int_list = data
     ki = key_int_list[0]
     
-    fv, v = vec_dict[ki]
-    fv = np.copy(fv)
+    v = vec_dict[ki]
     v = np.copy(v)
 
     for ki in key_int_list[1:]:
-        tfv, tv = vec_dict[ki]
-
-        fv += tfv
+        tv = vec_dict[ki]
         v += tv
         
-    return fv, v, final_paf_path
+    return v, final_paf_path
 
 with open(f'{PREFIX}/contig_pat_vec_data.pkl', 'rb') as f:
     paf_ans_list, key_list = pkl.load(f)
@@ -616,29 +619,28 @@ with ProcessPoolExecutor(max_workers=THREAD) as executor:
         futures.append(executor.submit(get_vec_from_ki, ki))
     for future in tqdm(as_completed(futures), total=len(futures), desc='Parse depth for each seperated paths\' gz file',
                        disable=not sys.stdout.isatty() and not args.progress):
-        i, fv, v = future.result()
-        vec_dict[i] = (fv, v)
+        i, v = future.result()
+        vec_dict[i] = v
 
 fclen = len(glob.glob(front_contig_path+"*"))
 bclen = len(glob.glob(back_contig_path+"*"))
 
-# m = np.shape(main_filter_vec)[0]
-# n = len(paf_ans_list) + fclen//4 + bclen//4
-# ncnt = 0
+m = np.shape(main_vec)[0]
+n = len(paf_ans_list) + fclen//4 + bclen//4
+ncnt = 0
 
-# A = np.zeros((m, n), dtype=np.float32)
+A = np.zeros((m, n), dtype=np.float32)
 
 filter_vec_list = []
-vec_list = []
 tot_loc_list = []
 bv_loc_list = []
 
 for data in tqdm(paf_ans_list, desc='Recover depth from seperated paths',
                  disable=not sys.stdout.isatty() and not args.progress):
-    fv, v, l = get_vec_from_file(data)
+    v, l = get_vec_from_file(data)
 
-    filter_vec_list.append(fv)
-    vec_list.append(v)
+    A[:, ncnt] = v
+    ncnt += 1
 
     tot_loc_list.append(l)
 
@@ -654,11 +656,11 @@ for i in tqdm(range(1, fclen//4 + 1), desc='Parse coverage from forward-directed
     ov_loc = front_contig_path+f"{i}.win.stat.gz"
     bv_loc = front_contig_path+f"{i}_base.win.stat.gz"
     bv_loc_list.append(bv_paf_loc)
-    ofv, ov = get_vec_from_stat_loc(ov_loc)
-    bfv, bv = get_vec_from_stat_loc(bv_loc)
+    ov = get_vec_from_stat_loc(ov_loc)
+    bv = get_vec_from_stat_loc(bv_loc)
 
-    filter_vec_list.append(ofv-bfv)
-    vec_list.append(ov-bv)
+    A[:, ncnt] = ov-bv
+    ncnt += 1
     tot_loc_list.append(bv_paf_loc)
 
 for i in tqdm(range(1, bclen//4 + 1), desc='Parse coverage from backward-directed outlier contig gz files', disable=not sys.stdout.isatty() and not args.progress):
@@ -666,35 +668,19 @@ for i in tqdm(range(1, bclen//4 + 1), desc='Parse coverage from backward-directe
     ov_loc = back_contig_path+f"{i}.win.stat.gz"
     bv_loc = back_contig_path+f"{i}_base.win.stat.gz"
     bv_loc_list.append(bv_paf_loc)
-    ofv, ov = get_vec_from_stat_loc(ov_loc)
-    bfv, bv = get_vec_from_stat_loc(bv_loc)
+    ov = get_vec_from_stat_loc(ov_loc)
+    bv = get_vec_from_stat_loc(bv_loc)
 
-    filter_vec_list.append(ofv+bfv)
-    vec_list.append(ov+bv)
+    A[:, ncnt] = ov+bv
+    ncnt += 1
     tot_loc_list.append(bv_paf_loc)
-
-A = np.vstack(filter_vec_list).T
-B = main_filter_vec
 
 filter_vec_list = None
 
-# Run julia for NNLS
-jl.seval('using NonNegLeastSquares, LinearAlgebra')
-jl.BLAS.set_num_threads(THREAD)
-A_jl = jl.convert(jl.Matrix[jl.Float32], A)
-B_jl = jl.convert(jl.Vector[jl.Float32], B)
+weights = fe.fnnlsf(A[:filter_len, :], B[:filter_len])
 
-logging.info("Regression analysis is ongoing...")
-weights = jl.vec(jl.nonneg_lsq(A_jl, B_jl, alg=jl.Symbol("fnnls")))
-
-# Free julia memory
-A_jl = jl.nothing
-B_jl = jl.nothing
-jl.GC.gc()
-
-weights = np.asarray(weights)
-error = np.linalg.norm(A @ weights - B)
-b_norm = np.linalg.norm(B)
+error = np.linalg.norm(A[:filter_len, :] @ weights - B[:filter_len]).item() 
+b_norm = np.linalg.norm(B[:filter_len]).item() 
 
 logging.info(f'Error : {round(error, 4)}')
 logging.info(f'Norm error : {round(error / b_norm, 4)}')
@@ -703,10 +689,11 @@ logging.info("Forming result images...")
 
 with open(f'{PREFIX}/depth_weight.pkl', 'wb') as f:
     pkl.dump((tot_loc_list, weights), f)
+
 # Calculate noise
 
 grouped_data = defaultdict(lambda: {"positions": [], "values": []})
-for i, (chrom, pos) in enumerate(chr_st_list):
+for i, (chrom, pos) in enumerate(chr_filt_st_list + chr_no_filt_st_list):
     grouped_data[chrom]["positions"].append(pos)
     grouped_data[chrom]["values"].append(main_vec[i])
 
@@ -734,16 +721,16 @@ for chrom, data in grouped_data.items():
 noise_array = np.hstack(filtered_values_list)
 amplitude = np.std(noise_array)
 
-A = np.vstack(vec_list)
-B = main_vec
+# A = np.vstack(vec_list)
+# B = main_vec
 
-smooth_B = rebin_dataframe_B(df, 10)
-predicted_B = np.maximum(A.T.dot(weights), 0)
+smooth_B = rebin_dataframe_B(df, 10)[chr_filt_idx_list + chr_no_filt_idx_list]
+predicted_B = np.maximum(A @ weights, 0)
 diff = predicted_B - smooth_B
 
 threshold = amplitude * scipy.stats.norm.ppf(0.975)
 miss_B = np.abs(diff) > threshold
-over_B = ~np.asarray(chr_flag_list)
+over_B = np.asarray([False] * len(chr_filt_st_list) + [True] * len(chr_no_filt_st_list))
 
 color_label = np.ones_like(B)
 color_label[miss_B] = 3
@@ -781,13 +768,19 @@ for sector in circos.sectors:
 
     tchr_st_list = []
     tchr_idx_list = []
-    for i, v in enumerate(chr_st_list):
+    for i, v in enumerate(chr_filt_st_list + chr_no_filt_st_list):
         if v[0] == sector.name:
             tchr_st_list.append(v[1])
             tchr_idx_list.append(i)
     
-    cn_track = sector.add_track((60, 93))
+    tchr_st_list = np.array(tchr_st_list)
+    tchr_idx_list = np.array(tchr_idx_list)
 
+    sort_ind = np.argsort(tchr_st_list)
+    tchr_st_list = tchr_st_list[sort_ind]
+    tchr_idx_list = tchr_idx_list[sort_ind]
+
+    cn_track = sector.add_track((60, 93))
     cn_track.axis()
     cn_track.grid(y_grid_num=7, zorder=-2)
     cn_track.line([0, max(tdf['st'])], [0.5 * meandepth] * 2, color='blue', vmax=ABS_MAX_COVERAGE_RATIO * meandepth, zorder=-1, alpha=0.5)
