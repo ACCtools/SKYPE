@@ -703,7 +703,7 @@ def get_paf_run(paf_loc):
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, capture_output=False)
     
     if result.returncode != 0:
-        raise Exception("Pandepth failed!")
+        raise Exception(f"{paf_loc} : Pandepth failed!")
 
 def get_final_paf_name_from_index(index_file_path):
     final_paf_list = index_file_path.split('/')

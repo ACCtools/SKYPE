@@ -57,8 +57,8 @@ CHROMOSOME_COUNT = 23
 K = 1000
 CHUKJI_LIMIT = -1
 BND_CONTIG_BOUND = 0.1
-TOT_PATH_LIMIT = 200*K
-PAT_PATH_LIMIT = 5*K
+TOT_PATH_LIMIT = 5000*K
+PAT_PATH_LIMIT = 10*K
 
 CHR_CHANGE_LIMIT_PREFIX = 5
 DIR_CHANGE_LIMIT = 1
@@ -1455,7 +1455,6 @@ for i in range(contig_data_size, contig_data_size + 2*CHROMOSOME_COUNT):
 def init_worker(shared_graph):
     global G
     G = shared_graph
-
 
 THREAD=args.thread
 

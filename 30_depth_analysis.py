@@ -1,7 +1,6 @@
 import numpy as np
 import pandas as pd
 import seaborn as sns
-import fnnlsEigen as fe 
 import matplotlib.pyplot as plt
 import matplotlib as mpl
 import pickle as pkl
@@ -25,13 +24,15 @@ from pycirclize.track import Track
 from collections import defaultdict
 from collections import Counter
 
+from juliacall import Main as jl
+
 
 logging.basicConfig(
     format='%(asctime)s %(levelname)s:%(message)s',
     level=logging.INFO,
     datefmt='%m/%d/%Y %I:%M:%S %p',
 )
-logging.info("22_depth_analysis start")
+logging.info("30_depth_analysis start")
 
 # np.seterr(invalid='ignore')
 
@@ -64,9 +65,6 @@ MAX_PATH_CNT = 100
 CHROMOSOME_COUNT = 23
 DIR_FOR = 1
 TELOMERE_EXPANSION = 5 * K
-
-def test():
-    return 'adasd'
 
 def import_index_path(file_path : str) -> list:
     index_file = open(file_path, "r")
@@ -659,7 +657,13 @@ for i in tqdm(range(1, fclen//4 + 1), desc='Parse coverage from forward-directed
     ov = get_vec_from_stat_loc(ov_loc)
     bv = get_vec_from_stat_loc(bv_loc)
 
-    A[:, ncnt] = ov-bv
+    vec = ov-bv
+    mi = np.min(vec)
+    if mi >= 0:
+        A[:, ncnt] = vec
+    else:
+        # TODO: add flag
+        A[:, ncnt] = vec - mi
     ncnt += 1
     tot_loc_list.append(bv_paf_loc)
 
@@ -675,15 +679,13 @@ for i in tqdm(range(1, bclen//4 + 1), desc='Parse coverage from backward-directe
     ncnt += 1
     tot_loc_list.append(bv_paf_loc)
 
-filter_vec_list = None
-
-weights = fe.fnnlsf(A[:filter_len, :], B[:filter_len])
+weights = np.load(f'{PREFIX}/weight.npy')
 
 error = np.linalg.norm(A[:filter_len, :] @ weights - B[:filter_len]).item() 
 b_norm = np.linalg.norm(B[:filter_len]).item() 
 
-logging.info(f'Error : {round(error, 4)}')
-logging.info(f'Norm error : {round(error / b_norm, 4)}')
+# logging.info(f'Error : {round(error, 4)}')
+# logging.info(f'Norm error : {round(error / b_norm, 4)}')
 
 logging.info("Forming result images...")
 
