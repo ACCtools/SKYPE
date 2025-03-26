@@ -3,9 +3,8 @@
     "packages": {
         "SINNLS": {
             "uuid": "993b1ac0-07ef-437f-99f0-2b4a2275ea96",
-            "path": "/home/hyunwoo/61g_nnls/SINNLS",
-            "version": "0.1.1",
-            "dev": "true"
+            "url": "https://github.com/ACCtools/SINNLS.jl",
+            "version": "0.1.2"
         },
         "JLD2": {
             "uuid": "033835bb-8acc-5ee8-8aae-3f567f8a3819",
