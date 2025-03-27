@@ -33,12 +33,13 @@ THREAD = args.thread
 # jl.seval('using MKL')
 
 # Julia openblas setting
-jl.seval("using JLD2, LinearAlgebra, SINNLS")
+jl.seval("using HDF5, LinearAlgebra, SINNLS")
 jl.BLAS.set_num_threads(min(THREAD, psutil.cpu_count(logical=False)))
 jl.seval("""
 function load_nnls_array(filename::String)
-    file = jldopen(filename, "r")
-    return Matrix{Float32}(file["A"]), Vector{Float32}(file["B"])
+    h5open(filename, "r") do file
+        return read(file["A"]), read(file["B"])
+    end
 end
 """)
 

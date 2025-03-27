@@ -5,6 +5,7 @@ import matplotlib.pyplot as plt
 import matplotlib as mpl
 import pickle as pkl
 
+import os
 import ast
 import h5py
 import logging
@@ -13,10 +14,7 @@ import collections
 import scipy.stats
 import glob
 
-from tqdm import tqdm
 from scipy.signal import butter, filtfilt
-from concurrent.futures import ProcessPoolExecutor, as_completed
-
 from pycirclize import Circos
 from matplotlib.lines import Line2D
 from matplotlib.projections.polar import PolarAxes
@@ -592,6 +590,7 @@ chr_chr_folder_path = sorted(glob.glob(PATH_FILE_FOLDER+"/*"))
 with h5py.File(f'{PREFIX}/matrix.h5', 'r') as hf:
     A = np.hstack([hf['A'][:], hf['A_fail'][:]]).T
     B = np.hstack([hf['B'][:], hf['B_fail'][:]])
+os.remove(f'{PREFIX}/matrix.h5')
 
 with open(f'{PREFIX}/contig_pat_vec_data.pkl', 'rb') as f:
     paf_ans_list, key_list = pkl.load(f)
