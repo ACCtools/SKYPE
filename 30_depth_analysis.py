@@ -6,7 +6,7 @@ import matplotlib as mpl
 import pickle as pkl
 
 import ast
-import sys
+import h5py
 import logging
 import argparse
 import collections
@@ -537,7 +537,6 @@ for ind, l in enumerate(df.itertuples(index=False)):
         chr_no_filt_st_list.append((l.chr, l.st))
         chr_no_filt_idx_list.append(ind)
 
-
 filter_len = len(chr_filt_st_list)
 
 def get_vec_from_stat_loc(stat_loc_):
@@ -590,57 +589,23 @@ def get_vec_from_ki(ki):
 PATH_FILE_FOLDER = f"{PREFIX}/20_depth"
 chr_chr_folder_path = sorted(glob.glob(PATH_FILE_FOLDER+"/*"))
 
-main_vec = get_vec_from_stat_loc(main_stat_loc)
-B = main_vec
-
-def get_vec_from_file(data):
-    final_paf_path, key_int_list = data
-    ki = key_int_list[0]
-    
-    v = vec_dict[ki]
-    v = np.copy(v)
-
-    for ki in key_int_list[1:]:
-        tv = vec_dict[ki]
-        v += tv
-        
-    return v, final_paf_path
+with h5py.File(f'{PREFIX}/matrix.h5', 'r') as hf:
+    A = np.hstack([hf['A'][:], hf['A_fail'][:]]).T
+    B = np.hstack([hf['B'][:], hf['B_fail'][:]])
 
 with open(f'{PREFIX}/contig_pat_vec_data.pkl', 'rb') as f:
     paf_ans_list, key_list = pkl.load(f)
 
-vec_dict = dict()
-output_folder = f'{PREFIX}/21_pat_depth'
-with ProcessPoolExecutor(max_workers=THREAD) as executor:
-    futures = []
-    for ki in key_list:
-        futures.append(executor.submit(get_vec_from_ki, ki))
-    for future in tqdm(as_completed(futures), total=len(futures), desc='Parse depth for each seperated paths\' gz file',
-                       disable=not sys.stdout.isatty() and not args.progress):
-        i, v = future.result()
-        vec_dict[i] = v
-
 fclen = len(glob.glob(front_contig_path+"*"))
 bclen = len(glob.glob(back_contig_path+"*"))
 
-m = np.shape(main_vec)[0]
-n = len(paf_ans_list) + fclen//4 + bclen//4
-ncnt = 0
-
-A = np.zeros((m, n), dtype=np.float32)
 
 filter_vec_list = []
 tot_loc_list = []
 bv_loc_list = []
 
-for data in tqdm(paf_ans_list, desc='Recover depth from seperated paths',
-                 disable=not sys.stdout.isatty() and not args.progress):
-    v, l = get_vec_from_file(data)
-
-    A[:, ncnt] = v
-    ncnt += 1
-
-    tot_loc_list.append(l)
+for loc, ll in paf_ans_list:
+    tot_loc_list.append(loc)
 
 raw_path_list = []
 for i in tot_loc_list:
@@ -649,43 +614,15 @@ for i in tot_loc_list:
     chr2chr = il[-2]
     raw_path_list.append(f'{PREFIX}/00_raw/{chr2chr}/{cnt}.index.txt')
 
-for i in tqdm(range(1, fclen//4 + 1), desc='Parse coverage from forward-directed outlier contig gz files', disable=not sys.stdout.isatty() and not args.progress):
+for i in range(1, fclen//4 + 1):
     bv_paf_loc = front_contig_path+f"{i}_base.paf"
-    ov_loc = front_contig_path+f"{i}.win.stat.gz"
-    bv_loc = front_contig_path+f"{i}_base.win.stat.gz"
-    bv_loc_list.append(bv_paf_loc)
-    ov = get_vec_from_stat_loc(ov_loc)
-    bv = get_vec_from_stat_loc(bv_loc)
-
-    vec = ov-bv
-    mi = np.min(vec)
-    if mi >= 0:
-        A[:, ncnt] = vec
-    else:
-        # TODO: add flag
-        A[:, ncnt] = vec - mi
-    ncnt += 1
     tot_loc_list.append(bv_paf_loc)
 
-for i in tqdm(range(1, bclen//4 + 1), desc='Parse coverage from backward-directed outlier contig gz files', disable=not sys.stdout.isatty() and not args.progress):
+for i in range(1, bclen//4 + 1):
     bv_paf_loc = back_contig_path+f"{i}_base.paf"
-    ov_loc = back_contig_path+f"{i}.win.stat.gz"
-    bv_loc = back_contig_path+f"{i}_base.win.stat.gz"
-    bv_loc_list.append(bv_paf_loc)
-    ov = get_vec_from_stat_loc(ov_loc)
-    bv = get_vec_from_stat_loc(bv_loc)
-
-    A[:, ncnt] = ov+bv
-    ncnt += 1
     tot_loc_list.append(bv_paf_loc)
 
 weights = np.load(f'{PREFIX}/weight.npy')
-
-error = np.linalg.norm(A[:filter_len, :] @ weights - B[:filter_len]).item() 
-b_norm = np.linalg.norm(B[:filter_len]).item() 
-
-# logging.info(f'Error : {round(error, 4)}')
-# logging.info(f'Norm error : {round(error / b_norm, 4)}')
 
 logging.info("Forming result images...")
 
@@ -697,7 +634,7 @@ with open(f'{PREFIX}/depth_weight.pkl', 'wb') as f:
 grouped_data = defaultdict(lambda: {"positions": [], "values": []})
 for i, (chrom, pos) in enumerate(chr_filt_st_list + chr_no_filt_st_list):
     grouped_data[chrom]["positions"].append(pos)
-    grouped_data[chrom]["values"].append(main_vec[i])
+    grouped_data[chrom]["values"].append(B[i])
 
 # 필터링 파라미터 (데이터 특성에 따라 조정)
 cutoff_frequency = 0.1  # 컷오프 주파수 (예시 값)

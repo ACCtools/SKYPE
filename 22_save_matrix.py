@@ -484,3 +484,5 @@ for i in tqdm(range(1, bclen//4 + 1), desc='Parse coverage from backward-directe
 with h5py.File(f'{PREFIX}/matrix.h5', 'w') as hf:
     hf.create_dataset('A', data=A[:filter_len, :].T)
     hf.create_dataset('B', data=B[:filter_len])
+    hf.create_dataset('A_fail', data=A[filter_len:, :].T)
+    hf.create_dataset('B_fail', data=B[filter_len:])
