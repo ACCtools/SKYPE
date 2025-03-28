@@ -588,8 +588,11 @@ PATH_FILE_FOLDER = f"{PREFIX}/20_depth"
 chr_chr_folder_path = sorted(glob.glob(PATH_FILE_FOLDER+"/*"))
 
 with h5py.File(f'{PREFIX}/matrix.h5', 'r') as hf:
-    A = np.hstack([hf['A'][:], hf['A_fail'][:]]).T
+    A = hf['A'][:]
+    A_fail = hf['A_fail'][:]
+
     B = np.hstack([hf['B'][:], hf['B_fail'][:]])
+
 os.remove(f'{PREFIX}/matrix.h5')
 
 with open(f'{PREFIX}/contig_pat_vec_data.pkl', 'rb') as f:
@@ -659,11 +662,8 @@ for chrom, data in grouped_data.items():
 noise_array = np.hstack(filtered_values_list)
 amplitude = np.std(noise_array)
 
-# A = np.vstack(vec_list)
-# B = main_vec
-
 smooth_B = rebin_dataframe_B(df, 10)[chr_filt_idx_list + chr_no_filt_idx_list]
-predicted_B = np.maximum(A @ weights, 0)
+predicted_B = np.maximum(np.load(f'{PREFIX}/predict_B.npy'), 0)
 diff = predicted_B - smooth_B
 
 threshold = amplitude * scipy.stats.norm.ppf(0.975)

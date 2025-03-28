@@ -41,6 +41,12 @@ function load_nnls_array(filename::String)
         return read(file["A"]), read(file["B"])
     end
 end
+         
+function load_fail_array(filename::String)
+    h5open(filename, "r") do file
+        return read(file["A_fail"])
+    end
+end
 """)
 
 A_jl, B_jl = jl.load_nnls_array(f'{PREFIX}/matrix.h5')
@@ -48,14 +54,24 @@ A_jl, B_jl = jl.load_nnls_array(f'{PREFIX}/matrix.h5')
 logging.info('Regression analysis is ongoing...')
 H = 3600.0
 weights_jl = jl.vec(jl.SI_NNLS(A_jl, B_jl,
-                               total_time=12 * H,
+                               total_time=24 * H,
                                epi=5))
 
-error = jl.norm(A_jl * weights_jl - B_jl)
+predict_suc_B_jl = A_jl * weights_jl
+error = jl.norm(predict_suc_B_jl - B_jl)
 b_norm = jl.norm(B_jl)
+
+A_jl = jl.nothing
+jl.GC.gc()
 
 logging.info(f'Error : {round(error, 4)}')
 logging.info(f'Norm error : {round(error / b_norm, 4)}')
 
+A_fail_jl = jl.load_fail_array(f'{PREFIX}/matrix.h5')
+predict_B_jl = jl.vcat(predict_suc_B_jl, A_fail_jl * weights_jl)
+
 weights = np.asarray(weights_jl)
 np.save(f'{PREFIX}/weight.npy', weights)
+
+predict_B = np.asarray(predict_B_jl)
+np.save(f'{PREFIX}/predict_B.npy', predict_B)
