@@ -180,19 +180,8 @@ def extract_bnd_contig(contig_data : list) -> set:
     bnd_contig = set()
     while s<contig_data_size:
         e = contig_data[s][CTG_ENDND]
-        if contig_data[s][CTG_TYP] in set([1, 2]): # 2 넣기
+        if contig_data[s][CTG_TYP] in {1, 2}: # 2 넣기
             bnd_contig.add(contig_data[s][CTG_NAM])
-        # elif contig_data[s][CTG_TYP] == 4: # 4 빼기
-        #     if contig_data[s][CTG_DIR] == '+':
-        #         estimated_ref_len = contig_data[e][CHR_END] - contig_data[s][CHR_STR]
-        #     else:
-        #         estimated_ref_len = contig_data[s][CHR_END] - contig_data[e][CHR_STR]
-        #     total_ref_len = 0
-        #     for i in range(s, e):
-        #         total_ref_len += contig_data[i][CHR_END] - contig_data[i][CHR_STR]
-        #     if estimated_ref_len/total_ref_len < 0 \
-        #     and abs(estimated_ref_len) > CHUKJI_LIMIT:
-        #         bnd_contig.add(contig_data[s][CTG_NAM])
         s = e+1
     return bnd_contig
 
