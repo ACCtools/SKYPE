@@ -1167,6 +1167,7 @@ for node in bnd_connected_graph:
 
 key_cnt = 0
 key2int = dict()
+int2key = dict()
 
 chr_chr_folder_path = list(glob.glob(PREFIX+"/00_raw/*"))
 final_paf_vec_data = []
@@ -1187,6 +1188,7 @@ for _, key_list in index_data_list:
     for key in key_list:
         if key not in key2int:
             key2int[key] = key_cnt
+            int2key[key_cnt] = key
             key_cnt += 1
 
 output_folder = f'{PREFIX}/21_pat_depth'
@@ -1223,4 +1225,4 @@ with ProcessPoolExecutor(max_workers=THREAD) as executor:
         future.result()
 
 with open(f'{PREFIX}/contig_pat_vec_data.pkl', 'wb') as f:
-    pkl.dump((paf_ans_list, list(key2int.values())), f)
+    pkl.dump((paf_ans_list, list(key2int.values()), int2key), f)

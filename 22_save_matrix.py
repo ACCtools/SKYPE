@@ -420,7 +420,7 @@ def get_vec_from_file(data):
     return v, final_paf_path
 
 with open(f'{PREFIX}/contig_pat_vec_data.pkl', 'rb') as f:
-    paf_ans_list, key_list = pkl.load(f)
+    paf_ans_list, key_list, int2key = pkl.load(f)
 
 vec_dict = dict()
 output_folder = f'{PREFIX}/21_pat_depth'

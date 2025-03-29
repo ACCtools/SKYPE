@@ -596,7 +596,7 @@ with h5py.File(f'{PREFIX}/matrix.h5', 'r') as hf:
 os.remove(f'{PREFIX}/matrix.h5')
 
 with open(f'{PREFIX}/contig_pat_vec_data.pkl', 'rb') as f:
-    paf_ans_list, key_list = pkl.load(f)
+    paf_ans_list, key_list, int2key = pkl.load(f)
 
 fclen = len(glob.glob(front_contig_path+"*"))
 bclen = len(glob.glob(back_contig_path+"*"))
@@ -845,7 +845,7 @@ for i, (bnd_loc1, bnd_loc2, cn, is_vir) in enumerate(bnd_cn_data):
 
 circos.colorbar(vmin=0, vmax=2, bounds=(1.01 + off, 0.825, 0.02, 0.1), cmap=cmap,
                 label='Breakend CN', orientation='vertical',
-                colorbar_kws=dict(format=mpl.ticker.FixedFormatter(['0', 'N', '2N']),
+                colorbar_kws=dict(format=mpl.ticker.FixedFormatter(['0', '2N', 'N']),
                                   ticks=mpl.ticker.FixedLocator([0, 1, 2])),
                 label_kws=dict(fontsize=9,),
                 tick_kws=dict(labelsize=8,))
