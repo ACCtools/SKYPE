@@ -196,7 +196,8 @@ def calculate_single_contig_ref_ratio(contig_data : list) -> float:
     return estimated_ref_len/total_ref_len, total_ref_len
 
 def extract_nclose_node(contig_data : list, bnd_contig : set, repeat_contig_name : set, \
-                        censat_contig_name : set, repeat_censat_data : dict, ORIGNAL_PAF_LOC_LIST : list, telo_set : set) -> dict:
+                        censat_contig_name : set, repeat_censat_data : dict, ORIGNAL_PAF_LOC_LIST : list, \
+                        telo_set : set, chr_len : dict) -> dict:
     s = 0
     fake_bnd = {}
     contig_data_size = len(contig_data)
@@ -335,6 +336,18 @@ def extract_nclose_node(contig_data : list, bnd_contig : set, repeat_contig_name
                 for nclose in nclose_list:
                     st = nclose[0]
                     ed = nclose[2]
+                    nclose_front_edgecensat = False
+                    nclose_back_edgecensat = False
+                    for censat_ref_range in repeat_censat_data[contig_data[st][CHR_NAM]]:
+                        if inclusive_checker(censat_ref_range, (contig_data[st][CHR_STR], contig_data[st][CHR_END])):
+                            if censat_ref_range[0] < K or censat_ref_range[1] > chr_len[contig_data[st][CHR_NAM]]-K:
+                                nclose_front_edgecensat = True
+                    for censat_ref_range in repeat_censat_data[contig_data[ed][CHR_NAM]]:
+                        if inclusive_checker(censat_ref_range, (contig_data[ed][CHR_STR], contig_data[ed][CHR_END])):
+                            if censat_ref_range[0] < K or censat_ref_range[1] > chr_len[contig_data[ed][CHR_NAM]]-K:
+                                nclose_back_edgecensat = True
+                    if nclose_front_edgecensat and nclose_back_edgecensat:
+                        continue
                     st_chr = nclose[1]
                     ed_chr = nclose[3]
                     upd_contig_name = contig_data[st][CTG_NAM]  
@@ -934,7 +947,7 @@ bnd_contig = extract_bnd_contig(contig_data)
 
 # Type 1, 2, 4에 대해서 
 nclose_nodes, nclose_start_compress, nclose_end_compress, vctg_dict, all_nclose_comp = \
-    extract_nclose_node(contig_data, bnd_contig, rpt_con, rpt_censat_con, repeat_censat_data, ORIGNAL_PAF_LOC_LIST, telo_set)
+    extract_nclose_node(contig_data, bnd_contig, rpt_con, rpt_censat_con, repeat_censat_data, ORIGNAL_PAF_LOC_LIST, telo_set, chr_len)
 
 virtual_ordinary_contig = make_virtual_ord_ctg(contig_data, vctg_dict)
 with open(f"{PREFIX}/virtual_ordinary_contig.txt", "wt") as f:

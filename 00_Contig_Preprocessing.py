@@ -1076,6 +1076,9 @@ def find_breakend_centromere(repeat_censat_data : dict, chr_len : dict, df : pd.
         
         for rep in intervals:
             rep_start_0, rep_end_0 = rep  # 0-indexed 좌표
+
+            if rep_start_0 == 0 or rep_end_0 == chrom_length - 1:
+                continue
             
             final_weighted_ratio = -1
             final_left_weighted = -1
