@@ -52,9 +52,11 @@ end
 A_jl, B_jl = jl.load_nnls_array(f'{PREFIX}/matrix.h5')
 
 logging.info('Regression analysis is ongoing...')
+
 H = 3600.0
 weights_jl = jl.vec(jl.SI_NNLS(A_jl, B_jl,
                                total_time=24 * H,
+                               restart_ratio=0.8,
                                epi=5))
 
 predict_suc_B_jl = A_jl * weights_jl
