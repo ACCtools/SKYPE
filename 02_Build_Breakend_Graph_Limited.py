@@ -58,8 +58,8 @@ K = 1000
 M = 1000 * K
 CHUKJI_LIMIT = -1
 BND_CONTIG_BOUND = 0.1
-TOT_PATH_LIMIT = 5*M
-PAT_PATH_LIMIT = 10*K
+TOT_PATH_LIMIT = 500*K
+PAT_PATH_LIMIT = 5*K
 
 CHR_CHANGE_LIMIT_PREFIX = 5
 DIR_CHANGE_LIMIT = 1
@@ -346,8 +346,8 @@ def extract_nclose_node(contig_data : list, bnd_contig : set, repeat_contig_name
                         if inclusive_checker(censat_ref_range, (contig_data[ed][CHR_STR], contig_data[ed][CHR_END])):
                             if censat_ref_range[0] < K or censat_ref_range[1] > chr_len[contig_data[ed][CHR_NAM]]-K:
                                 nclose_back_edgecensat = True
-                    if nclose_front_edgecensat and nclose_back_edgecensat:
-                        continue
+                    # if nclose_front_edgecensat and nclose_back_edgecensat:
+                    #     continue
                     st_chr = nclose[1]
                     ed_chr = nclose[3]
                     upd_contig_name = contig_data[st][CTG_NAM]  
