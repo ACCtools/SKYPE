@@ -55,7 +55,6 @@ CTG_IN_TYPE = 1
 TEL_TYPE = 2
 
 MAJOR_BASELINE = 0.6
-CLIP_LENGTH = 10
 
 CHR_COLORS = {
     "chr1":  "#FFC000",
@@ -204,18 +203,18 @@ def plot_virtual_chromosome(ax, segments_data, cut_dict, label=None):
     # 전체 가상 염색체 길이 계산
     total_length = sum(seg_length for (_, seg_length) in segments)
     radius = width / 2.0
+    round_radius = min(radius, total_length / 4)
 
     # 전체 영역을 둥근 모서리로 클리핑할 패치 생성
     clip_patch = patches.FancyBboxPatch(
         (x_center - radius, 0),
         width,
         total_length,
-        boxstyle=f"round,pad=0,rounding_size={radius}",
+        boxstyle=f"round,pad=0,rounding_size={round_radius}",
         facecolor='none',
         edgecolor='none'
     )
-    if total_length > CLIP_LENGTH:
-        ax.add_patch(clip_patch)
+    ax.add_patch(clip_patch)
 
     # 각 segment를 누적해서 그리며, 경계가 바뀔 때마다 텍스트 추가
     current_y = 0
@@ -228,8 +227,7 @@ def plot_virtual_chromosome(ax, segments_data, cut_dict, label=None):
             facecolor=color,
             edgecolor='none'
         )
-        if total_length > CLIP_LENGTH:
-            rect.set_clip_path(clip_patch)
+        rect.set_clip_path(clip_patch)
         ax.add_patch(rect)
 
         current_y += seg_length
@@ -269,28 +267,16 @@ def plot_virtual_chromosome(ax, segments_data, cut_dict, label=None):
 
     
     mark_overlapping_texts_with_arrows(ax, text_obj_list, min_gap=5)
-    if total_length > CLIP_LENGTH:
-    # 바깥 테두리 그리기
-        outline_patch = patches.FancyBboxPatch(
-            (x_center - radius, 0),
-            width,
-            total_length,
-            boxstyle=f"round,pad=0,rounding_size={radius}",
-            facecolor='none',
-            edgecolor='black',
-            linewidth=1.2,
-            clip_on=False
-        )
-    else:
-        outline_patch = patches.FancyBboxPatch(
-            (x_center - radius, 0),
-            width,
-            total_length,
-            facecolor='none',
-            edgecolor='black',
-            linewidth=1.2,
-            clip_on=False
-        )
+    outline_patch = patches.FancyBboxPatch(
+        (x_center - radius, 0),
+        width,
+        total_length,
+        boxstyle=f"round,pad=0,rounding_size={round_radius}",
+        facecolor='none',
+        edgecolor='black',
+        linewidth=1.2,
+        clip_on=False
+    )
     ax.add_patch(outline_patch)
 
 
