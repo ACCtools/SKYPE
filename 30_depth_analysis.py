@@ -592,7 +592,6 @@ with h5py.File(f'{PREFIX}/matrix.h5', 'r') as hf:
     A_fail = hf['A_fail'][:]
 
     B = np.hstack([hf['B'][:], hf['B_fail'][:]])
-
 os.remove(f'{PREFIX}/matrix.h5')
 
 with open(f'{PREFIX}/contig_pat_vec_data.pkl', 'rb') as f:

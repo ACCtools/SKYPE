@@ -336,18 +336,21 @@ def extract_nclose_node(contig_data : list, bnd_contig : set, repeat_contig_name
                 for nclose in nclose_list:
                     st = nclose[0]
                     ed = nclose[2]
-                    nclose_front_edgecensat = False
-                    nclose_back_edgecensat = False
+                    nclose_front_const = 0
+                    nclose_back_const = 0
                     for censat_ref_range in repeat_censat_data[contig_data[st][CHR_NAM]]:
                         if inclusive_checker(censat_ref_range, (contig_data[st][CHR_STR], contig_data[st][CHR_END])):
+                            nclose_front_const = 1
                             if censat_ref_range[0] < K or censat_ref_range[1] > chr_len[contig_data[st][CHR_NAM]]-K:
-                                nclose_front_edgecensat = True
+                                nclose_front_const = 2
                     for censat_ref_range in repeat_censat_data[contig_data[ed][CHR_NAM]]:
                         if inclusive_checker(censat_ref_range, (contig_data[ed][CHR_STR], contig_data[ed][CHR_END])):
+                            nclose_back_const = 1
                             if censat_ref_range[0] < K or censat_ref_range[1] > chr_len[contig_data[ed][CHR_NAM]]-K:
-                                nclose_back_edgecensat = True
-                    # if nclose_front_edgecensat and nclose_back_edgecensat:
-                    #     continue
+                                nclose_back_const = 2
+                    if nclose_front_const + nclose_back_const >= 3:
+                        continue
+
                     st_chr = nclose[1]
                     ed_chr = nclose[3]
                     upd_contig_name = contig_data[st][CTG_NAM]  

@@ -57,7 +57,7 @@ H = 3600.0
 weights_jl = jl.vec(jl.SI_NNLS(A_jl, B_jl,
                                total_time=24 * H,
                                restart_ratio=0.8,
-                               epi=5))
+                               epi=2))
 
 predict_suc_B_jl = A_jl * weights_jl
 error = jl.norm(predict_suc_B_jl - B_jl)
