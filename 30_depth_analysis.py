@@ -844,7 +844,7 @@ for i, (bnd_loc1, bnd_loc2, cn, is_vir) in enumerate(bnd_cn_data):
 
 circos.colorbar(vmin=0, vmax=2, bounds=(1.01 + off, 0.825, 0.02, 0.1), cmap=cmap,
                 label='Breakend CN', orientation='vertical',
-                colorbar_kws=dict(format=mpl.ticker.FixedFormatter(['0', '2N', 'N']),
+                colorbar_kws=dict(format=mpl.ticker.FixedFormatter(['0', '2N', '4N']),
                                   ticks=mpl.ticker.FixedLocator([0, 1, 2])),
                 label_kws=dict(fontsize=9,),
                 tick_kws=dict(labelsize=8,))
