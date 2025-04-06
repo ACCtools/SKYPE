@@ -58,8 +58,11 @@ K = 1000
 M = 1000 * K
 CHUKJI_LIMIT = -1
 BND_CONTIG_BOUND = 0.1
-TOT_PATH_LIMIT = 500*K
-PAT_PATH_LIMIT = 5*K
+# TOT_PATH_LIMIT = 500*K
+# PAT_PATH_LIMIT = 5*K
+
+TOT_PATH_LIMIT = 5*M
+PAT_PATH_LIMIT = 10*K
 
 CHR_CHANGE_LIMIT_PREFIX = 5
 DIR_CHANGE_LIMIT = 1
@@ -896,9 +899,8 @@ parser.add_argument("--progress",
 
 args = parser.parse_args()
 
-# t = "python 02_Build_Breakend_Graph_Limited.py 20_acc_pipe/Caki-1.p/Caki-1.p.aln.paf.ppc.paf public_data/chm13v2.0.fa.fai public_data/chm13v2.0_censat_v2.1.m.bed 20_acc_pipe/Caki-1.p/Caki-1.p.aln.paf.ppc.paf.op.graph.txt 30_skype_pipe/Caki-1_16_54_43 --orignal_paf_loc 20_acc_pipe/Caki-1.p/Caki-1.p.paf 20_acc_pipe/Caki-1.a/Caki-1.a.paf"
-# t = t.split(" ")
-# args = parser.parse_args(t[2:])
+# t = "02_Build_Breakend_Graph_Limited.py 20_acc_pipe/SNU-1196.p/SNU-1196.p.aln.paf.ppc.paf public_data/chm13v2.0.fa.fai public_data/chm13v2.0_censat_v2.1.m.bed 30_skype_pipe/SNU-1196_14_07_00 --orignal_paf_loc 20_acc_pipe/SNU-1196.p/SNU-1196.p.paf 20_acc_pipe/SNU-1196.r/SNU-1196.r.paf -t 128"
+# args = parser.parse_args(t.split()[1:])
 
 PREPROCESSED_PAF_FILE_PATH = args.ppc_paf_file_path
 CHROMOSOME_INFO_FILE_PATH = args.reference_fai_path
