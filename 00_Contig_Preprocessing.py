@@ -1020,7 +1020,6 @@ def alt_preprocess_contig(contig_data : list, telo_label : list, ref_qry_ratio :
     for k, node_list in telo_safe_dict.items():
         dis, curr_contig_name, ind = min(node_list, key=lambda t: t[0])
         using_type3_contig_data.append((curr_contig_name, ind))
-        print(k, curr_contig_name)
 
     using_type3_contig_list = []
     using_type3_contig_data.sort(key=lambda t: t[1])
@@ -1033,7 +1032,6 @@ def alt_preprocess_contig(contig_data : list, telo_label : list, ref_qry_ratio :
             contig_terminal_node[curr_contig_name] = (idx, idx+cnt-1)
             idx+=cnt
     
-    print(using_type3_contig_list)
     return [using_contig_list, using_type3_contig_list, contig_type, contig_terminal_node, len_count]
 
 def preprocess_repeat(contig_data : list) -> list:
