@@ -529,21 +529,6 @@ for cs in chr_no_filt_st_list:
 
 B = np.asarray(v, dtype=np.float32)
 
-
-def get_vec_from_file(data):
-    final_paf_path, key_int_list = data
-    ki = key_int_list[0]
-
-    v = vec_dict[ki]
-    v = np.copy(v)
-
-    for ki in key_int_list[1:]:
-        tv = vec_dict[ki]
-        v += tv
-
-    return v, final_paf_path
-
-
 with open(f'{PREFIX}/contig_pat_vec_data.pkl', 'rb') as f:
     paf_ans_list, key_list, int2key = pkl.load(f)
 
@@ -565,21 +550,27 @@ m = np.shape(B)[0]
 n = len(paf_ans_list) + fclen // 4 + bclen // 4
 ncnt = 0
 
-A = np.zeros((m, n), dtype=np.float32)
+A = np.empty((m, n), dtype=np.float32)
 
 filter_vec_list = []
 tot_loc_list = []
 bv_loc_list = []
 
+tmp_v = np.zeros(m, dtype=np.float32)
+
 tar_def_path_ind_dict = dict()
-for data in tqdm(paf_ans_list, desc='Recover depth from seperated paths',
+for path, key_int_list in tqdm(paf_ans_list, desc='Recover depth from seperated paths',
                  disable=not sys.stdout.isatty() and not args.progress):
-    v, l = get_vec_from_file(data)
+    ki = key_int_list[0]
+    tmp_v = vec_dict[ki]
 
-    if l in tar_def_path_set:
-        tar_def_path_ind_dict[l] = ncnt
+    for ki in key_int_list[1:]:
+        tmp_v += vec_dict[ki]
+    A[:, ncnt] = tmp_v
 
-    A[:, ncnt] = v
+    if path in tar_def_path_set:
+        tar_def_path_ind_dict[path] = ncnt
+
     ncnt += 1
 
 for_dir_data = []

@@ -964,8 +964,6 @@ def alt_preprocess_contig(contig_data : list, telo_label : list, ref_qry_ratio :
             curr_contig_name = contig_data[i-1][CTG_NAM]
             curr_contig_end_fragment = contig_data[i-1]
 
-            if curr_contig_name == 'utg025330l':
-                t = 1
             if curr_contig_first_fragment[CHR_NAM] != curr_contig_end_fragment[CHR_NAM]:
                 checker = 1
             elif curr_contig_first_fragment[CTG_DIR] != curr_contig_end_fragment[CTG_DIR]:
