@@ -1468,9 +1468,7 @@ def main():
 
     os.makedirs(PREFIX, exist_ok=True)
 
-    with open(f'{PREFIX}/count_report.txt', "wt") as f:
-        formatted_time = datetime.now().strftime("%m/%d/%Y %I:%M:%S %p")
-        print(f"Pipeline start time: {formatted_time}", file=f)
+    logging.info('SKYPE pipeline start')
     
     PAF_FILE_PATH = []
     if args.alt is None:

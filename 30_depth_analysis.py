@@ -32,7 +32,6 @@ logging.basicConfig(
 )
 logging.info("30_depth_analysis start")
 
-# np.seterr(invalid='ignore')
 
 CTG_NAM = 0
 CTG_LEN = 1
@@ -511,6 +510,7 @@ meandepth = np.median(df['meandepth'])
 BREAKEND_REMARKABLE_CN = meandepth / 10
 TELOMERE_REMARKABLE_CN = meandepth / 10
 
+
 chr_order_list = extract_groups(list(df['chr']))
 
 chr_filt_st_list = []
@@ -794,9 +794,8 @@ for i, ctr in enumerate(path_telo_usage):
     for j, v in ctr.items():
         telo_cn[j] += v*weights[i]
 
-inv_cnt = 0
-indel_cnt = 0
-transloc_cnt = 0
+inv_val_list = []
+transloc_val_list = []
 
 bnd_cn_data = []
 for k, v in nclose_cn.items():
@@ -804,17 +803,22 @@ for k, v in nclose_cn.items():
     idx1, idx2 = reverse_nclose_dict[k]
     chr_nam1 = contig_data[idx1][CHR_NAM]
     chr_nam2 = contig_data[idx2][CHR_NAM]
-    if chr_nam1 != chr_nam2 and v > BREAKEND_REMARKABLE_CN:
-        transloc_cnt += 1
-    elif chr_nam1 == chr_nam2 and contig_data[idx1][CTG_DIR] != contig_data[idx2][CTG_DIR] and v > BREAKEND_REMARKABLE_CN:
-        inv_cnt += 1
-    virtual_flag = False
-    if contig_data[idx1][CTG_NAM][0] == 'v' and v > BREAKEND_REMARKABLE_CN:
-        virtual_flag = True
-    bnd_cn_data.append([(chr_nam1, pos1), (chr_nam2, pos2), v, virtual_flag])
 
+    if chr_nam1 != chr_nam2 and v > BREAKEND_REMARKABLE_CN:
+        transloc_val_list.append(v / meandepth * 2)
+    elif chr_nam1 == chr_nam2 and contig_data[idx1][CTG_DIR] != contig_data[idx2][CTG_DIR] and v > BREAKEND_REMARKABLE_CN:
+        inv_val_list.append(v / meandepth * 2)
+
+    virtual_flag = False
+    if contig_data[idx1][CTG_NAM][0] == 'v':
+        virtual_flag = True
+    
+    if v > BREAKEND_REMARKABLE_CN:
+        bnd_cn_data.append([(chr_nam1, pos1), (chr_nam2, pos2), v, virtual_flag])
+
+indel_val_list = []
 non_type4_cnt = len(bnd_cn_data)
-rpll =len(raw_path_list)
+rpll = len(raw_path_list)
 for i in range(rpll, len(weights)):
     with open(tot_loc_list[i], "r") as f:
         l = f.readline()
@@ -825,15 +829,9 @@ for i in range(rpll, len(weights)):
         pos1 = int(l[CHR_STR])
         pos2 = int(l[CHR_END])
     v = weights[i]
-    if v > BREAKEND_REMARKABLE_CN:
-        indel_cnt += 1
+    indel_val_list.append(v / meandepth * 2)
     bnd_cn_data.append([(chr_nam1, pos1), (chr_nam2, pos2), v, False])
 
-with open(f"{PREFIX}/count_report.txt", "a") as f:
-    print(f"Total number of meaningful breakend : {transloc_cnt+inv_cnt+indel_cnt}", file=f)
-    print(f"Translocations : {transloc_cnt}", file=f)
-    print(f"Inversions : {inv_cnt}", file=f)
-    print(f"Indels : {indel_cnt}", file=f)
 
 a = sorted(list(telo_cn.items()), key = lambda t:t[1])
 telo_zorder_dict = {}
@@ -895,15 +893,14 @@ need_label = defaultdict(list)
 for node_id, telo_len, chr_dir in telo_len_data:
     need_label[chr_dir[:-1]].append((node_id, chr_dir[-1]))
 
-remarkable_telo_count = 0
-
+new_telo_val_list = []
 for sector in circos.sectors:
     track1 = sector.add_track((58.2, 59.8))
     for j in need_label[sector.name]:
         cn = telo_cn[j[0]]
         norm_cn = np.clip((cn - lower) / (upper - lower), 0, 1)
-        if cn >= TELOMERE_REMARKABLE_CN:
-            remarkable_telo_count += 1
+
+        new_telo_val_list.append(cn / meandepth * 2)
         color = cmap(norm_cn)
         if j[1]=='f':
             # Prevent out of range
@@ -917,8 +914,8 @@ for sector in circos.sectors:
             except:
                 pass
 
-with open(f"{PREFIX}/count_report.txt", "a") as f:
-    print(f"Total number of meaningful telomere : {remarkable_telo_count}", file=f)
+with open(f'{PREFIX}/cn_data.pkl', 'wb') as f:
+    pkl.dump((inv_val_list, transloc_val_list, indel_val_list, new_telo_val_list), f)
 
 fig = circos.plotfig(figsize=(10, 10), dpi=500)
 
@@ -968,5 +965,5 @@ cn_line_legend = circos.ax.legend(
 )
 circos.ax.add_artist(cn_line_legend)
 
-fig.savefig(f'{PREFIX}/virtual_sky.pdf')
+fig.savefig(f'{PREFIX}/total_cov.pdf')
 fig.savefig(f"{PREFIX}/total_cov.png")
