@@ -592,4 +592,5 @@ legend_ax.legend(handles=reorder(legend_handles, label_ncol),
 legend_ax.set_title(f'{CELL_LINE} Virtual SKY result', fontsize=15)
 legend_ax.axis('off')
 
+fig.savefig(f'{PREFIX}/virtual_sky.pdf')
 fig.savefig(f'{PREFIX}/virtual_sky.png')

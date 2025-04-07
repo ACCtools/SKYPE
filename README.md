@@ -15,14 +15,13 @@
 - Visualize results
 
 ## Prequisites
-
-It is recommended to use **[ACCtools pipeline](https://github.com/ACCtools/ACCtools-pipeline)**, rather than using SKYPE alone.
-
 SKYPE receives 
 - **Result of [alignasm](https://github.com/ACCtools/alignasm)** : Aligned unitig(.r.aln.paf) and primary(.p.aln.paf) PAF file 
 - **Reference read depth data** (.win.stat.gz)
   
 for input.
+
+It is recommended to use **[ACCtools pipeline](https://github.com/ACCtools/ACCtools-pipeline)**, rather than using SKYPE alone.
 
 ## How to run
 

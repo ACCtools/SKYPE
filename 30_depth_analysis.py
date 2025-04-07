@@ -943,4 +943,5 @@ cn_line_legend = circos.ax.legend(
 )
 circos.ax.add_artist(cn_line_legend)
 
+fig.savefig(f'{PREFIX}/virtual_sky.pdf')
 fig.savefig(f"{PREFIX}/total_cov.png")
