@@ -5,6 +5,7 @@ import copy
 import itertools
 import os
 import logging
+from datetime import datetime
 
 logging.basicConfig(
     format='%(asctime)s %(levelname)s:%(message)s',
@@ -1467,6 +1468,10 @@ def main():
 
     os.makedirs(PREFIX, exist_ok=True)
 
+    with open(f'{PREFIX}/count_report.txt', "wt") as f:
+        formatted_time = datetime.now().strftime("%m/%d/%Y %I:%M:%S %p")
+        print(f"Pipeline start time: {formatted_time}", file=f)
+    
     PAF_FILE_PATH = []
     if args.alt is None:
         PAF_FILE_PATH = [args.paf_file_path]

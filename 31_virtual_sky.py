@@ -7,6 +7,7 @@ import matplotlib.patches as patches
 import ast
 import logging
 import argparse
+from datetime import datetime
 
 from matplotlib.ticker import MultipleLocator
 from collections import defaultdict
@@ -594,3 +595,7 @@ legend_ax.axis('off')
 
 fig.savefig(f'{PREFIX}/virtual_sky.pdf')
 fig.savefig(f'{PREFIX}/virtual_sky.png')
+
+with open(f'{PREFIX}/count_report.txt', "a") as f:
+    formatted_time = datetime.now().strftime("%m/%d/%Y %I:%M:%S %p")
+    print(f"Pipeline end time: {formatted_time}", file=f)
