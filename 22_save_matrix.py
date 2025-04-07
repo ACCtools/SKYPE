@@ -562,7 +562,7 @@ tar_def_path_ind_dict = dict()
 for path, key_int_list in tqdm(paf_ans_list, desc='Recover depth from seperated paths',
                  disable=not sys.stdout.isatty() and not args.progress):
     ki = key_int_list[0]
-    tmp_v = vec_dict[ki]
+    np.copyto(tmp_v, vec_dict[ki])
 
     for ki in key_int_list[1:]:
         tmp_v += vec_dict[ki]
