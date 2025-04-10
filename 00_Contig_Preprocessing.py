@@ -12,6 +12,7 @@ logging.basicConfig(
     level=logging.INFO,
     datefmt='%m/%d/%Y %I:%M:%S %p'
 )
+logging.info('SKYPE pipeline start')
 logging.info("00_Contig_Preprocessing start")
 
 from collections import defaultdict
@@ -1467,8 +1468,6 @@ def main():
     PREFIX = args.prefix
 
     os.makedirs(PREFIX, exist_ok=True)
-
-    logging.info('SKYPE pipeline start')
     
     PAF_FILE_PATH = []
     if args.alt is None:
@@ -1711,11 +1710,11 @@ def main():
     subtelo_label = label_subtelo_node(real_final_contig, telo_dict)
     subtelo_ppc_node = subtelo_cut(real_final_contig, telo_label, subtelo_label)
 
-    with open("subtelo.txt", "wt") as f:
-        for i in subtelo_ppc_node:
-            for j in i:
-                print(j, end="\t", file=f)
-            print(file=f)
+    # with open("subtelo.txt", "wt") as f:
+    #     for i in subtelo_ppc_node:
+    #         for j in i:
+    #             print(j, end="\t", file=f)
+    #         print(file=f)
 
     adjacency = initial_graph_build(real_final_contig, telo_bound_dict)
 
