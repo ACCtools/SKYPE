@@ -2,6 +2,7 @@ import sys
 import argparse
 from collections import defaultdict, Counter
 import ast
+import pickle as pkl
 
 import graph_tool.all as gt
 import graph_tool
@@ -894,6 +895,8 @@ parser.add_argument("-t", "--thread",
                     help="Number of thread", type=int)
 parser.add_argument("--progress", 
                     help="Show progress bar", action='store_true')
+parser.add_argument("--verbose", 
+                    help="Enable index, paf output (Counld be slow at HDD)", action='store_true')
 
 args = parser.parse_args()
 
@@ -908,6 +911,7 @@ CENSAT_PATH = args.censat_bed_path
 chr_len = find_chr_len(CHROMOSOME_INFO_FILE_PATH)
 contig_data = import_data2(PREPROCESSED_PAF_FILE_PATH)
 PREFIX = args.prefix
+PRINT_IDX_FILE = args.verbose
 
 TELO_CONNECT_NODES_INFO_PATH = PREFIX+"/telomere_connected_list.txt"
 
@@ -1269,6 +1273,8 @@ def find_vertex_by_id(gtG, node_id):
     return None
 
 def run_graph(data, CHR_CHANGE_LIMIT):
+    path_list = []
+
     i, j = data
     src = (chr_rev_corr[i], 0, 0)
     tar = chr_rev_corr[j]
@@ -1433,24 +1439,27 @@ def run_graph(data, CHR_CHANGE_LIMIT):
                         path_compress[key].append(copy.deepcopy(path_counter))
                         cnt += 1
 
-                        os.makedirs(folder_name, exist_ok=True)
-                        file_name = folder_name + f"/{cnt}.paf"
-                        file_name2 = folder_name + f"/{cnt}.index.txt"
-                        with open(file_name, "wt") as f, open(file_name2, "wt") as g:
-                            for nodes in path:
-                                if isinstance(nodes[0], str):
-                                    print(nodes, file=f)
-                                    print(nodes, file=g)
-                                else:
-                                    f.write("\t".join(map(str, contig_data[nodes[1]])) + "\n")
-                                    g.write("\t".join(map(str, nodes)) + "\n")
-                            print(ack, file=f)
-                            print(ack, file=g)
+                        if PRINT_IDX_FILE:
+                            os.makedirs(folder_name, exist_ok=True)
+                            file_name = folder_name + f"/{cnt}.paf"
+                            file_name2 = folder_name + f"/{cnt}.index.txt"
+                            with open(file_name, "wt") as f, open(file_name2, "wt") as g:
+                                for nodes in path:
+                                    if isinstance(nodes[0], str):
+                                        print(nodes, file=f)
+                                        print(nodes, file=g)
+                                    else:
+                                        f.write("\t".join(map(str, contig_data[nodes[1]])) + "\n")
+                                        g.write("\t".join(map(str, nodes)) + "\n")
+                                print(ack, file=f)
+                                print(ack, file=g)
+                        
+                        path_list.append((path, ack))
 
                         if cnt >= PAT_PATH_LIMIT:
-                            return ((src[0], tar), cnt)
+                            return ((src[0], tar), cnt, path_list)
 
-    return ((src[0], tar), cnt)
+    return ((src[0], tar), cnt, path_list)
 
 
 tar_ind_list = []
@@ -1467,7 +1476,10 @@ THREAD=args.thread
 tot_cnt = TOT_PATH_LIMIT
 cnt_list = []
 
+path_list_dict_data = []
 while tot_cnt >= TOT_PATH_LIMIT and CHR_CHANGE_LIMIT_PREFIX > 0:
+    path_list_dict_data.clear()
+
     tot_cnt = 0
     cnt_list = []
 
@@ -1483,7 +1495,7 @@ while tot_cnt >= TOT_PATH_LIMIT and CHR_CHANGE_LIMIT_PREFIX > 0:
                         desc=f'Build breakend construct graph <{CHR_CHANGE_LIMIT_PREFIX}>',
                         disable=not sys.stdout.isatty() and not args.progress):
             
-            cnt_list.append(rs)
+            cnt_list.append((rs[0], rs[1]))
             tot_cnt += rs[1]
 
             # 한계치를 넘으면 즉시 종료
@@ -1491,6 +1503,8 @@ while tot_cnt >= TOT_PATH_LIMIT and CHR_CHANGE_LIMIT_PREFIX > 0:
                 pool.terminate()  # 작업 중인 프로세스들을 즉시 종료
                 shutil.rmtree(save_loc, ignore_errors=True)
                 break
+
+            path_list_dict_data.append((f'{rs[0][0]}_{rs[0][1]}', rs[2]))
     
     if tot_cnt >= TOT_PATH_LIMIT:
         logging.info(f'CHR_CHANGE_LIMIT : {CHR_CHANGE_LIMIT_PREFIX} failed')
@@ -1502,10 +1516,16 @@ if CHR_CHANGE_LIMIT_PREFIX == 0:
     logging.info('Breakend path failed')
     exit(1)
 
+path_list_dict = dict()
+for k, v in path_list_dict_data:
+    path_list_dict[k] = v
+
 logging.info(f'CHR_CHANGE_LIMIT : {CHR_CHANGE_LIMIT_PREFIX} success')
 
 cancer_prefix = os.path.basename(PREPROCESSED_PAF_FILE_PATH).split('.')[0]
 
+with open(f'{PREFIX}/path_data.pkl', 'wb') as f:
+    pkl.dump(path_list_dict, f)
 
 with open(f'{PREFIX}/report.txt', 'a') as f:
     cnt = sum(i[1] for i in cnt_list)

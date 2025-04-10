@@ -136,17 +136,11 @@ def import_paf_data(file_path : str) -> list :
     return contig_data
 
 def import_index_path(file_path : str) -> list:
-    index_file = open(file_path, "r")
-    index_data = []
-    for curr_index in index_file:
-        curr_index.rstrip()
-        if curr_index[0] == '(':
-            index_data.append(ast.literal_eval(curr_index))
-        elif curr_index[0] != '[':
-            temp_list = curr_index.split("\t")
-            index_data.append(tuple((int(temp_list[0]), int(temp_list[1]))))
-    index_file.close()
-    return index_data
+    file_path_list = file_path.split('/')
+    key = file_path_list[-2]
+    cnt = int(file_path_list[-1].split('.')[0]) - 1
+
+    return path_list_dict[key][cnt][0]
 
 def import_telo_data(file_path : str, chr_len : dict) -> dict :
     fai_file = open(file_path, "r")
@@ -387,6 +381,8 @@ output_folder = f'{PREFIX}/21_pat_depth'
 
 ppc_data = import_ppc_data(PREPROCESSED_PAF_FILE_PATH)
 
+with open(f'{PREFIX}/path_data.pkl', 'rb') as f:
+    path_list_dict = pkl.load(f)
 
 df = pd.read_csv(main_stat_loc, compression='gzip', comment='#', sep='\t', names=['chr', 'st', 'nd', 'length', 'covsite', 'totaldepth', 'cov', 'meandepth'])
 df = df.query('chr != "chrM"')

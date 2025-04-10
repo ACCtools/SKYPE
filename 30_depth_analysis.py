@@ -64,17 +64,11 @@ DIR_FOR = 1
 TELOMERE_EXPANSION = 5 * K
 
 def import_index_path(file_path : str) -> list:
-    index_file = open(file_path, "r")
-    index_data = []
-    for curr_index in index_file:
-        curr_index.rstrip()
-        if curr_index[0] == '(':
-            index_data.append(ast.literal_eval(curr_index))
-        elif curr_index[0] != '[':
-            temp_list = curr_index.split("\t")
-            index_data.append(tuple((int(temp_list[0]), int(temp_list[1]))))
-    index_file.close()
-    return index_data
+    file_path_list = file_path.split('/')
+    key = file_path_list[-2]
+    cnt = int(file_path_list[-1].split('.')[0]) - 1
+
+    return path_list_dict[key][cnt][0]
 
 def extract_groups(lst):
     if not lst:
@@ -502,6 +496,10 @@ TELO_CONNECT_NODES_INFO_PATH = PREFIX+"/telomere_connected_list.txt"
 contig_data = import_data2(PREPROCESSED_PAF_FILE_PATH)
 telo_connected_node = extract_telomere_connect_contig(TELO_CONNECT_NODES_INFO_PATH)
 
+with open(f'{PREFIX}/path_data.pkl', 'rb') as f:
+    path_list_dict = pkl.load(f)
+
+
 df = pd.read_csv(main_stat_loc, compression='gzip', comment='#', sep='\t', names=['chr', 'st', 'nd', 'length', 'covsite', 'totaldepth', 'cov', 'meandepth'])
 df = df.query('chr != "chrM"')
 
@@ -588,8 +586,6 @@ def get_vec_from_ki(ki):
     
     return ki, np.asarray(v, dtype=np.float32)
 
-PATH_FILE_FOLDER = f"{PREFIX}/20_depth"
-chr_chr_folder_path = sorted(glob.glob(PATH_FILE_FOLDER+"/*"))
 
 with h5py.File(f'{PREFIX}/matrix.h5', 'r') as hf:
     A = hf['A'][:]

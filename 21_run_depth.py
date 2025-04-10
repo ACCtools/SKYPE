@@ -93,26 +93,12 @@ def import_data2(file_path : str) -> list :
     return contig_data
 
 def import_index_path(file_path : str) -> list:
-    index_file = open(file_path, "r")
-    index_data = []
-    for curr_index in index_file:
-        curr_index.rstrip()
-        if curr_index[0] == '(':
-            index_data.append(ast.literal_eval(curr_index))
-        elif curr_index[0] != '[':
-            temp_list = curr_index.split("\t")
-            index_data.append(tuple((int(temp_list[0]), int(temp_list[1]))))
-    index_file.close()
-    return index_data
+    file_path_list = file_path.split('/')
+    key = file_path_list[-2]
+    cnt = int(file_path_list[-1].split('.')[0]) - 1
 
-def import_fill_index_path(file_path : str) -> list:
-    index_file = open(file_path, "r")
-    index_data = []
-    for curr_index in index_file:
-        curr_index = curr_index.rstrip()
-        index_data.append(ast.literal_eval(curr_index))
-    index_file.close()
-    return index_data
+    path = path_list_dict[key][cnt][0]
+    return [tuple(list(n)[:2]) for n in path]
 
 def distance_checker(node_a : tuple, node_b : tuple) -> int :
     # check if overlap
@@ -148,11 +134,12 @@ def find_index(fill_index_path, final_paf_data, tar_index):
             index_i += 1
     return None
 
-def get_key_from_index_folder(folder_path):
+def get_key_from_index_folder(key):
     index_key_data = []
-    index_file_paths = glob.glob(folder_path + "/*index*")
-    for index_file_path in index_file_paths:
-        index_key_data.append(get_key_from_index_file(index_file_path))
+    
+    n = len(path_list_dict[key])
+    for i in range(n):
+        index_key_data.append(get_key_from_index_file(f"{PREFIX}/00_raw/{key}/{i + 1}.inedx.txt"))
 
     return index_key_data
 
@@ -697,14 +684,6 @@ def is_sorted_ind(key):
 def count_groups(lst):
     return [len(list(group)) for key, group in groupby(lst)]
 
-def get_paf_run(paf_loc):
-    paf_base = os.path.splitext(paf_loc)[0]
-    result = subprocess.run(['./PanDepth/bin/pandepth', '-w', str(int(DEPTH_WINDOW)),'-t', str(DEPTH_THREAD), '-i', paf_loc, '-o', paf_base],
-                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, capture_output=False)
-    
-    if result.returncode != 0:
-        raise Exception(f"{paf_loc} : Pandepth failed!")
-
 def get_final_paf_name_from_index(index_file_path):
     final_paf_list = index_file_path.split('/')
     cnt = final_paf_list[-1].split('.')[0]
@@ -1086,6 +1065,9 @@ parser.add_argument("prefix",
 parser.add_argument("--alt", 
                     help="Path to an alternative PAF file (optional).")
 
+parser.add_argument("--pandepth_loc", 
+                    help="Pandepth binary location.", type=str, default="pandepth")
+
 parser.add_argument("-t", "--thread", 
                     help="Number of thread", type=int)
 
@@ -1169,11 +1151,14 @@ key_cnt = 0
 key2int = dict()
 int2key = dict()
 
-chr_chr_folder_path = list(glob.glob(PREFIX+"/00_raw/*"))
 final_paf_vec_data = []
 
 RATIO_OUTLIER_FOLDER = f"{PREFIX}/11_ref_ratio_outliers/"
 back_front_folder_path = glob.glob(RATIO_OUTLIER_FOLDER+"*")
+
+with open(f'{PREFIX}/path_data.pkl', 'rb') as f:
+    path_list_dict = pkl.load(f)
+chr_chr_folder_path = path_list_dict.keys()
 
 index_data_list = []
 with ProcessPoolExecutor(max_workers=THREAD) as executor:
@@ -1207,6 +1192,14 @@ for index_file_path, key_list in index_data_list:
 
     key_list = [key2int[k] for k in key_list]
     paf_ans_list.append((final_paf_path, key_list))
+
+def get_paf_run(paf_loc):
+    paf_base = os.path.splitext(paf_loc)[0]
+    result = subprocess.run([args.pandepth_loc, '-w', str(int(DEPTH_WINDOW)),'-t', str(DEPTH_THREAD), '-i', paf_loc, '-o', paf_base],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, capture_output=False)
+    
+    if result.returncode != 0:
+        raise Exception(f"{paf_loc} : Pandepth failed!")
 
 with ProcessPoolExecutor(max_workers=THREAD) as executor:
     futures = []

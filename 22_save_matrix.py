@@ -21,7 +21,6 @@ logging.basicConfig(
 )
 logging.info("22_save_matrix start")
 
-# np.seterr(invalid='ignore')
 
 CTG_NAM = 0
 CTG_LEN = 1
@@ -54,19 +53,19 @@ DIR_FOR = 1
 TELOMERE_EXPANSION = 5 * K
 
 
-def import_index_path(file_path: str) -> list:
-    index_file = open(file_path, "r")
-    index_data = []
-    for curr_index in index_file:
-        curr_index.rstrip()
-        if curr_index[0] == '(':
-            index_data.append(ast.literal_eval(curr_index))
-        elif curr_index[0] != '[':
-            temp_list = curr_index.split("\t")
-            index_data.append(tuple((int(temp_list[0]), int(temp_list[1]))))
-    index_file.close()
-    return index_data
+def import_index_path(file_path : str) -> list:
+    file_path_list = file_path.split('/')
+    key = file_path_list[-2]
+    cnt = int(file_path_list[-1].split('.')[0]) - 1
 
+    return path_list_dict[key][cnt][0]
+
+def import_index_cnt(file_path : str) -> list:
+    file_path_list = file_path.split('/')
+    key = file_path_list[-2]
+    cnt = int(file_path_list[-1].split('.')[0]) - 1
+
+    return path_list_dict[key][cnt][1]
 
 def extract_groups(lst):
     if not lst:
@@ -350,6 +349,9 @@ TELO_CONNECT_NODES_INFO_PATH = PREFIX + "/telomere_connected_list.txt"
 contig_data = import_data2(PREPROCESSED_PAF_FILE_PATH)
 telo_connected_node = extract_telomere_connect_contig(TELO_CONNECT_NODES_INFO_PATH)
 
+with open(f'{PREFIX}/path_data.pkl', 'rb') as f:
+    path_list_dict = pkl.load(f)
+
 telo_connected_node_dict = collections.defaultdict(list)
 for chr_info, contig_id in telo_connected_node:
     telo_connected_node_dict[chr_info].append(contig_id)
@@ -371,13 +373,13 @@ tar_def_path_list = []
 
 for (chrf, chrfid), (chrb, chrbid) in default_path_list:
     tar_chr = chrf[:-1]
-    index_folder = f'{PREFIX}/00_raw/{chrf}_{chrb}'
-    assert (os.path.isdir(index_folder))
 
+    key = f'{chrf}_{chrb}'
+    n = len(path_list_dict[key])
     tar_path_loc = None
 
-    path_loc_list = sorted(glob.glob(f'{index_folder}/*.index.txt'), key=lambda t: int(t.split('/')[-1].split('.')[0]))
-    for path_loc in path_loc_list:
+    for i in range(n):
+        path_loc = f"{PREFIX}/00_raw/{key}/{i + 1}.inedx.txt"
         idx_data = import_index_path(path_loc)
         if {idx_data[1][1], idx_data[-2][1]} == {chrfid, chrbid} and (idx_data[-1][1], idx_data[-1][2]) == (0, 0):
             tar_path_loc = path_loc
@@ -385,13 +387,14 @@ for (chrf, chrfid), (chrb, chrbid) in default_path_list:
 
     if tar_path_loc is None:
         non_bnd_path_list = []
-        for path_loc in path_loc_list:
+        for i in range(n):
+            path_loc = f"{PREFIX}/00_raw/{key}/{i + 1}.inedx.txt"
             idx_data = import_index_path(path_loc)
             if (idx_data[-1][1], idx_data[-1][2]) != (0, 0):
                 break
 
-            with open(path_loc, 'r') as f:
-                path_counter_list = ast.literal_eval(f.readlines()[-1])
+            path_counter_list = import_index_cnt(path_loc)
+
             for ch, v in path_counter_list:
                 if ch == tar_chr:
                     non_bnd_path_list.append((path_loc, v))
