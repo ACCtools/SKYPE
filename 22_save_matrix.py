@@ -535,7 +535,7 @@ B = np.asarray(v, dtype=np.float32)
 with open(f'{PREFIX}/contig_pat_vec_data.pkl', 'rb') as f:
     paf_ans_list, key_list, int2key = pkl.load(f)
 
-vec_dict = dict()
+vec_dict = [None] * (len(key_list) + 1)
 output_folder = f'{PREFIX}/21_pat_depth'
 with ProcessPoolExecutor(max_workers=THREAD) as executor:
     futures = []
@@ -632,11 +632,13 @@ for i in tqdm(range(1, bclen // 4 + 1), desc='Parse coverage from backward-direc
     A[ncnt, :] = ov + bv
     ncnt += 1
 
-def create_dataset_direct(hf, name, data):
-    dset = hf.create_dataset(name, shape=data.shape, dtype=data.dtype)
-    dset.write_direct(data)
-
 with h5py.File(f'{PREFIX}/matrix.h5', 'w') as hf:
-    create_dataset_direct(hf, 'A', data=A)
-    create_dataset_direct(hf, 'B', data=B)
-    hf.create_dataset('filter_len', data=filter_len)
+    dset_A = hf.create_dataset('A', shape=A[:, :filter_len].shape, dtype=A.dtype)
+    dset_B = hf.create_dataset('B', shape=B[:filter_len].shape, dtype=B.dtype)
+    dset_A_fail = hf.create_dataset('A_fail', shape=A[:, filter_len:].shape, dtype=A.dtype)
+    dset_B_fail = hf.create_dataset('B_fail', shape=B[filter_len:].shape, dtype=B.dtype)
+
+    dset_A.write_direct(A, source_sel=np.s_[:, :filter_len])
+    dset_B.write_direct(B, source_sel=np.s_[:filter_len])
+    dset_A_fail.write_direct(A, source_sel=np.s_[:, filter_len:])
+    dset_B_fail.write_direct(B, source_sel=np.s_[filter_len:])

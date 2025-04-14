@@ -38,15 +38,18 @@ jl.BLAS.set_num_threads(min(THREAD, psutil.cpu_count(logical=False)))
 jl.seval("""
 function load_nnls_array(filename::String)
     h5open(filename, "r") do file
-        filter_len = read(file["filter_len"])
-        A = read(file["A"])
-        B = read(file["B"])
-        return (@view A[1:filter_len, 1:end]), (@view A[filter_len+1:end, 1:end]), B[1:filter_len]
+        return read(file["A"]), read(file["B"])
+    end
+end
+         
+function load_fail_array(filename::String)
+    h5open(filename, "r") do file
+        return read(file["A_fail"])
     end
 end
 """)
 
-A_jl, A_fail_jl, B_jl = jl.load_nnls_array(f'{PREFIX}/matrix.h5')
+A_jl, B_jl = jl.load_nnls_array(f'{PREFIX}/matrix.h5')
 
 logging.info('Regression analysis is ongoing...')
 
@@ -66,6 +69,7 @@ jl.GC.gc()
 logging.info(f'Error : {round(error, 4)}')
 logging.info(f'Norm error : {round(error / b_norm, 4)}')
 
+A_fail_jl = jl.load_fail_array(f'{PREFIX}/matrix.h5')
 predict_B_jl = jl.vcat(predict_suc_B_jl, A_fail_jl * weights_jl)
 
 weights = np.asarray(weights_jl)
