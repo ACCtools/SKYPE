@@ -585,13 +585,8 @@ def get_vec_from_ki(ki):
             v.append(chr_st_data[cs])
     
     return ki, np.asarray(v, dtype=np.float32)
-
-
 with h5py.File(f'{PREFIX}/matrix.h5', 'r') as hf:
-    A = hf['A'][:]
-    A_fail = hf['A_fail'][:]
-
-    B = np.hstack([hf['B'][:], hf['B_fail'][:]])
+    B = hf['B'][:]
 os.remove(f'{PREFIX}/matrix.h5')
 
 with open(f'{PREFIX}/contig_pat_vec_data.pkl', 'rb') as f:

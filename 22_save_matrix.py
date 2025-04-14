@@ -553,7 +553,7 @@ m = np.shape(B)[0]
 n = len(paf_ans_list) + fclen // 4 + bclen // 4
 ncnt = 0
 
-A = np.empty((m, n), dtype=np.float32)
+A = np.empty((n, m), dtype=np.float32, order='C')
 
 filter_vec_list = []
 tot_loc_list = []
@@ -569,7 +569,7 @@ for path, key_int_list in tqdm(paf_ans_list, desc='Recover depth from seperated 
 
     for ki in key_int_list[1:]:
         tmp_v += vec_dict[ki]
-    A[:, ncnt] = tmp_v
+    A[ncnt, :] = tmp_v
 
     if path in tar_def_path_set:
         tar_def_path_ind_dict[path] = ncnt
@@ -596,7 +596,7 @@ for i in tqdm(range(1, fclen // 4 + 1), desc='Parse coverage from forward-direct
     tar_def_loc = tar_chr_data[tar_chr]
     temp_ncnt = tar_def_path_ind_dict[tar_def_loc]
 
-    ref_vec = A[:, temp_ncnt][chr_filt_idx_dict[tar_chr]]
+    ref_vec = A[temp_ncnt, :][chr_filt_idx_dict[tar_chr]]
     ref_loc_vec = vec[chr_filt_idx_dict[tar_chr]]
     ref_loc_vec[ref_vec == 0] = 0
 
@@ -608,11 +608,11 @@ for i in tqdm(range(1, fclen // 4 + 1), desc='Parse coverage from forward-direct
         vec = np.zeros_like(vec)
     elif ref_weight > 0:
         vec[chr_filt_idx_dict[tar_chr]] = ref_loc_vec
-        vec += A[:, temp_ncnt] * ref_weight
+        vec += A[temp_ncnt, :] * ref_weight
     else:
         ref_weight = 0
 
-    A[:, ncnt] = vec
+    A[ncnt, :] = vec
     for_dir_data.append([temp_ncnt, ncnt, ref_weight])
 
     ncnt += 1
@@ -629,11 +629,14 @@ for i in tqdm(range(1, bclen // 4 + 1), desc='Parse coverage from backward-direc
     ov = get_vec_from_stat_loc(ov_loc)
     bv = get_vec_from_stat_loc(bv_loc)
 
-    A[:, ncnt] = ov + bv
+    A[ncnt, :] = ov + bv
     ncnt += 1
 
+def create_dataset_direct(hf, name, data):
+    dset = hf.create_dataset(name, shape=data.shape, dtype=data.dtype)
+    dset.write_direct(data)
+
 with h5py.File(f'{PREFIX}/matrix.h5', 'w') as hf:
-    hf.create_dataset('A', data=A[:filter_len, :].T)
-    hf.create_dataset('B', data=B[:filter_len])
-    hf.create_dataset('A_fail', data=A[filter_len:, :].T)
-    hf.create_dataset('B_fail', data=B[filter_len:])
+    create_dataset_direct(hf, 'A', data=A)
+    create_dataset_direct(hf, 'B', data=B)
+    hf.create_dataset('filter_len', data=filter_len)
