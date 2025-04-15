@@ -228,10 +228,10 @@ def extract_nclose_node(contig_data : list, bnd_contig : set, repeat_contig_name
             if contig_data[s][CTG_TYP] in (1, 2):
                 st_chr = [contig_data[s][CTG_DIR], contig_data[s][CHR_NAM]]
                 ed_chr = [contig_data[e][CTG_DIR], contig_data[e][CHR_NAM]]
-                while st < e and [contig_data[st][CTG_DIR], contig_data[st][CHR_NAM]] == st_chr:
+                while st <= e and [contig_data[st][CTG_DIR], contig_data[st][CHR_NAM]] == st_chr:
                     st+=1
                 st-=1
-                while ed > s and [contig_data[ed][CTG_DIR], contig_data[ed][CHR_NAM]] == ed_chr:
+                while ed >= s and [contig_data[ed][CTG_DIR], contig_data[ed][CHR_NAM]] == ed_chr:
                     ed-=1
                 ed+=1
 
