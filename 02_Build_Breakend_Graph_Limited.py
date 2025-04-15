@@ -900,7 +900,7 @@ parser.add_argument("--verbose",
 
 args = parser.parse_args()
 
-# t = "02_Build_Breakend_Graph_Limited.py 20_acc_pipe/SNU-1196.p/SNU-1196.p.aln.paf.ppc.paf public_data/chm13v2.0.fa.fai public_data/chm13v2.0_censat_v2.1.m.bed 30_skype_pipe/SNU-1196_14_07_00 --orignal_paf_loc 20_acc_pipe/SNU-1196.p/SNU-1196.p.paf 20_acc_pipe/SNU-1196.r/SNU-1196.r.paf -t 128"
+# t = "02_Build_Breakend_Graph_Limited.py /home/hyunwoo/ACCtools-pipeline/00_skype_run/SNU1272/20_alignasm/SNU1272.ctg.aln.paf.ppc.paf public_data/chm13v2.0.fa.fai public_data/chm13v2.0_censat_v2.1.m.bed 30_skype_pipe/SNU1272_18_05_24 --orignal_paf_loc /home/hyunwoo/ACCtools-pipeline/00_skype_run/SNU1272/20_alignasm/SNU1272.ctg.paf /home/hyunwoo/ACCtools-pipeline/00_skype_run/SNU1272/20_alignasm/SNU1272.ctg.paf -t 128"
 # args = parser.parse_args(t.split()[1:])
 
 PREPROCESSED_PAF_FILE_PATH = args.ppc_paf_file_path

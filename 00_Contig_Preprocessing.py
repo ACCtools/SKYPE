@@ -1460,7 +1460,7 @@ def main():
     # 인자 파싱
     args = parser.parse_args()
 
-    # t = "00_Contig_Preprocessing.py 20_acc_pipe/SNU-1196.p/SNU-1196.p.aln.paf public_data/chm13v2.0_telomere.bed public_data/chm13v2.0.fa.fai public_data/chm13v2.0_repeat.m.bed public_data/chm13v2.0_censat_v2.1.m.bed /home/hyunwoo/51g_cancer_denovo/51_depth_data/SNU-1196.win.stat.gz 30_skype_pipe/SNU-1196_01_41_28 --alt 20_acc_pipe/SNU-1196.r/SNU-1196.r.aln.paf".split()
+    # t = "00_Contig_Preprocessing.py /home/hyunwoo/ACCtools-pipeline/00_skype_run/SNU1272/20_alignasm/SNU1272.ctg.aln.paf public_data/chm13v2.0_telomere.bed public_data/chm13v2.0.fa.fai public_data/chm13v2.0_repeat.m.bed public_data/chm13v2.0_censat_v2.1.m.bed /home/hyunwoo/ACCtools-pipeline/00_skype_run/SNU1272/01_depth/SNU1272.win.stat.gz 30_skype_pipe/SNU1272_18_06_07 --alt /home/hyunwoo/ACCtools-pipeline/00_skype_run/SNU1272/20_alignasm/SNU1272.utg.aln.paf".split()
     # args = parser.parse_args(t[1:])
 
     original_node_count = 0
@@ -1809,6 +1809,14 @@ def main():
         for i in telo_connected_graph_dict:
             for j in telo_connected_graph_dict[i]:
                 print(i, tuple(j), sep = "\t", file=f)
+
+    real_final_mainflow = find_mainflow(real_final_contig)
+    for i in real_final_contig:
+        try:
+            i[CTG_MAINFLOWDIR] = real_final_mainflow[i[CTG_NAM]][0]
+            i[CTG_MAINFLOWCHR] = real_final_mainflow[i[CTG_NAM]][1]
+        except:
+            pass
 
 
     with open(PREPROCESSED_PAF_FILE_PATH, "wt") as f:
