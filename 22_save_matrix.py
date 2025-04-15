@@ -296,6 +296,8 @@ def np_safe_divide(a, b):
 
     return np.divide(a, b, out=out, where=(b != 0))
 
+def get_relative_path(p):
+    return tuple(p.split('/')[-3:])
 
 parser = argparse.ArgumentParser(description="SKYPE depth analysis")
 
@@ -401,7 +403,7 @@ for (chrf, chrfid), (chrb, chrbid) in default_path_list:
 
         tar_path_loc = max(non_bnd_path_list, key=lambda t: t[1])[0]
 
-    tar_final_path_loc = get_final_paf_name_from_index(tar_path_loc)
+    tar_final_path_loc = get_relative_path(get_final_paf_name_from_index(tar_path_loc))
     tar_chr_data[tar_chr] = tar_final_path_loc
     tar_def_path_list.append(tar_final_path_loc)
 
@@ -571,6 +573,7 @@ for path, key_int_list in tqdm(paf_ans_list, desc='Recover depth from seperated 
         tmp_v += vec_dict[ki]
     A[ncnt, :] = tmp_v
 
+    path = get_relative_path(path)
     if path in tar_def_path_set:
         tar_def_path_ind_dict[path] = ncnt
 
