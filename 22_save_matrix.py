@@ -375,9 +375,27 @@ tar_def_path_list = []
 
 for (chrf, chrfid), (chrb, chrbid) in default_path_list:
     tar_chr = chrf[:-1]
-
     key = f'{chrf}_{chrb}'
     n = len(path_list_dict[key])
+
+    # chrY large indel
+    if tar_chr == 'chrX':
+        non_bnd_path_list = []
+        for i in range(n):
+            path_loc = f"{PREFIX}/00_raw/{key}/{i + 1}.inedx.txt"
+            idx_data = import_index_path(path_loc)
+            path_counter_list = import_index_cnt(path_loc)
+
+            for ch, v in path_counter_list:
+                if ch == 'chrY':
+                    non_bnd_path_list.append((path_loc, v))
+        
+        tar_path_loc = max(non_bnd_path_list, key=lambda t: t[1])[0]
+
+        tar_final_path_loc = get_relative_path(get_final_paf_name_from_index(tar_path_loc))
+        tar_chr_data['chrY'] = tar_final_path_loc
+        tar_def_path_list.append(tar_final_path_loc)
+
     tar_path_loc = None
 
     for i in range(n):
