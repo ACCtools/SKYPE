@@ -384,11 +384,12 @@ for (chrf, chrfid), (chrb, chrbid) in default_path_list:
         for i in range(n):
             path_loc = f"{PREFIX}/00_raw/{key}/{i + 1}.inedx.txt"
             idx_data = import_index_path(path_loc)
-            path_counter_list = import_index_cnt(path_loc)
+            if idx_data[-1][2] == 0:
+                path_counter_list = import_index_cnt(path_loc)
 
-            for ch, v in path_counter_list:
-                if ch == 'chrY':
-                    non_bnd_path_list.append((path_loc, v))
+                for ch, v in path_counter_list:
+                    if ch == 'chrY':
+                        non_bnd_path_list.append((path_loc, v))
         
         tar_path_loc = max(non_bnd_path_list, key=lambda t: t[1])[0]
 
