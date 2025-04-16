@@ -390,7 +390,7 @@ for (chrf, chrfid), (chrb, chrbid) in default_path_list:
                 if ch == 'chrY':
                     non_bnd_path_list.append((path_loc, v, idx_data[-1][2]))
         
-        tar_path_loc = max(non_bnd_path_list, key=lambda t: (t[2], t[1]))[0]
+        tar_path_loc = max(non_bnd_path_list, key=lambda t: (-t[2], t[1]))[0]
 
         tar_final_path_loc = get_relative_path(get_final_paf_name_from_index(tar_path_loc))
         tar_chr_data['chrY'] = tar_final_path_loc
