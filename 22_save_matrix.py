@@ -373,6 +373,7 @@ for chr_name in telo_chr_list:
 tar_chr_data = dict()
 tar_def_path_list = []
 
+chrY_type4_skip = False
 for (chrf, chrfid), (chrb, chrbid) in default_path_list:
     tar_chr = chrf[:-1]
     key = f'{chrf}_{chrb}'
@@ -390,11 +391,14 @@ for (chrf, chrfid), (chrb, chrbid) in default_path_list:
                 if ch == 'chrY':
                     non_bnd_path_list.append((path_loc, v, idx_data[-1][2]))
         
-        tar_path_loc = max(non_bnd_path_list, key=lambda t: (-t[2], t[1]))[0]
+        if len(non_bnd_path_list) > 0:
+            tar_path_loc = max(non_bnd_path_list, key=lambda t: (-t[2], t[1]))[0]
 
-        tar_final_path_loc = get_relative_path(get_final_paf_name_from_index(tar_path_loc))
-        tar_chr_data['chrY'] = tar_final_path_loc
-        tar_def_path_list.append(tar_final_path_loc)
+            tar_final_path_loc = get_relative_path(get_final_paf_name_from_index(tar_path_loc))
+            tar_chr_data['chrY'] = tar_final_path_loc
+            tar_def_path_list.append(tar_final_path_loc)
+        else:
+            chrY_type4_skip = True
 
     tar_path_loc = None
 
@@ -614,24 +618,30 @@ for i in tqdm(range(1, fclen // 4 + 1), desc='Parse coverage from forward-direct
         ll = l.split('\t')
         tar_chr = ll[CHR_NAM]
 
-    tar_def_loc = tar_chr_data[tar_chr]
-    temp_ncnt = tar_def_path_ind_dict[tar_def_loc]
-
-    ref_vec = A[temp_ncnt, :][chr_filt_idx_dict[tar_chr]]
-    ref_loc_vec = vec[chr_filt_idx_dict[tar_chr]]
-    ref_loc_vec[ref_vec == 0] = 0
-
-    vec_div = np_safe_divide(ref_loc_vec, ref_vec)
-    ref_weight = -np.min(vec_div)
-
-    if ref_weight > 5:
+    if tar_chr == 'chrY' and chrY_type4_skip:
         ref_weight = 0
         vec = np.zeros_like(vec)
-    elif ref_weight > 0:
-        vec[chr_filt_idx_dict[tar_chr]] = ref_loc_vec
-        vec += A[temp_ncnt, :] * ref_weight
+        temp_ncnt = 0
+
     else:
-        ref_weight = 0
+        tar_def_loc = tar_chr_data[tar_chr]
+        temp_ncnt = tar_def_path_ind_dict[tar_def_loc]
+
+        ref_vec = A[temp_ncnt, :][chr_filt_idx_dict[tar_chr]]
+        ref_loc_vec = vec[chr_filt_idx_dict[tar_chr]]
+        ref_loc_vec[ref_vec == 0] = 0
+
+        vec_div = np_safe_divide(ref_loc_vec, ref_vec)
+        ref_weight = -np.min(vec_div)
+
+        if ref_weight > 5:
+            ref_weight = 0
+            vec = np.zeros_like(vec)
+        elif ref_weight > 0:
+            vec[chr_filt_idx_dict[tar_chr]] = ref_loc_vec
+            vec += A[temp_ncnt, :] * ref_weight
+        else:
+            ref_weight = 0
 
     A[ncnt, :] = vec
     for_dir_data.append([temp_ncnt, ncnt, ref_weight])
