@@ -3,6 +3,7 @@ import logging
 import argparse
 
 import numpy as np
+import pickle as pkl
 
 from juliacall import Main as jl
 
@@ -49,12 +50,26 @@ function load_fail_array(filename::String)
 end
 """)
 
+with open(f'{PREFIX}/pri_weight_data.pkl', 'rb') as f:
+    init_cols, w_pri = pkl.load(f)
+
 A_jl, B_jl = jl.load_nnls_array(f'{PREFIX}/matrix.h5')
 
 logging.info('Regression analysis is ongoing...')
 
+n = jl.size(A_jl)[1]
+A_T = jl.eltype(A_jl)
+jl.x0_ = jl.zeros(A_T, n)
+
+jl.init_cols = jl.Vector[jl.Int64](init_cols)
+jl.w_pri = jl.Vector[jl.Float64](w_pri)
+print(w_pri)
+
+jl.seval("x0_[init_cols] = w_pri")
+
 H = 3600.0
 weights_jl = jl.vec(jl.SI_NNLS(A_jl, B_jl,
+                               x0_= jl.x0_,
                                total_time=24 * H,
                                restart_ratio=0.8,
                                epi=2))

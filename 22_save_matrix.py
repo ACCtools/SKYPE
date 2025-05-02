@@ -12,6 +12,7 @@ import collections
 import glob
 
 from tqdm import tqdm
+from scipy.optimize import nnls
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
 logging.basicConfig(
@@ -647,6 +648,16 @@ for i in tqdm(range(1, fclen // 4 + 1), desc='Parse coverage from forward-direct
     for_dir_data.append([temp_ncnt, ncnt, ref_weight])
 
     ncnt += 1
+
+init_cols = []
+for i in tar_chr_data.values():
+    init_cols.append(tar_def_path_ind_dict[i])
+
+A_pri = A[init_cols, :filter_len].T
+w_pri = nnls(A_pri, B[:filter_len])[0]
+
+with open(f'{PREFIX}/pri_weight_data.pkl', 'wb') as f:
+    pkl.dump((init_cols, w_pri), f)
 
 with open(f'{PREFIX}/for_dir_data.pkl', 'wb') as f:
     pkl.dump(for_dir_data, f)
