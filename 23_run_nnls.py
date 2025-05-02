@@ -63,7 +63,6 @@ jl.x0_ = jl.zeros(A_T, n)
 
 jl.init_cols = jl.Vector[jl.Int64](init_cols)
 jl.w_pri = jl.Vector[jl.Float64](w_pri)
-print(w_pri)
 
 jl.seval("x0_[init_cols] = w_pri")
 
