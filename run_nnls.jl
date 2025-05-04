@@ -34,7 +34,7 @@ function run_nnls(PREFIX::String, THREAD::Int)
     max_order = maximum(dep_data)
 
     for now_order in 0:max_order
-        @info "$(Dates.now()) Now_order : $now_order"
+        @info "$(Dates.now()) Now order : $now_order"
         order_index = findall(x -> x <= now_order, dep_data)
         A_reduced = @view A[:, order_index]
 
