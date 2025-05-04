@@ -391,7 +391,7 @@ meandepth = np.median(df['meandepth'])
 chr_len = find_chr_len(CHROMOSOME_INFO_FILE_PATH)
 
 with open(f'{PREFIX}/contig_pat_vec_data.pkl', 'rb') as f:
-    paf_ans_list, key_list, int2key = pkl.load(f)
+    paf_ans_list, key_list, int2key, _ = pkl.load(f)
 paf_ans_dict = dict(paf_ans_list)
 
 with open(f'{PREFIX}/depth_weight.pkl', 'rb') as f:

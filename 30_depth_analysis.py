@@ -590,7 +590,7 @@ with h5py.File(f'{PREFIX}/matrix.h5', 'r') as hf:
 os.remove(f'{PREFIX}/matrix.h5')
 
 with open(f'{PREFIX}/contig_pat_vec_data.pkl', 'rb') as f:
-    paf_ans_list, key_list, int2key = pkl.load(f)
+    paf_ans_list, key_list, int2key, _ = pkl.load(f)
 
 fclen = len(glob.glob(front_contig_path+"*"))
 bclen = len(glob.glob(back_contig_path+"*"))
