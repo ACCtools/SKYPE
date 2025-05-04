@@ -1274,6 +1274,7 @@ def find_vertex_by_id(gtG, node_id):
 
 def run_graph(data, CHR_CHANGE_LIMIT):
     path_list = []
+    path_di_list = []
 
     i, j = data
     src = (chr_rev_corr[i], 0, 0)
@@ -1455,11 +1456,12 @@ def run_graph(data, CHR_CHANGE_LIMIT):
                                 print(ack, file=g)
                         
                         path_list.append((path, ack))
+                        path_di_list.append(ii)
 
                         if cnt >= PAT_PATH_LIMIT:
-                            return ((src[0], tar), cnt, path_list)
+                            return ((src[0], tar), cnt, path_list, path_di_list)
 
-    return ((src[0], tar), cnt, path_list)
+    return ((src[0], tar), cnt, path_list, path_di_list)
 
 
 tar_ind_list = []
@@ -1477,8 +1479,10 @@ tot_cnt = TOT_PATH_LIMIT
 cnt_list = []
 
 path_list_dict_data = []
+path_di_list_dict_data = []
 while tot_cnt >= TOT_PATH_LIMIT and CHR_CHANGE_LIMIT_PREFIX > 0:
     path_list_dict_data.clear()
+    path_di_list_dict_data.clear()
 
     tot_cnt = 0
     cnt_list = []
@@ -1505,6 +1509,7 @@ while tot_cnt >= TOT_PATH_LIMIT and CHR_CHANGE_LIMIT_PREFIX > 0:
                 break
 
             path_list_dict_data.append((f'{rs[0][0]}_{rs[0][1]}', rs[2]))
+            path_di_list_dict_data.append((f'{rs[0][0]}_{rs[0][1]}', rs[3]))
     
     if tot_cnt >= TOT_PATH_LIMIT:
         logging.info(f'CHR_CHANGE_LIMIT : {CHR_CHANGE_LIMIT_PREFIX} failed')
@@ -1520,12 +1525,19 @@ path_list_dict = dict()
 for k, v in path_list_dict_data:
     path_list_dict[k] = v
 
+path_di_list_dict = dict()
+for k, v in path_di_list_dict_data:
+    path_di_list_dict[k] = v
+
 logging.info(f'CHR_CHANGE_LIMIT : {CHR_CHANGE_LIMIT_PREFIX} success')
 
 cancer_prefix = os.path.basename(PREPROCESSED_PAF_FILE_PATH).split('.')[0]
 
 with open(f'{PREFIX}/path_data.pkl', 'wb') as f:
     pkl.dump(path_list_dict, f)
+
+with open(f'{PREFIX}/path_di_data.pkl', 'wb') as f:
+    pkl.dump(path_di_list_dict, f)
 
 with open(f'{PREFIX}/report.txt', 'a') as f:
     cnt = sum(i[1] for i in cnt_list)

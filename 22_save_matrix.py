@@ -355,6 +355,9 @@ telo_connected_node = extract_telomere_connect_contig(TELO_CONNECT_NODES_INFO_PA
 with open(f'{PREFIX}/path_data.pkl', 'rb') as f:
     path_list_dict = pkl.load(f)
 
+with open(f'{PREFIX}/path_di_data.pkl', 'rb') as f:
+    path_di_list_dict = pkl.load(f)
+
 telo_connected_node_dict = collections.defaultdict(list)
 for chr_info, contig_id in telo_connected_node:
     telo_connected_node_dict[chr_info].append(contig_id)
@@ -558,7 +561,7 @@ for cs in chr_no_filt_st_list:
 B = np.asarray(v, dtype=np.float32)
 
 with open(f'{PREFIX}/contig_pat_vec_data.pkl', 'rb') as f:
-    paf_ans_list, key_list, int2key = pkl.load(f)
+    paf_ans_list, key_list, int2key, key_ord_list = pkl.load(f)
 
 vec_dict = [None] * (len(key_list) + 1)
 output_folder = f'{PREFIX}/21_pat_depth'
@@ -656,8 +659,8 @@ for i in tar_chr_data.values():
 A_pri = A[init_cols, :filter_len].T
 w_pri = nnls(A_pri, B[:filter_len])[0]
 
-with open(f'{PREFIX}/pri_weight_data.pkl', 'wb') as f:
-    pkl.dump((init_cols, w_pri), f)
+# with open(f'{PREFIX}/pri_weight_data.pkl', 'wb') as f:
+#     pkl.dump((init_cols, w_pri), f)
 
 with open(f'{PREFIX}/for_dir_data.pkl', 'wb') as f:
     pkl.dump(for_dir_data, f)
@@ -674,6 +677,20 @@ for i in tqdm(range(1, bclen // 4 + 1), desc='Parse coverage from backward-direc
     A[ncnt, :] = ov + bv
     ncnt += 1
 
+
+dep_list = []
+for k in key_ord_list:
+    dep_list.extend(path_di_list_dict[k])
+
+dep_list.extend([0] * (fclen // 4 + bclen // 4))
+dep_array = np.asarray(dep_list, dtype=np.int64)
+
+assert(np.size(dep_array) == n)
+
+def create_np_dataset(name, arr):
+    dset = hf.create_dataset(name, shape=arr.shape, dtype=arr.dtype)
+    dset.write_direct(arr)
+
 with h5py.File(f'{PREFIX}/matrix.h5', 'w') as hf:
     dset_A = hf.create_dataset('A', shape=A[:, :filter_len].shape, dtype=A.dtype)
     dset_B = hf.create_dataset('B', shape=B[:filter_len].shape, dtype=B.dtype)
@@ -684,3 +701,7 @@ with h5py.File(f'{PREFIX}/matrix.h5', 'w') as hf:
     dset_B.write_direct(B, source_sel=np.s_[:filter_len])
     dset_A_fail.write_direct(A, source_sel=np.s_[:, filter_len:])
     dset_B_fail.write_direct(B, source_sel=np.s_[filter_len:])
+
+    create_np_dataset('dep_data', np.asarray(dep_list, dtype=np.int64))
+    create_np_dataset('init_cols', np.asarray(init_cols, dtype=np.int64))
+    create_np_dataset('w_pri', np.asarray(w_pri, dtype=np.float64))

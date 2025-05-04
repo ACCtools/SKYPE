@@ -141,7 +141,7 @@ def get_key_from_index_folder(key):
     for i in range(n):
         index_key_data.append(get_key_from_index_file(f"{PREFIX}/00_raw/{key}/{i + 1}.inedx.txt"))
 
-    return index_key_data
+    return key, index_key_data
 
 def get_key_from_index_file(index_file_path):
     bnd_index_data = import_index_path(index_file_path)[1:-1]
@@ -1160,13 +1160,17 @@ with open(f'{PREFIX}/path_data.pkl', 'rb') as f:
     path_list_dict = pkl.load(f)
 chr_chr_folder_path = path_list_dict.keys()
 
+key_ord_list = []
 index_data_list = []
 with ProcessPoolExecutor(max_workers=THREAD) as executor:
     futures = [executor.submit(get_key_from_index_folder, folder_path) for folder_path in chr_chr_folder_path]
 
     for future in tqdm(as_completed(futures), total=len(futures), desc='Analyse index to split paf',
                        disable=not sys.stdout.isatty() and not args.progress):
-        index_data_list.extend(future.result())
+        k, idd = future.result()
+
+        key_ord_list.append(k)
+        index_data_list.extend(idd)
 
 for _, key_list in index_data_list:
     key_ind_data = []
@@ -1218,4 +1222,4 @@ with ProcessPoolExecutor(max_workers=THREAD) as executor:
         future.result()
 
 with open(f'{PREFIX}/contig_pat_vec_data.pkl', 'wb') as f:
-    pkl.dump((paf_ans_list, list(key2int.values()), int2key), f)
+    pkl.dump((paf_ans_list, list(key2int.values()), int2key, key_ord_list), f)
