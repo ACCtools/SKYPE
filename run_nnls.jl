@@ -1,4 +1,5 @@
-using HDF5, LinearAlgebra, SINNLS
+using HDF5, LinearAlgebra, Dates
+using SINNLS
 
 
 function load_nnls_array(filename::String)
@@ -33,14 +34,15 @@ function run_nnls(PREFIX::String, THREAD::Int)
     max_order = maximum(dep_data)
 
     for now_order in 0:max_order
+        @info "$(Dates.now()) Now_order : $now_order"
         order_index = findall(x -> x <= now_order, dep_data)
         A_reduced = @view A[:, order_index]
 
         weights = vec(SI_NNLS(A_reduced, B,
                               x0_ = x0_[order_index],
-                              total_time=minimum(24, 2 ^ (now_order - 1)) * H,
+                              total_time=min(16, 2.0 ^ (now_order - 1)) * H,
                               restart_ratio=0.7,
-                              epi=2))
+                              epi=1))
 
         if now_order < max_order
             x0_[order_index] = weights
