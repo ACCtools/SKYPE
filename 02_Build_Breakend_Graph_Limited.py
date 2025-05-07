@@ -98,8 +98,16 @@ def div_orignial_paf(file_path : str) -> list:
     with open(file_path, "r") as paf_file:
         for curr_contig in paf_file:
             a = curr_contig.split("\t")
-            assert(a[16][:5]=='tp:A:')
-            if a[16] != 'tp:A:P':
+            flag = None
+            for i in a:
+                if i.startswith("tp:A:"):
+                    if i[5] == 'P':
+                        flag = False
+                    else:
+                        flag = True
+                    break
+            assert(flag is not None)
+            if flag:
                 not_using_contig.add(a[0])
             if int(a[11]) < 60:
                 not_using_contig.add(a[0])
@@ -280,7 +288,6 @@ def extract_nclose_node(contig_data : list, bnd_contig : set, repeat_contig_name
                    and contig_data[s][CTG_NAM] not in telo_name_set:
                     s = e+1
                     continue
-                    
                 flag = True
                 # if st_chr[0] == ed_chr[0]:
                 #     st_chr[0] = ed_chr[0] = '+'

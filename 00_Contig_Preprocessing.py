@@ -5,6 +5,7 @@ import copy
 import itertools
 import os
 import logging
+import bisect
 from datetime import datetime
 
 logging.basicConfig(
@@ -64,6 +65,8 @@ MIN_FLANK_SIZE_BP = 1*M
 WEAK_BREAKEND_CEN_RATIO_THRESHOLD = 1.3
 BREAKEND_CEN_RATIO_THRESHOLD = 1.5
 
+repeat_merge_gap = 0
+
 def dbg() :
     print("hi")
 
@@ -119,7 +122,16 @@ def import_repeat_data(file_path : str) -> dict :
     repeat_data = defaultdict(list)
     for curr_data in fai_file:
         temp_list = curr_data.split("\t")
-        repeat_data[temp_list[0]].append((int(temp_list[1]), int(temp_list[2])))
+        curr_patch = (int(temp_list[1]), int(temp_list[2]))
+        if len(repeat_data[temp_list[0]])==0:
+            repeat_data[temp_list[0]].append(curr_patch)
+        else:
+            if abs(curr_patch[0] - repeat_data[temp_list[0]][-1][1]) < repeat_merge_gap:
+                repeat_data[temp_list[0]][-1] = (repeat_data[temp_list[0]][-1][0], curr_patch[1])
+            else:
+                repeat_data[temp_list[0]].append(curr_patch)
+    # for k, v in repeat_data.items():
+    #     print(k, len(v))
     fai_file.close()
     return repeat_data
 
@@ -195,27 +207,31 @@ def label_subtelo_node(contig_data : list, telo_data) -> list :
             label.append(('0', '0'))
     return label
 
-def label_repeat_node(contig_data : list, repeat_data) -> list :
-    label = []
-    contig_data_size = len(contig_data)
-    for i in range(contig_data_size):
-        try:
-            k = repeat_data[contig_data[i][CHR_NAM]]
-        except:
-            label.append(('0', '0'))
+def label_repeat_node(contig_data: list, repeat_data) -> list:
+    labels = []
+    ends_map = {
+        chrom: [iv[1] for iv in intervals]
+        for chrom, intervals in repeat_data.items()
+    }
+
+    for contig in contig_data:
+        chrom = contig[CHR_NAM]
+        intervals = repeat_data.get(chrom, [])
+        ends = ends_map.get(chrom, [])
+        if not intervals:
+            labels.append(('0','0'))
             continue
-        flag = False
-        for j in k:
-            if distance_checker(contig_data[i], (0, 0, 0, 0, 0, 0, 0, j[0], j[1])) == 0:
-                inclusive_label = ""
-                if inclusive_checker(contig_data[i], (0, 0, 0, 0, 0, 0, 0, j[0], j[1])):
-                    inclusive_label = "in"
-                label.append((contig_data[i][CHR_NAM], "r" + inclusive_label))
-                flag = True
-                break
-        if not flag:
-            label.append(('0', '0'))
-    return label
+        c_start, c_end = contig[7], contig[8]
+        idx = bisect.bisect_left(ends, c_start)
+        if idx < len(intervals):
+            iv_start, iv_end = intervals[idx]
+            if distance_checker(contig, (0,0,0,0,0,0,0, iv_start, iv_end)) == 0:
+                suffix = "in" if inclusive_checker(contig, (0,0,0,0,0,0,0, iv_start, iv_end)) else ""
+                labels.append((chrom, "r" + suffix))
+                continue
+        labels.append(('0','0'))
+
+    return labels
 
 def preprocess_telo(contig_data : list, node_label : list) -> list :
     telo_preprocessed_contig = []
@@ -785,7 +801,6 @@ def find_mainflow(contig_data : list) -> dict:
     contig_data_size = len(contig_data)
     mainflow_dict = {}
     st = 0
-    ed = contig_data[st][CTG_ENDND]
     while st<contig_data_size:
         ed = contig_data[st][CTG_ENDND]
         ref_length_counter = Counter()
