@@ -54,6 +54,7 @@ RPT_BND_CONTIG_BOUND = 0.2
 CHROMOSOME_COUNT = 23
 MAPQ_BOUND = 60
 TELOMERE_EXPANSION = 5 * K
+TELOMERE_COMPRESS_RANGE = 100*K
 CENSAT_COMPRESSABLE_THRESHOLD = 1e6
 
 FORCE_TELOMERE_THRESHOLD = 10*K
@@ -710,7 +711,13 @@ def edge_optimization(contig_data : list, contig_adjacency : list, telo_dict : d
                                 if contig_data[now_edge[1]][CTG_LEN] > contig_data[edge[1]][CTG_LEN]:
                                     now_edge = edge
                     else:
-                        using_edge.append(edge)
+                        telo_compress_flag = False
+                        for existing_edge in using_edge:
+                            if distance_checker(contig_data[existing_edge[1]], contig_data[edge[1]]) < TELOMERE_COMPRESS_RANGE:
+                                telo_compress_flag = True
+                                break
+                        if not telo_compress_flag:
+                            using_edge.append(edge)
                 else:
                     if contig_data[edge[1]][CHR_END]>=telo_range[1]-TELOMERE_CLUSTER_THRESHOLD:
                         if now_edge[0]<0:
@@ -722,7 +729,13 @@ def edge_optimization(contig_data : list, contig_adjacency : list, telo_dict : d
                                 if contig_data[now_edge[1]][CTG_LEN] == contig_data[edge[1]][CTG_LEN]:
                                     now_edge = edge
                     else:
-                        using_edge.append(edge)
+                        telo_compress_flag = False
+                        for existing_edge in using_edge:
+                            if distance_checker(contig_data[existing_edge[1]], contig_data[edge[1]]) < TELOMERE_COMPRESS_RANGE:
+                                telo_compress_flag = True
+                                break
+                        if not telo_compress_flag:
+                            using_edge.append(edge)
             if now_edge == [-1, 0, 0]:
                 pass
             else:
