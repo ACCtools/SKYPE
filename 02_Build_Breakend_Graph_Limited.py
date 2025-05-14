@@ -63,9 +63,12 @@ BND_CONTIG_BOUND = 0.1
 TOT_PATH_LIMIT = 3*M
 PAT_PATH_LIMIT = 10*K
 
-CHR_CHANGE_LIMIT_PREFIX = 5
-DIR_CHANGE_LIMIT = 1
+CHR_CHANGE_LIMIT_ABS_MAX = 5
+DIR_CHANGE_LIMIT_ABS_MAX = 1
 CENSAT_VISIT_LIMIT = 2
+
+CHR_CHANGE_LIMIT_HARD_START = 2
+HARD_NCLOSE_COUNT = 0
 
 BND_OVERUSE_CNT = 2
 PATH_MAJOR_COMPONENT = 3
@@ -1098,7 +1101,7 @@ logging.info("Now saving results in folder : " + PREFIX)
 logging.info(f"NClose node count : {nclose_node_count}")
 logging.info(f"Telomere connected node count : {telo_node_count}")
 
-def make_graph(CHR_CHANGE_LIMIT):
+def make_graph(CHR_CHANGE_LIMIT, DIR_CHANGE_LIMIT):
     G = nx.DiGraph()
     for i in bnd_graph_adjacency:
         for j in range(0, CHR_CHANGE_LIMIT+1):
@@ -1279,7 +1282,7 @@ def find_vertex_by_id(gtG, node_id):
             return v
     return None
 
-def run_graph(data, CHR_CHANGE_LIMIT):
+def run_graph(data, CHR_CHANGE_LIMIT, DIR_CHANGE_LIMIT):
     path_list = []
     path_di_list = []
 
@@ -1482,51 +1485,94 @@ def init_worker(shared_graph):
 
 THREAD=args.thread
 
-tot_cnt = TOT_PATH_LIMIT
-cnt_list = []
+limit_combinations = [
+    (c, DIR_CHANGE_LIMIT_ABS_MAX)
+    for c in range(CHR_CHANGE_LIMIT_ABS_MAX, 0, -1)
+]
+limit_combinations.append((1, 0))
 
-path_list_dict_data = []
-path_di_list_dict_data = []
-while tot_cnt >= TOT_PATH_LIMIT and CHR_CHANGE_LIMIT_PREFIX > 0:
-    path_list_dict_data.clear()
-    path_di_list_dict_data.clear()
+if nclose_node_count > HARD_NCLOSE_COUNT:
+    idx = limit_combinations.index((CHR_CHANGE_LIMIT_HARD_START, DIR_CHANGE_LIMIT_ABS_MAX))
+else:
+    idx = 0
 
+last_success = None
+
+while 0 <= idx < len(limit_combinations):
+    CHR_CHANGE_LIMIT_PREFIX, DIR_CHANGE_LIMIT_PREFIX = limit_combinations[idx]
+    path_list_dict_data = []
+    path_di_list_dict_data = []
     tot_cnt = 0
     cnt_list = []
 
-    # 각 반복마다 새로운 G 객체 생성
-    G_obj = make_graph(CHR_CHANGE_LIMIT=CHR_CHANGE_LIMIT_PREFIX)
+    G_obj = make_graph(
+        CHR_CHANGE_LIMIT=CHR_CHANGE_LIMIT_PREFIX,
+        DIR_CHANGE_LIMIT=DIR_CHANGE_LIMIT_PREFIX
+    )
 
-    # Pool 생성 시 initializer에 G_obj를 전달 (initargs는 반드시 튜플로)
-    with Pool(processes=THREAD, initializer=init_worker, initargs=(G_obj,)) as pool:
-        # imap을 사용하여 결과를 순차적으로 받아옴
-        result_iterator = pool.imap_unordered(partial(run_graph, CHR_CHANGE_LIMIT=CHR_CHANGE_LIMIT_PREFIX), tar_ind_list)
-        for rs in tqdm(result_iterator,
-                        total=len(tar_ind_list),
-                        desc=f'Build breakend construct graph <{CHR_CHANGE_LIMIT_PREFIX}>',
-                        disable=not sys.stdout.isatty() and not args.progress):
-            
+    with Pool(
+        processes=THREAD,
+        initializer=init_worker,
+        initargs=(G_obj,)
+    ) as pool:
+        result_iterator = pool.imap_unordered(
+            partial(
+                run_graph,
+                CHR_CHANGE_LIMIT=CHR_CHANGE_LIMIT_PREFIX,
+                DIR_CHANGE_LIMIT=DIR_CHANGE_LIMIT_PREFIX
+            ),
+            tar_ind_list
+        )
+
+        for rs in tqdm(
+            result_iterator,
+            total=len(tar_ind_list),
+            desc=f'Build breakend graph ({CHR_CHANGE_LIMIT_PREFIX},{DIR_CHANGE_LIMIT_PREFIX})',
+            disable=not sys.stdout.isatty() and not args.progress
+        ):
             cnt_list.append((rs[0], rs[1]))
             tot_cnt += rs[1]
 
-            # 한계치를 넘으면 즉시 종료
             if tot_cnt >= TOT_PATH_LIMIT:
-                pool.terminate()  # 작업 중인 프로세스들을 즉시 종료
+                pool.terminate()
                 shutil.rmtree(save_loc, ignore_errors=True)
                 break
 
             path_list_dict_data.append((f'{rs[0][0]}_{rs[0][1]}', rs[2]))
             path_di_list_dict_data.append((f'{rs[0][0]}_{rs[0][1]}', rs[3]))
-    
-    if tot_cnt >= TOT_PATH_LIMIT:
-        logging.info(f'CHR_CHANGE_LIMIT : {CHR_CHANGE_LIMIT_PREFIX} failed')
-        CHR_CHANGE_LIMIT_PREFIX -= 1
 
+    del G_obj
+    success = (tot_cnt < TOT_PATH_LIMIT)
 
-if CHR_CHANGE_LIMIT_PREFIX == 0:
-    logging.info('Cancer is too divergent.')
+    if success:
+        last_success = {
+            "chr":    CHR_CHANGE_LIMIT_PREFIX,
+            "dir":    DIR_CHANGE_LIMIT_PREFIX,
+            "paths":  path_list_dict_data,
+            "paths_di": path_di_list_dict_data,
+            "cnts":   cnt_list
+        }
+
+        logging.info(f'SUCCESS at {(CHR_CHANGE_LIMIT_PREFIX, DIR_CHANGE_LIMIT_PREFIX)}')
+        idx -= 1
+    else:
+        logging.info(f'FAIL at {(CHR_CHANGE_LIMIT_PREFIX, DIR_CHANGE_LIMIT_PREFIX)}')
+        if last_success is not None:
+            break
+
+        idx += 1
+
+if not last_success:
+    logging.info('Breakend graph is too divergent.')
     logging.info('Breakend path failed')
     exit(1)
+
+
+CHR_CHANGE_LIMIT_PREFIX = last_success["chr"]
+DIR_CHANGE_LIMIT_PREFIX = last_success["dir"]
+
+path_list_dict_data, path_di_list_dict_data = last_success["paths"], last_success["paths_di"]
+cnt_list = last_success["cnts"]
 
 path_list_dict = dict()
 for k, v in path_list_dict_data:
@@ -1536,7 +1582,7 @@ path_di_list_dict = dict()
 for k, v in path_di_list_dict_data:
     path_di_list_dict[k] = v
 
-logging.info(f'CHR_CHANGE_LIMIT : {CHR_CHANGE_LIMIT_PREFIX} success')
+logging.info(f'Final success settings: {(CHR_CHANGE_LIMIT_PREFIX, DIR_CHANGE_LIMIT_PREFIX)}')
 
 cancer_prefix = os.path.basename(PREPROCESSED_PAF_FILE_PATH).split('.')[0]
 
