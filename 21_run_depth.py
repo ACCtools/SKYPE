@@ -59,6 +59,7 @@ BUFFER = 10000000
 CHROMOSOME_COUNT = 23
 K = 1000
 
+PANDEPTH_RETRY = 3
 DEPTH_WINDOW=100 * K
 DEPTH_THREAD=1
 
@@ -1199,11 +1200,20 @@ for index_file_path, key_list in index_data_list:
 
 def get_paf_run(paf_loc):
     paf_base = os.path.splitext(paf_loc)[0]
-    result = subprocess.run([args.pandepth_loc, '-w', str(int(DEPTH_WINDOW)),'-t', str(DEPTH_THREAD), '-i', paf_loc, '-o', paf_base],
-                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, capture_output=False)
+
+    retry = 0
+    while retry < PANDEPTH_RETRY:
+        result = subprocess.run([args.pandepth_loc, '-w', str(int(DEPTH_WINDOW)),'-t', str(DEPTH_THREAD), '-i', paf_loc, '-o', paf_base],
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, capture_output=False)
+        
+        if result.returncode == 0:
+            return
+        else:
+            retry += 1
+            logging.info(f"{paf_loc} : Pandepth failed retry {retry} time")
     
-    if result.returncode != 0:
-        raise Exception(f"{paf_loc} : Pandepth failed!")
+    logging.info(f"{paf_loc} : Pandepth failed retry limit exceed")
+    sys.exit(1)
 
 with ProcessPoolExecutor(max_workers=THREAD) as executor:
     futures = []
