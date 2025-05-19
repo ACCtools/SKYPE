@@ -2769,10 +2769,13 @@ def nclose_calc():
                     else:
                         ed_compress[pair[0]] = ctg1_idx
 
-
+    transloc_nclose_pair_count = 0
     with open(f"{PREFIX}/compressed_nclose_nodes_list.txt", "wt") as f:
         for i in nclose_type:
             print(f"{i[0]}, {i[1]}, {len(nclose_type[i])}", file=f)
+            if i[0] != i[1]:
+                transloc_nclose_pair_count += len(nclose_type[i])
+
             st_flag = False
             ed_flag = False
             if (('=', i[0]), ('=', i[1])) in nclose_start_compress:
@@ -3257,16 +3260,15 @@ def run_graph(data, CHR_CHANGE_LIMIT, DIR_CHANGE_LIMIT):
 
     return ((src[0], tar), cnt, path_list, path_di_list)
 
+def init_worker(shared_graph):
+    global G
+    G = shared_graph
 
 def run_graph_pipeline():
     tar_ind_list = []
     for i in range(contig_data_size, contig_data_size + 2*CHROMOSOME_COUNT):
         for j in range(i, contig_data_size + 2*CHROMOSOME_COUNT):
             tar_ind_list.append((i, j))
-
-    def init_worker(shared_graph):
-        global G
-        G = shared_graph
 
     THREAD=args.thread
 
@@ -3337,8 +3339,14 @@ def run_graph_pipeline():
                 "paths_di": path_di_list_dict_data,
                 "cnts":   cnt_list
             }
-
-            logging.info(f'SUCCESS at {(CHR_CHANGE_LIMIT_PREFIX, DIR_CHANGE_LIMIT_PREFIX)}')
+            
+            path_count = sum(i[1] for i in cnt_list)
+            logging.info(f'SUCCESS at {(CHR_CHANGE_LIMIT_PREFIX, DIR_CHANGE_LIMIT_PREFIX)}, with {path_count} paths')
+            
+            # Simple estimated path count 
+            if path_count * (transloc_nclose_pair_count / CHROMOSOME_COUNT) >= TOT_PATH_LIMIT:
+                logging.info('FAIL estimated with next stage.')
+                break
             idx -= 1
         else:
             logging.info(f'FAIL at {(CHR_CHANGE_LIMIT_PREFIX, DIR_CHANGE_LIMIT_PREFIX)}')
