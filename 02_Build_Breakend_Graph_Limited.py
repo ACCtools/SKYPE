@@ -2336,6 +2336,12 @@ def contig_preprocessing_00(PAF_FILE_PATH_ : list):
             temp_list.append("0")
         new_contig_data.append(temp_list)
         idxcnt+=1
+
+    # with open("telo_preprocess_contig.txt", "wt") as f:
+    #     for i in new_contig_data:
+    #         for j in i:
+    #             print(j, end="\t", file=f)
+    #         print("", file=f)
     
     new_node_repeat_label = label_repeat_node(new_contig_data, repeat_data)
     new_node_repeat_censat_label = label_repeat_node(new_contig_data, repeat_censat_data)
@@ -2525,11 +2531,11 @@ def contig_preprocessing_00(PAF_FILE_PATH_ : list):
         real_final_contig = real_final_contig + real_alt_final_contig
         total_len = len(real_final_contig)
 
-    with open("a.txt", "wt") as f:
-        for i in real_final_contig:
-            for j in i:
-                print(j, end="\t", file=f)
-            print("", file=f)
+    # with open("a.txt", "wt") as f:
+    #     for i in real_final_contig:
+    #         for j in i:
+    #             print(j, end="\t", file=f)
+    #         print("", file=f)
     
     telo_fb_dict = defaultdict(list)
     for k, v in telo_dict.items():
@@ -2866,10 +2872,10 @@ parser.add_argument("--progress",
 parser.add_argument("--verbose", 
                     help="Enable index, paf output (Counld be slow at HDD)", action='store_true')
 
-# args = parser.parse_args()
+args = parser.parse_args()
 
-t = "02_Build_Breakend_Graph_Limited.py /home/hyunwoo/ACCtools-pipeline/90_skype_run/COLO829/20_alignasm/COLO829.ctg.aln.paf public_data/chm13v2.0.fa.fai public_data/chm13v2.0_telomere.bed public_data/chm13v2.0_repeat.m.bed public_data/chm13v2.0_censat_v2.1.m.bed /home/hyunwoo/ACCtools-pipeline/90_skype_run/COLO829/01_depth/COLO829.win.stat.gz 30_skype_pipe/COLO829_14_45_00 --alt /home/hyunwoo/ACCtools-pipeline/90_skype_run/COLO829/20_alignasm/COLO829.utg.aln.paf --orignal_paf_loc /home/hyunwoo/ACCtools-pipeline/90_skype_run/COLO829/20_alignasm/COLO829.ctg.paf /home/hyunwoo/ACCtools-pipeline/90_skype_run/COLO829/20_alignasm/COLO829.utg.paf -t 128"
-args = parser.parse_args(t.split()[1:])
+#t = "02_Build_Breakend_Graph_Limited.py /home/hyunwoo/ACCtools-pipeline/90_skype_run/COLO829/20_alignasm/COLO829.ctg.aln.paf public_data/chm13v2.0.fa.fai public_data/chm13v2.0_telomere.bed public_data/chm13v2.0_repeat.m.bed public_data/chm13v2.0_censat_v2.1.m.bed /home/hyunwoo/ACCtools-pipeline/90_skype_run/COLO829/01_depth/COLO829.win.stat.gz 30_skype_pipe/COLO829_14_45_00 --alt /home/hyunwoo/ACCtools-pipeline/90_skype_run/COLO829/20_alignasm/COLO829.utg.aln.paf --orignal_paf_loc /home/hyunwoo/ACCtools-pipeline/90_skype_run/COLO829/20_alignasm/COLO829.ctg.paf /home/hyunwoo/ACCtools-pipeline/90_skype_run/COLO829/20_alignasm/COLO829.utg.paf -t 128"
+#args = parser.parse_args(t.split()[1:])
 
 PREFIX = args.prefix
 
