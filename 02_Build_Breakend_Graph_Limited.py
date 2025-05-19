@@ -1122,6 +1122,7 @@ def alt_preprocess_contig(contig_data : list, telo_label : list, ref_qry_ratio :
     len_count = Counter()
     idx = 0
     cnt = 0
+    telo_node_count = 0
     
     telo_inside_dict = dict()
     for chr_name, data in telo_dict.items():
@@ -1138,6 +1139,7 @@ def alt_preprocess_contig(contig_data : list, telo_label : list, ref_qry_ratio :
         len_count[contig_data[i-1][CTG_NAM]]+=contig_data[i-1][CHR_END]-contig_data[i-1][CHR_STR]
         cnt+=1
         if telo_label[i-1][0] != '0' or ((i-1) in telo_connect_info):
+            telo_node_count += 1
             is_telo = True
         if contig_data[i-1][CHR_NAM] != 'chrM':
             chrM_flag = False
@@ -1154,7 +1156,7 @@ def alt_preprocess_contig(contig_data : list, telo_label : list, ref_qry_ratio :
                 checker = 2
             else:
                 if is_telo:
-                    checker = 3
+                    checker = 5
                 else:
                     if is_front_back_repeat:
                         bound = RPT_BND_CONTIG_BOUND
@@ -1168,11 +1170,16 @@ def alt_preprocess_contig(contig_data : list, telo_label : list, ref_qry_ratio :
 
             if chrM_flag:
                 checker = 0   
-            if (checker>0 and checker != 3) or is_telo:
+            if (checker>0 and checker != 3 and checker != 5):
                 using_contig_list.append(curr_contig_name)
                 contig_type[curr_contig_name] = checker
                 contig_terminal_node[curr_contig_name] = (idx, idx+cnt-1)
                 idx+=cnt
+            elif is_telo:
+                using_contig_list.append(curr_contig_name)
+                contig_type[curr_contig_name] = checker
+                contig_terminal_node[curr_contig_name] = (idx, idx+telo_node_count-1)
+                idx+=telo_node_count
 
             if checker == 3 and cnt == 1:
                 now_chr = contig_data[i-1][CHR_NAM]
@@ -1191,6 +1198,7 @@ def alt_preprocess_contig(contig_data : list, telo_label : list, ref_qry_ratio :
             curr_contig_first_fragment = contig_data[i]
             cnt = 0
             checker = 0
+            telo_node_count = 0
             is_telo = False
             is_front_back_repeat = False
             chrM_flag = True
@@ -2439,23 +2447,39 @@ def contig_preprocessing_00(PAF_FILE_PATH_ : list):
         new_contig_data = new_contig_data[0:-1]
         contig_data_size = len(new_contig_data)
         bias = cnt
-
         for contig_name_list in [set(preprocess_result), set(preprocess_type3_result)]:
             for i in range(contig_data_size):
                 if new_contig_data[i][CTG_NAM] in contig_name_list:
-                    temp_list = new_contig_data[i][:10]
-                    temp_list.append(preprocess_contig_type[new_contig_data[i][CTG_NAM]])
-                    temp_list.append(preprocess_terminal_nodes[new_contig_data[i][CTG_NAM]][0])
-                    temp_list.append(preprocess_terminal_nodes[new_contig_data[i][CTG_NAM]][1])
-                    temp_list.append(new_node_telo_label[i][0])
-                    temp_list.append(new_node_telo_label[i][1])
-                    temp_list.append(new_contig_data[i][11])
-                    temp_list.append(new_node_repeat_label[i][0])
-                    temp_list.append(new_node_repeat_label[i][1])
-                    temp_list.append(new_node_repeat_censat_label[i][1])
-                    temp_list.append('1.'+str(new_contig_data[i][10]))
-                    alt_telo_ppc_contig.append(temp_list)
-        
+                    c_type = preprocess_contig_type[new_contig_data[i][CTG_NAM]]
+                    if c_type == 5:
+                        if (new_node_telo_label[i][0] != '0' or (i in telcon_set)):
+                            new_type = 3
+                            temp_list = new_contig_data[i][:10]
+                            temp_list.append(new_type)
+                            temp_list.append(preprocess_terminal_nodes[new_contig_data[i][CTG_NAM]][0])
+                            temp_list.append(preprocess_terminal_nodes[new_contig_data[i][CTG_NAM]][1])
+                            temp_list.append(new_node_telo_label[i][0])
+                            temp_list.append(new_node_telo_label[i][1])
+                            temp_list.append(new_contig_data[i][11])
+                            temp_list.append(new_node_repeat_label[i][0])
+                            temp_list.append(new_node_repeat_label[i][1])
+                            temp_list.append(new_node_repeat_censat_label[i][1])
+                            temp_list.append('1.'+str(new_contig_data[i][10]))
+                            alt_telo_ppc_contig.append(temp_list)
+                    else:
+                        temp_list = new_contig_data[i][:10]
+                        temp_list.append(preprocess_contig_type[new_contig_data[i][CTG_NAM]])
+                        temp_list.append(preprocess_terminal_nodes[new_contig_data[i][CTG_NAM]][0])
+                        temp_list.append(preprocess_terminal_nodes[new_contig_data[i][CTG_NAM]][1])
+                        temp_list.append(new_node_telo_label[i][0])
+                        temp_list.append(new_node_telo_label[i][1])
+                        temp_list.append(new_contig_data[i][11])
+                        temp_list.append(new_node_repeat_label[i][0])
+                        temp_list.append(new_node_repeat_label[i][1])
+                        temp_list.append(new_node_repeat_censat_label[i][1])
+                        temp_list.append('1.'+str(new_contig_data[i][10]))
+                        alt_telo_ppc_contig.append(temp_list)
+
         alt_mainflow_dict = find_mainflow(alt_telo_ppc_contig)
         alt_telo_ppc_size = len(alt_telo_ppc_contig)
         for i in range(alt_telo_ppc_size):
@@ -2493,7 +2517,7 @@ def contig_preprocessing_00(PAF_FILE_PATH_ : list):
         for alt_final_using_contig_ in [set(alt_final_using_contig), set(alt_final_using_type3_contig)]:
             for i in range(0, len(alt_final_contig)):
                 if alt_final_contig[i][CTG_NAM] in alt_final_using_contig_:
-                    alt_final_contig[i][CTG_TYP] = alt_final_ctg_typ[alt_final_contig[i][CTG_NAM]]
+                    alt_final_contig[i][CTG_TYP] = alt_final_ctg_typ[alt_final_contig[i][CTG_NAM]] if alt_final_ctg_typ[alt_final_contig[i][CTG_NAM]] != 5 else 3
                     alt_final_contig[i][CTG_STRND] = alt_final_preprocess_terminal_nodes[alt_final_contig[i][CTG_NAM]][0] + bias
                     alt_final_contig[i][CTG_ENDND] = alt_final_preprocess_terminal_nodes[alt_final_contig[i][CTG_NAM]][1] + bias
                     real_alt_final_contig.append(alt_final_contig[i])
