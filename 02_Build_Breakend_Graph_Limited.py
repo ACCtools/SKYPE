@@ -2886,6 +2886,7 @@ if args.alt is None:
     PAF_FILE_PATH = [args.paf_file_path]
 else:
     PAF_FILE_PATH = [args.paf_file_path, args.alt]
+
 PREPROCESSED_PAF_FILE_PATH = (PAF_FILE_PATH[0] +'.ppc.paf')
 CHROMOSOME_INFO_FILE_PATH = args.reference_fai_path
 TELOMERE_INFO_FILE_PATH = args.telomere_bed_path
@@ -2907,7 +2908,8 @@ if nclose_node_count > FAIL_NCLOSE_COUNT:
     else:
         is_unitig_reduced = True
         logging.info("Retrying with the primary PAF file.")
-        contig_preprocessing_00([args.paf_file_path, args.paf_file_path])
+        PAF_FILE_PATH = [args.paf_file_path, args.paf_file_path]
+        contig_preprocessing_00(PAF_FILE_PATH)
         globals().update(nclose_calc())
         if nclose_node_count > FAIL_NCLOSE_COUNT:
             logging.info("No method to reduce nclose node count.")
@@ -3399,7 +3401,8 @@ if not last_success:
         sys.exit(1)
     else:
         is_unitig_reduced = True
-        contig_preprocessing_00([args.paf_file_path, args.paf_file_path])
+        PAF_FILE_PATH = [args.paf_file_path, args.paf_file_path]
+        contig_preprocessing_00(PAF_FILE_PATH)
         globals().update(nclose_calc())
         if nclose_node_count > FAIL_NCLOSE_COUNT:
             logging.info("NClose node count is too high.")
@@ -3436,6 +3439,9 @@ with open(f'{PREFIX}/path_data.pkl', 'wb') as f:
 
 with open(f'{PREFIX}/path_di_data.pkl', 'wb') as f:
     pkl.dump(path_di_list_dict, f)
+
+with open(f'{PREFIX}/paf_file_path.pkl', 'wb') as f:
+    pkl.dump(PAF_FILE_PATH, f)
 
 with open(f'{PREFIX}/report.txt', 'a') as f:
     cnt = sum(i[1] for i in cnt_list)

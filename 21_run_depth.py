@@ -1054,17 +1054,11 @@ def connect_nclose_telo(contig_data : list, using_node : list, type_3_graph : di
 parser = argparse.ArgumentParser(description="Find breakend contigs with contig data and map data")
 
 # 위치 인자 정의
-parser.add_argument("paf_file_path", 
-                    help="Path to the original PAF file.")
-
 parser.add_argument("ppc_paf_file_path", 
                     help="Path to the preprocessed PAF file.")
 
 parser.add_argument("prefix", 
                     help="Pefix for pipeline")
-
-parser.add_argument("--alt", 
-                    help="Path to an alternative PAF file (optional).")
 
 parser.add_argument("--pandepth_loc", 
                     help="Pandepth binary location.", type=str, default="pandepth")
@@ -1087,17 +1081,12 @@ PREFIX = args.prefix
 
 # 20_fill_path code
 
-PAF_FILE_PATH = []
+with open(f'{PREFIX}/paf_file_path.pkl', 'rb') as f:
+    PAF_FILE_PATH = pkl.load(f)
+
 paf_file = []
-if args.alt is None:
-    PAF_FILE_PATH = [args.paf_file_path]
-    paf_file.append(import_data(PAF_FILE_PATH[0]))
-else:
-    PAF_FILE_PATH = [args.paf_file_path, args.alt]
-    primary_paf = import_data(PAF_FILE_PATH[0])
-    alt_paf = import_data(PAF_FILE_PATH[1])
-    paf_file.append(primary_paf)
-    paf_file.append(alt_paf)
+for paf_loc in PAF_FILE_PATH:
+    paf_file.append(import_data(paf_loc))
 
 # 10_breakend_graph_build_paths code
 
@@ -1213,7 +1202,7 @@ def get_paf_run(paf_loc):
             logging.info(f"{paf_loc} : Pandepth failed retry {retry} time")
     
     logging.info(f"{paf_loc} : Pandepth failed retry limit exceed")
-    sys.exit(1)
+    raise Exception("Pandepth failed")
 
 with ProcessPoolExecutor(max_workers=THREAD) as executor:
     futures = []
