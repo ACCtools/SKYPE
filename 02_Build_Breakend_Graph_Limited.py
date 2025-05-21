@@ -2872,10 +2872,10 @@ parser.add_argument("--progress",
 parser.add_argument("--verbose", 
                     help="Enable index, paf output (Counld be slow at HDD)", action='store_true')
 
-# args = parser.parse_args()
+args = parser.parse_args()
 
-t = "02_Build_Breakend_Graph_Limited.py /home/hyunwoo/ACCtools-pipeline/90_skype_run/HCC1187/20_alignasm/HCC1187.ctg.aln.paf public_data/chm13v2.0.fa.fai public_data/chm13v2.0_telomere.bed public_data/chm13v2.0_repeat.m.bed public_data/chm13v2.0_censat_v2.1.m.bed /home/hyunwoo/ACCtools-pipeline/90_skype_run/HCC1187/01_depth/HCC1187.win.stat.gz 30_skype_pipe/HCC1187_13_47_55 --alt /home/hyunwoo/ACCtools-pipeline/90_skype_run/HCC1187/20_alignasm/HCC1187.utg.aln.paf --orignal_paf_loc /home/hyunwoo/ACCtools-pipeline/90_skype_run/HCC1187/20_alignasm/HCC1187.ctg.paf /home/hyunwoo/ACCtools-pipeline/90_skype_run/HCC1187/20_alignasm/HCC1187.utg.paf -t 128"
-args = parser.parse_args(t.split()[1:])
+# t = "02_Build_Breakend_Graph_Limited.py /home/hyunwoo/ACCtools-pipeline/90_skype_run/HCC1187/20_alignasm/HCC1187.ctg.aln.paf public_data/chm13v2.0.fa.fai public_data/chm13v2.0_telomere.bed public_data/chm13v2.0_repeat.m.bed public_data/chm13v2.0_censat_v2.1.m.bed /home/hyunwoo/ACCtools-pipeline/90_skype_run/HCC1187/01_depth/HCC1187.win.stat.gz 30_skype_pipe/HCC1187_13_47_55 --alt /home/hyunwoo/ACCtools-pipeline/90_skype_run/HCC1187/20_alignasm/HCC1187.utg.aln.paf --orignal_paf_loc /home/hyunwoo/ACCtools-pipeline/90_skype_run/HCC1187/20_alignasm/HCC1187.ctg.paf /home/hyunwoo/ACCtools-pipeline/90_skype_run/HCC1187/20_alignasm/HCC1187.utg.paf -t 128"
+# args = parser.parse_args(t.split()[1:])
 
 PREFIX = args.prefix
 
