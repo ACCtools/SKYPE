@@ -4,7 +4,7 @@ using SINNLS
 
 function load_nnls_array(filename::String)
     h5open(filename, "r") do file
-        return read(file["A"]), read(file["B"]), read(file["dep_data"]), read(file["init_cols"]), read(file["w_pri"])
+        return read(file["A"]), read(file["B"]), read(file["dep_data"]), read(file["init_cols"]), read(file["w_pri"]), read(file["B_depth_start"])
     end
 end
          
@@ -17,9 +17,8 @@ end
 function run_nnls(PREFIX::String, THREAD::Int)
     BLAS.set_num_threads(THREAD)
 
-    A, B, dep_data, init_cols, w_pri = load_nnls_array("$PREFIX/matrix.h5")
+    A, B, dep_data, init_cols, w_pri, b_start_ind = load_nnls_array("$PREFIX/matrix.h5")
     H = 3600.0
-
 
     n = size(A)[2]
     A_T = eltype(A)
@@ -58,5 +57,5 @@ function run_nnls(PREFIX::String, THREAD::Int)
     A_fail = load_fail_array("$PREFIX/matrix.h5")
     predict_B = vcat(predict_suc_B, A_fail * weights_final)
 
-    return error, b_norm, weights_final, predict_B
+    return error, b_norm, weights_final, predict_B, b_start_ind
 end

@@ -8,6 +8,7 @@ import sys
 import h5py
 import logging
 import argparse
+import itertools
 import collections
 import glob
 
@@ -52,6 +53,9 @@ MAX_PATH_CNT = 100
 CHROMOSOME_COUNT = 23
 DIR_FOR = 1
 TELOMERE_EXPANSION = 5 * K
+
+NCLOSE_WEIGHT = 0.5
+NCLOSE_WEIGHT_USE = True
 
 
 def import_index_path(file_path : str) -> list:
@@ -300,6 +304,12 @@ def np_safe_divide(a, b):
 def get_relative_path(p):
     return tuple(p.split('/')[-3:])
 
+def norm_B(B, B_nclose):
+    l2x = np.linalg.norm(B, 2)
+    l2y = np.linalg.norm(B_nclose, 2)
+
+    return l2x / l2y
+
 parser = argparse.ArgumentParser(description="SKYPE depth analysis")
 
 parser.add_argument("censat_bed_path",
@@ -331,8 +341,7 @@ parser.add_argument("--progress",
 
 args = parser.parse_args()
 
-# t = "22_save_matrix.py public_data/chm13v2.0_censat_v2.1.m.bed 20_acc_pipe/Caki-1.p/Caki-1.p.aln.paf.ppc.paf /home/hyunwoo/51g_cancer_denovo/51_depth_data/Caki-1.win.stat.gz public_data/chm13v2.0_telomere.bed public_data/chm13v2.0.fa.fai public_data/chm13v2.0_cytobands_allchrs.bed 30_skype_pipe/Caki-1_03_00_34 -t 64"
-
+# t = "22_save_matrix.py public_data/chm13v2.0_censat_v2.1.m.bed /Data/hyunwoo/00_skype_run_data/Caki-1/20_alignasm/Caki-1.ctg.aln.paf.ppc.paf /Data/hyunwoo/00_skype_run_data/Caki-1/01_depth/Caki-1.win.stat.gz public_data/chm13v2.0_telomere.bed public_data/chm13v2.0.fa.fai public_data/chm13v2.0_cytobands_allchrs.bed 30_skype_pipe/Caki-1_01_17_11 -t 64"
 # args = parser.parse_args(t.split()[1:])
 
 bed_data = import_bed(args.censat_bed_path)
@@ -357,6 +366,33 @@ with open(f'{PREFIX}/path_data.pkl', 'rb') as f:
 
 with open(f'{PREFIX}/path_di_data.pkl', 'rb') as f:
     path_di_list_dict = pkl.load(f)
+
+with open(f'{PREFIX}/nclose2cov.pkl', 'rb') as f:
+    nclose2cov = pkl.load(f)
+
+ncm = 0
+nclose2int = dict()
+
+cov_nclose_set = set()
+cov_telo_set = set()
+
+B_nclose_list = []
+
+if NCLOSE_WEIGHT_USE:
+    for k, v in nclose2cov.items():
+        if v > 0:
+            nclose2int[k] = ncm
+            ncm += 1
+            B_nclose_list.append(v)
+
+            if isinstance(k, tuple):
+                cov_nclose_set.add(k)
+            elif isinstance(k, int):
+                cov_telo_set.add(k)
+            else:
+                assert(False)
+
+B_nclose = np.asarray(B_nclose_list, dtype=np.float32)
 
 telo_connected_node_dict = collections.defaultdict(list)
 for chr_info, contig_id in telo_connected_node:
@@ -560,6 +596,12 @@ for cs in chr_no_filt_st_list:
 
 B = np.asarray(v, dtype=np.float32)
 
+norm_nclose_weight = 0
+if NCLOSE_WEIGHT_USE:
+    norm_nclose_weight = norm_B(B, B_nclose) * NCLOSE_WEIGHT
+    B_nclose *= norm_nclose_weight
+    logging.info(f"Nclose norm weight : {norm_nclose_weight}")
+
 with open(f'{PREFIX}/contig_pat_vec_data.pkl', 'rb') as f:
     paf_ans_list, key_list, int2key, key_ord_list = pkl.load(f)
 
@@ -581,12 +623,14 @@ m = np.shape(B)[0]
 n = len(paf_ans_list) + fclen // 4 + bclen // 4
 ncnt = 0
 
-A = np.empty((n, m), dtype=np.float32, order='C')
+A = np.empty((n, ncm + m), dtype=np.float32, order='C')
+fm = ncm + filter_len
 
 filter_vec_list = []
 tot_loc_list = []
 bv_loc_list = []
 
+tmp_n = np.zeros(ncm, dtype=np.float32)
 tmp_v = np.zeros(m, dtype=np.float32)
 
 tar_def_path_ind_dict = dict()
@@ -597,13 +641,33 @@ for path, key_int_list in tqdm(paf_ans_list, desc='Recover depth from seperated 
 
     for ki in key_int_list[1:]:
         tmp_v += vec_dict[ki]
-    A[ncnt, :] = tmp_v
+
+    if NCLOSE_WEIGHT_USE:
+        tmp_n.fill(0)
+        idx_edge_nclose_list = [pair[1] for pair in import_index_path(path)[1:-1]]
+
+        for i in [0, -1]:
+            if idx_edge_nclose_list[i] in cov_telo_set:
+                tmp_n[nclose2int[idx_edge_nclose_list[i]]] += norm_nclose_weight
+
+        for nclose_pair in itertools.pairwise(idx_edge_nclose_list):
+            nclose_rev_pair = (nclose_pair[1], nclose_pair[0])
+
+            for obj in [nclose_pair, nclose_rev_pair]:
+                if obj in cov_nclose_set:
+                    tmp_n[nclose2int[obj]] += norm_nclose_weight
+
+        A[ncnt, :ncm] = tmp_n
+    A[ncnt, ncm:] = tmp_v
 
     path = get_relative_path(path)
     if path in tar_def_path_set:
         tar_def_path_ind_dict[path] = ncnt
 
     ncnt += 1
+
+
+tmp_n.fill(0)
 
 for_dir_data = []
 for i in tqdm(range(1, fclen // 4 + 1), desc='Parse coverage from forward-directed outlier contig gz files',
@@ -631,7 +695,7 @@ for i in tqdm(range(1, fclen // 4 + 1), desc='Parse coverage from forward-direct
         tar_def_loc = tar_chr_data[tar_chr]
         temp_ncnt = tar_def_path_ind_dict[tar_def_loc]
 
-        ref_vec = A[temp_ncnt, :][chr_filt_idx_dict[tar_chr]]
+        ref_vec = A[temp_ncnt, ncm:][chr_filt_idx_dict[tar_chr]]
         ref_loc_vec = vec[chr_filt_idx_dict[tar_chr]]
         ref_loc_vec[ref_vec == 0] = 0
 
@@ -643,11 +707,14 @@ for i in tqdm(range(1, fclen // 4 + 1), desc='Parse coverage from forward-direct
             vec = np.zeros_like(vec)
         elif ref_weight > 0:
             vec[chr_filt_idx_dict[tar_chr]] = ref_loc_vec
-            vec += A[temp_ncnt, :] * ref_weight
+            vec += A[temp_ncnt, ncm:] * ref_weight
         else:
             ref_weight = 0
 
-    A[ncnt, :] = vec
+    if NCLOSE_WEIGHT_USE:
+        A[ncnt, :ncm] = tmp_n
+    A[ncnt, ncm:] = vec
+
     for_dir_data.append([temp_ncnt, ncnt, ref_weight])
 
     ncnt += 1
@@ -656,7 +723,7 @@ init_cols = []
 for i in tar_chr_data.values():
     init_cols.append(tar_def_path_ind_dict[i])
 
-A_pri = A[init_cols, :filter_len].T
+A_pri = A[init_cols, ncm:fm].T
 w_pri = nnls(A_pri, B[:filter_len])[0]
 
 # with open(f'{PREFIX}/pri_weight_data.pkl', 'wb') as f:
@@ -674,9 +741,12 @@ for i in tqdm(range(1, bclen // 4 + 1), desc='Parse coverage from backward-direc
     ov = get_vec_from_stat_loc(ov_loc)
     bv = get_vec_from_stat_loc(bv_loc)
 
-    A[ncnt, :] = ov + bv
+    if NCLOSE_WEIGHT_USE:
+        A[ncnt, :ncm] = tmp_n
+    A[ncnt, ncm:] = ov + bv
     ncnt += 1
 
+B = np.hstack((B_nclose, B))
 
 dep_list = []
 for k in key_ord_list:
@@ -692,16 +762,18 @@ def create_np_dataset(name, arr):
     dset.write_direct(arr)
 
 with h5py.File(f'{PREFIX}/matrix.h5', 'w') as hf:
-    dset_A = hf.create_dataset('A', shape=A[:, :filter_len].shape, dtype=A.dtype)
-    dset_B = hf.create_dataset('B', shape=B[:filter_len].shape, dtype=B.dtype)
-    dset_A_fail = hf.create_dataset('A_fail', shape=A[:, filter_len:].shape, dtype=A.dtype)
-    dset_B_fail = hf.create_dataset('B_fail', shape=B[filter_len:].shape, dtype=B.dtype)
+    dset_A = hf.create_dataset('A', shape=A[:, :fm].shape, dtype=A.dtype)
+    dset_B = hf.create_dataset('B', shape=B[:fm].shape, dtype=B.dtype)
+    dset_A_fail = hf.create_dataset('A_fail', shape=A[:, fm:].shape, dtype=A.dtype)
+    dset_B_fail = hf.create_dataset('B_fail', shape=B[fm:].shape, dtype=B.dtype)
 
-    dset_A.write_direct(A, source_sel=np.s_[:, :filter_len])
-    dset_B.write_direct(B, source_sel=np.s_[:filter_len])
-    dset_A_fail.write_direct(A, source_sel=np.s_[:, filter_len:])
-    dset_B_fail.write_direct(B, source_sel=np.s_[filter_len:])
+    dset_A.write_direct(A, source_sel=np.s_[:, :fm])
+    dset_B.write_direct(B, source_sel=np.s_[:fm])
+    dset_A_fail.write_direct(A, source_sel=np.s_[:, fm:])
+    dset_B_fail.write_direct(B, source_sel=np.s_[fm:])
 
     create_np_dataset('dep_data', np.asarray(dep_list, dtype=np.int64))
     create_np_dataset('init_cols', np.asarray(init_cols, dtype=np.int64))
     create_np_dataset('w_pri', np.asarray(w_pri, dtype=np.float64))
+
+    hf.create_dataset('B_depth_start', data=ncm)

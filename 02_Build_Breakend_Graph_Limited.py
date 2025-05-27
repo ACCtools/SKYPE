@@ -29,7 +29,6 @@ logging.basicConfig(
     level=logging.INFO,
     datefmt='%m/%d/%Y %I:%M:%S %p',
 )
-logging.info('SKYPE pipeline start')
 logging.info("02_Build_Breakend_Graph start")
 
 CTG_NAM = 0
@@ -109,7 +108,9 @@ BREAKEND_CEN_RATIO_THRESHOLD = 1.5
 
 repeat_merge_gap = 0
 
-def import_data(file_path : list) -> list :
+MAX_OVERLAP_SCORE = 3
+
+def import_data(file_path : str) -> list :
     contig_data = []
     int_induce_idx = [1, 2, 3, 6, 7, 8, 9]
     idx = 0
@@ -193,26 +194,242 @@ def import_censat_repeat_data(file_path : str) -> dict :
     fai_file.close()
     return repeat_data
 
+def extract_unique_segments(intervals: list) -> list:
+    events = []
+    for st, nd in intervals:
+        events.append((st,  1))
+        events.append((nd, -1))
+        
+    events.sort(key=lambda x: (x[0], x[1]))
 
-def div_orignial_paf(file_path : str) -> list:
+    res = []
+    curr_cov = 0
+    start = None
+
+    for x, delta in events:
+        prev = curr_cov
+        curr_cov += delta
+
+        if prev != 1 and curr_cov == 1:
+            start = x
+        elif prev == 1 and curr_cov != 1:
+            res.append((start, x))
+
+    return res
+
+def max_overlap(intervals, target_intervals):
+    events = []
+    temp_inf = 2 * len(intervals) if target_intervals else 0
+
+    for l in target_intervals:
+        st, nd = l[1], l[2]
+        events.append((st, +temp_inf))
+        events.append((nd, -temp_inf))
+
+    for l in intervals:
+        st, nd = l[1], l[2]
+        events.append((st, +1))
+        events.append((nd, -1))
+
+    events.sort(key=lambda x: (x[0], x[1]))
+
+    curr = max_cnt = 0
+    for _, delta in events:
+        curr += delta
+        max_cnt = max(max_cnt, curr)
+    
+    return max_cnt - temp_inf
+
+
+def is_stepwise_nonoverlapping(intervals: list) -> bool:
+    n = len(intervals)
+    if n < 2:
+        return True
+
+    for i in range(1, n):
+        st_i, nd_i       = intervals[i]
+        st_prev, nd_prev = intervals[i-1]
+
+        if st_i <= st_prev:
+            return False
+
+        if nd_i <= nd_prev:
+            return False
+
+        if i >= 2:
+            _, nd_prev2 = intervals[i-2]
+            if st_i < nd_prev2:
+                return False
+
+    return True
+
+def get_qry_cord_data(paf_path: str, get_ori_cord: bool = False) -> tuple:
+    end_idx_dict = dict()
+    paf_data_list = []
+
+    with open(paf_path, "r") as paf_file:
+        for line in paf_file:
+            cols = line.rstrip("\n").split("\t")
+            # [contig, start, end, mapq]
+            tar_data = [
+                cols[0],
+                int(cols[2]),
+                int(cols[3]),
+                int(cols[11])
+            ]
+
+            if get_ori_cord:
+                tar_col = None
+                for col in cols:
+                    if col.startswith('xi:A:'):
+                        tar_col = col
+                        break
+
+                ori_type, ori_cord = tar_col.split(':')[-1].split('_')
+                tar_data.append(int(ori_cord) if ori_type == 'P' else -1)
+
+            paf_data_list.append(tar_data)
+
+    if paf_data_list:
+        current_contig = paf_data_list[0][0]
+        start_idx = 0
+        for i, entry in enumerate(paf_data_list):
+            contig = entry[0]
+            if contig != current_contig:
+                end_idx_dict[current_contig] = (start_idx, i - 1)
+                current_contig = contig
+                start_idx = i
+
+        end_idx_dict[current_contig] = (start_idx, len(paf_data_list) - 1)
+    
+    return paf_data_list, end_idx_dict
+
+def is_alt_contained_in_segments(segments: list, alt_segments: list) -> bool:
+    n = len(segments)
+    for st_b, nd_b in alt_segments:
+        ok = False
+        for i, (st_a, nd_a) in enumerate(segments):
+            cond_start = True if i == 0 else (st_a <= st_b)
+            cond_end   = True if i == n-1 else (nd_b <= nd_a)
+
+            if cond_start and cond_end:
+                ok = True
+                break
+        if not ok:
+            return False
+    return True
+
+def div_orignial_paf(original_paf_path: str, aln_paf_path: str, contig_data: list) -> set:
     not_using_contig = set()
-    with open(file_path, "r") as paf_file:
-        for curr_contig in paf_file:
-            a = curr_contig.split("\t")
-            flag = None
-            for i in a:
-                if i.startswith("tp:A:"):
-                    if i[5] == 'P':
-                        flag = False
-                    else:
-                        flag = True
-                    break
-            assert(flag is not None)
-            if flag:
-                not_using_contig.add(a[0])
-            if int(a[11]) < 60:
-                not_using_contig.add(a[0])
+    
+    ori_paf_data_list, ori_end_idx_dict = get_qry_cord_data(original_paf_path)
+    aln_paf_data_list, aln_end_idx_dict = get_qry_cord_data(aln_paf_path, get_ori_cord=True)
+
+    ppc_aln_end_idx_dict = dict()
+
+    s = 0
+    contig_data_size = len(contig_data)
+    while s < contig_data_size:
+        e = contig_data[s][CTG_ENDND]
+        ctg_name = contig_data[s][CTG_NAM]
+        if ctg_name in ori_end_idx_dict:
+            ppc_aln_end_idx_dict[ctg_name] = (int(contig_data[s][CTG_GLOBALIDX][2:]), int(contig_data[e][CTG_GLOBALIDX][2:]))
+
+        s = e+1
+
+    for ctg_name, (ppc_st, ppc_nd) in ppc_aln_end_idx_dict.items():
+        ori_st, ori_nd = ori_end_idx_dict[ctg_name]
+        aln_st, aln_nd = aln_end_idx_dict[ctg_name]
+        assert(aln_st <= ppc_st and ppc_nd <= aln_nd)
+
+        overlap_score = max_overlap(ori_paf_data_list[ori_st:ori_nd+1], [aln_paf_data_list[ppc_st], aln_paf_data_list[ppc_nd]])
+
+        is_strong_paf = False
+
+        ori_aln_ind = []
+        for aln_ind in range(ppc_st, ppc_nd + 1):
+            ori_ind = aln_paf_data_list[aln_ind][-1]
+
+            if ori_ind != -1:
+                ori_aln_ind.append(ori_ind)
+
+        ori_aln_ind_set = set(ori_aln_ind)
+        
+        ori_aln_intervals = []
+        ori_alt_intervals = []
+        for ori_ind in range(ori_st, ori_nd + 1):
+            _, st, nd, _ = ori_paf_data_list[ori_ind]
+
+            if ori_ind in ori_aln_ind_set:
+                ori_aln_intervals.append((st, nd))
+            else:
+                ori_alt_intervals.append((st, nd))
+
+        
+        if is_stepwise_nonoverlapping(ori_aln_intervals):
+            ori_unq_intervals = extract_unique_segments(ori_aln_intervals)
+            is_strong_paf = is_alt_contained_in_segments(ori_unq_intervals, ori_alt_intervals)
+
+        if overlap_score >= MAX_OVERLAP_SCORE and not is_strong_paf:
+            not_using_contig.add(ctg_name)
+        
     return not_using_contig
+
+def is_trust_contig(original_paf_path: str, aln_paf_path: str, contig_data: list) -> set:
+    is_trust_contig_set = set()
+    
+    ori_paf_data_list, ori_end_idx_dict = get_qry_cord_data(original_paf_path)
+    aln_paf_data_list, aln_end_idx_dict = get_qry_cord_data(aln_paf_path, get_ori_cord=True)
+
+    ppc_aln_end_idx_dict = dict()
+
+    s = 0
+    contig_data_size = len(contig_data)
+    while s < contig_data_size:
+        e = contig_data[s][CTG_ENDND]
+        ctg_name = contig_data[s][CTG_NAM]
+        if ctg_name in ori_end_idx_dict:
+            ppc_aln_end_idx_dict[ctg_name] = (int(contig_data[s][CTG_GLOBALIDX][2:]), int(contig_data[e][CTG_GLOBALIDX][2:]))
+
+        s = e+1
+
+    for ctg_name, (ppc_st, ppc_nd) in ppc_aln_end_idx_dict.items():
+        ori_st, ori_nd = ori_end_idx_dict[ctg_name]
+        aln_st, aln_nd = aln_end_idx_dict[ctg_name]
+        assert(aln_st <= ppc_st and ppc_nd <= aln_nd)
+
+        overlap_score = max_overlap(ori_paf_data_list[ori_st:ori_nd+1], [aln_paf_data_list[ppc_st], aln_paf_data_list[ppc_nd]])
+
+        is_strong_paf = False
+
+        ori_aln_ind = []
+        for aln_ind in range(ppc_st, ppc_nd + 1):
+            ori_ind = aln_paf_data_list[aln_ind][-1]
+
+            if ori_ind != -1:
+                ori_aln_ind.append(ori_ind)
+
+        ori_aln_ind_set = set(ori_aln_ind)
+        
+        ori_aln_intervals = []
+        ori_alt_intervals = []
+        for ori_ind in range(ori_st, ori_nd + 1):
+            _, st, nd, _ = ori_paf_data_list[ori_ind]
+
+            if ori_ind in ori_aln_ind_set:
+                ori_aln_intervals.append((st, nd))
+            else:
+                ori_alt_intervals.append((st, nd))
+
+        
+        if is_stepwise_nonoverlapping(ori_aln_intervals):
+            ori_unq_intervals = extract_unique_segments(ori_aln_intervals)
+            is_strong_paf = is_alt_contained_in_segments(ori_unq_intervals, ori_alt_intervals)
+
+        if overlap_score < MAX_OVERLAP_SCORE and is_strong_paf:
+            is_trust_contig_set.add(ctg_name)
+        
+    return is_trust_contig_set
 
 def import_repeat_data(file_path : str) -> dict :
     fai_file = open(file_path, "r")
@@ -259,30 +476,58 @@ def inclusive_checker_tuple(tuple_a : tuple, tuple_b : tuple) -> bool :
     else:
         return False
 
-def extract_all_repeat_contig(contig_data : list, ctg_index : int, baseline : float = 0) -> set:
+def extract_all_repeat_contig(contig_data : list, repeat_data : dict, ctg_index : int, baseline : float = 0) -> set:
     contig_data_size = len(contig_data)
     rpt_con = set()
+    ends_map = {
+        chrom: [iv[1] for iv in intervals]
+        for chrom, intervals in repeat_data.items()
+    }
     s = 0
     while s<contig_data_size:
         e = contig_data[s][CTG_ENDND]
         flag = True
+        terminal_repeat = True
         total_ref_len = 0
         non_rpt_ref_len = 0
         for i in range(s, e+1):
             total_ref_len += contig_data[i][CHR_END] - contig_data[i][CHR_STR]
             if contig_data[i][ctg_index] == '0':
                 non_rpt_ref_len += contig_data[i][CHR_END] - contig_data[i][CHR_STR]
-            # if (i == s or i == e) and contig_data[i][ctg_index] == 'r':
-            #     flag = False
+
+        str_dir = contig_data[s][CTG_DIR]
+        str_ref = contig_data[s][CHR_STR if str_dir == '+' else CHR_END]
+        str_chr = contig_data[s][CHR_NAM]
+        end_dir = contig_data[e][CTG_DIR]
+        end_ref = contig_data[e][CHR_END if end_dir == '+' else CHR_STR]
+        end_chr = contig_data[e][CHR_NAM]
+
+        for ref, chrom in ((str_ref, str_chr), (end_ref, end_chr)):
+            intervals = repeat_data.get(chrom, [])
+            ends = ends_map.get(chrom, [])
+            if not intervals:
+                continue
+            c_start, c_end = ref, ref
+            idx = bisect.bisect_left(ends, c_start)
+            if idx < len(intervals):
+                iv_start, iv_end = intervals[idx]
+                if iv_start > ref or ref > iv_end:
+                    terminal_repeat = False
+
+        if ctg_index == CTG_CENSAT:
+            terminal_repeat = True
         if non_rpt_ref_len == 0 or baseline > non_rpt_ref_len/total_ref_len:
-            rpt_con.add(contig_data[s][CTG_NAM])
+            if terminal_repeat:
+                rpt_con.add(contig_data[s][CTG_NAM])
+            # else:
+            #     print(contig_data[s][CTG_NAM])
         s = e+1
     return rpt_con
 
-def check_censat_contig(all_repeat_censat_con : set, ORIGNAL_PAF_LOC_LIST : list):
+def check_censat_contig(all_repeat_censat_con : set, ALIGNED_PAF_LOC_LIST : list, ORIGNAL_PAF_LOC_LIST : list, contig_data : list):
     div_repeat_paf_name = set()
-    for i in ORIGNAL_PAF_LOC_LIST:
-        div_repeat_paf_name.update(div_orignial_paf(i))
+    for aln_origin, origin in zip(ALIGNED_PAF_LOC_LIST, ORIGNAL_PAF_LOC_LIST):
+        div_repeat_paf_name.update(div_orignial_paf(origin, aln_origin, contig_data))
     return all_repeat_censat_con & div_repeat_paf_name
     
 def extract_bnd_contig(contig_data : list) -> set:
@@ -296,7 +541,7 @@ def extract_bnd_contig(contig_data : list) -> set:
         s = e+1
     return bnd_contig
 
-def calculate_single_contig_ref_ratio(contig_data : list) -> float:
+def calculate_single_contig_ref_ratio(contig_data : list) -> tuple:
     total_ref_len = 0
     if contig_data[0][CTG_DIR] == '+':
         estimated_ref_len = contig_data[-1][CHR_END] - contig_data[0][CHR_STR]
@@ -388,7 +633,7 @@ def label_repeat_node(contig_data: list, repeat_data) -> list:
 
     return labels
 
-def preprocess_telo(contig_data : list, node_label : list) -> list :
+def preprocess_telo(contig_data : list, node_label : list) -> tuple :
     telo_preprocessed_contig = []
     telo_connect_info = {}
     semi_telomere_contig = []
@@ -785,7 +1030,7 @@ def initial_graph_build(contig_data : list, telo_data : dict) -> list :
                     adjacency[DIR_FOR][telo_connect_node].append([DIR_FOR, i, telo_dist])
     return adjacency
 
-def edge_optimization(contig_data : list, contig_adjacency : list, telo_dict : dict) -> list :
+def edge_optimization(contig_data : list, contig_adjacency : list, telo_dict : dict, asm2cov : dict) -> tuple :
     chr_corr = {}
     chr_rev_corr = {}
     contig_data_size = len(contig_data)
@@ -801,7 +1046,9 @@ def edge_optimization(contig_data : list, contig_adjacency : list, telo_dict : d
     chr_corr['chrXb'] = contig_data_size + 2*CHROMOSOME_COUNT - 1
     chr_corr['chrYb'] = contig_data_size + 2*CHROMOSOME_COUNT - 1
     chr_rev_corr[contig_data_size + 2*CHROMOSOME_COUNT - 1] = 'chrXb'
+    
     contig_pair_nodes = defaultdict(list)
+    telo_coverage = Counter()
     optimized_adjacency = [[[] for _ in range(contig_data_size + CHROMOSOME_COUNT*2)], [[] for _ in range(contig_data_size + CHROMOSOME_COUNT*2)]]
     for _ in range(2):
         for i in range(len(contig_data)+CHROMOSOME_COUNT*2):
@@ -827,6 +1074,7 @@ def edge_optimization(contig_data : list, contig_adjacency : list, telo_dict : d
             min_second_contig = min(min_second_contig, edge[1])
             max_second_contig = max(max_second_contig, edge[1])
             minmaxnode_contigpair[pair] = [min_first_contig, max_first_contig, min_second_contig, max_second_contig]
+    
     contig_data_size = len(contig_data)
     for i in range(2):
         for j in range(contig_data_size):
@@ -847,52 +1095,72 @@ def edge_optimization(contig_data : list, contig_adjacency : list, telo_dict : d
                     if edge[1] in minmaxnode_contigpair[(second_contig_name, first_contig_name)][0:2] \
                     or j in minmaxnode_contigpair[(second_contig_name, first_contig_name)][2:4]:
                         optimized_adjacency[i][j].append(edge)
+
+
     for i in range(contig_data_size, contig_data_size+2*CHROMOSOME_COUNT):
         telo_name = chr_rev_corr[i]
         telo_range = telo_dict[telo_name]
         for j in range(2):
             using_edge = []
             now_edge = [-1, 0, 0]
+            curr_coverage = 0
             for edge in optimized_adjacency[j][i]:
+                cl_ind, c_ind = map(int, contig_data[edge[1]][CTG_GLOBALIDX].split('.'))
+                if cl_ind < 2:
+                    name = ori_ctg_name_data[cl_ind][c_ind]
+                else:
+                    name = contig_data[edge[1]][CTG_NAM]
+                    asm2cov[name] = -1
                 if telo_name[-1]=='f':
                     if contig_data[edge[1]][CHR_STR]<=TELOMERE_CLUSTER_THRESHOLD:
                         if now_edge[0]<0:
+                            curr_coverage += asm2cov[name]
                             now_edge = edge
                         else:
                             if contig_data[now_edge[1]][CHR_STR] > contig_data[edge[1]][CHR_STR]:
+                                curr_coverage += asm2cov[name]
                                 now_edge = edge
                             elif contig_data[now_edge[1]][CHR_STR] == contig_data[edge[1]][CHR_STR]:
                                 if contig_data[now_edge[1]][CTG_LEN] > contig_data[edge[1]][CTG_LEN]:
+                                    curr_coverage += asm2cov[name]
                                     now_edge = edge
                     else:
                         telo_compress_flag = False
                         for existing_edge in using_edge:
                             if distance_checker(contig_data[existing_edge[1]], contig_data[edge[1]]) < TELOMERE_COMPRESS_RANGE:
                                 telo_compress_flag = True
+                                telo_coverage[existing_edge[1]] += asm2cov[name]
                                 break
                         if not telo_compress_flag:
+                            telo_coverage[edge[1]] += asm2cov[name]
                             using_edge.append(edge)
                 else:
                     if contig_data[edge[1]][CHR_END]>=telo_range[1]-TELOMERE_CLUSTER_THRESHOLD:
                         if now_edge[0]<0:
+                            curr_coverage += asm2cov[name]
                             now_edge = edge
                         else:
                             if contig_data[now_edge[1]][CHR_END] < contig_data[edge[1]][CHR_END]:
+                                curr_coverage += asm2cov[name]
                                 now_edge = edge
                             elif contig_data[now_edge[1]][CHR_END] == contig_data[edge[1]][CHR_END]:
-                                if contig_data[now_edge[1]][CTG_LEN] == contig_data[edge[1]][CTG_LEN]:
+                                if contig_data[now_edge[1]][CTG_LEN] > contig_data[edge[1]][CTG_LEN]:
+                                    curr_coverage += asm2cov[name]
                                     now_edge = edge
                     else:
                         telo_compress_flag = False
                         for existing_edge in using_edge:
                             if distance_checker(contig_data[existing_edge[1]], contig_data[edge[1]]) < TELOMERE_COMPRESS_RANGE:
                                 telo_compress_flag = True
+                                telo_coverage[existing_edge[1]] += asm2cov[name]
                                 break
                         if not telo_compress_flag:
+                            telo_coverage[edge[1]] += asm2cov[name]
                             using_edge.append(edge)
             if now_edge == [-1, 0, 0]:
                 pass
             else:
+                # telo_coverage[now_edge[1]] += curr_coverage # norm telomere coverage
                 using_edge.append(now_edge)
             optimized_adjacency[j][i] = using_edge
         
@@ -906,7 +1174,7 @@ def edge_optimization(contig_data : list, contig_adjacency : list, telo_dict : d
                 telo_connected_dict[k[1]] = chr_rev_corr[i]
                 telo_connected_graph_dict[chr_rev_corr[i]].append(k)
 
-    return telo_connected_set, telo_connected_dict, telo_connected_graph_dict
+    return telo_connected_set, telo_connected_dict, telo_connected_graph_dict, telo_coverage
 
 def calc_ratio(contig_data : list) -> dict:
     contig_data_size = len(contig_data)
@@ -935,7 +1203,7 @@ def calc_ratio(contig_data : list) -> dict:
     contig_data = contig_data[:-1]
     return ref_qry_ratio            
 
-def calc_chukji(contig_data : list) -> dict:
+def calc_chukji(contig_data : list) -> tuple:
     contig_data_size = len(contig_data)
     contig_data.append((0, 0, 0, 0, 0, 0, 0, 0, 0))
     total_ref_len = 0
@@ -1617,10 +1885,10 @@ def pass_pipeline(pre_contig_data, telo_dict, telo_bound_dict, repeat_data, repe
     return real_final_contig
 
 def extract_nclose_node(contig_data : list, bnd_contig : set, repeat_contig_name : set, \
-                        censat_contig_name : set, repeat_censat_data : dict, ORIGNAL_PAF_LOC_LIST : list, \
-                        telo_set : set, chr_len : dict) -> dict:
+                        censat_contig_name : set, repeat_censat_data : dict, ALIGNED_PAF_LOC_LIST : list, ORIGNAL_PAF_LOC_LIST : list, \
+                        telo_set : set, chr_len : dict, asm2cov : dict) -> tuple:
     s = 0
-    fake_bnd = {}
+    fake_bnd = dict()
     contig_data_size = len(contig_data)
     nclose_compress = defaultdict(list)
     nclose_start_compress = defaultdict(lambda : defaultdict(list))
@@ -1629,12 +1897,13 @@ def extract_nclose_node(contig_data : list, bnd_contig : set, repeat_contig_name
     nclose_dict = defaultdict(list)
     all_nclose_compress = defaultdict(list)
     telo_name_set = set()
+    nclose_coverage = Counter()
     for i in telo_set:
         telo_name_set.add(contig_data[i][CTG_NAM])
 
     div_repeat_paf_name = set()
-    for i in ORIGNAL_PAF_LOC_LIST:
-        div_repeat_paf_name.update(div_orignial_paf(i))
+    for aln_origin, origin in zip(ALIGNED_PAF_LOC_LIST, ORIGNAL_PAF_LOC_LIST):
+        div_repeat_paf_name.update(div_orignial_paf(origin, aln_origin, contig_data))
 
     while s<contig_data_size:
         e = contig_data[s][CTG_ENDND]
@@ -1730,6 +1999,8 @@ def extract_nclose_node(contig_data : list, bnd_contig : set, repeat_contig_name
                 ref_combo = 0
                 maxcombo=0
                 max_ref_combo = 0
+                st_idx = 0
+                ed_idx = 0
                 for i in range(st, ed+1):
                     if (contig_data[i][CTG_DIR], contig_data[i][CHR_NAM]) == max_chr:
                         combo+=1
@@ -1745,14 +2016,21 @@ def extract_nclose_node(contig_data : list, bnd_contig : set, repeat_contig_name
                 nclose_list = []
                 if max_chr not in ((contig_data[s][CTG_DIR], contig_data[s][CHR_NAM]), (contig_data[e][CTG_DIR], contig_data[e][CHR_NAM])) \
                     and st_idx != ed_idx:
-                    st_chr = (contig_data[st][CTG_DIR], contig_data[st][CHR_NAM])
-                    ed_chr = (contig_data[st_idx][CTG_DIR], contig_data[st_idx][CHR_NAM])
+                    st_chr = [contig_data[st][CTG_DIR], contig_data[st][CHR_NAM]]
+                    ed_chr = [contig_data[st_idx][CTG_DIR], contig_data[st_idx][CHR_NAM]]
+                    st_chr[0] = ed_chr[0] = '='
+                    st_chr = tuple(st_chr)
+                    ed_chr = tuple(ed_chr)
                     nclose_list.append([st, st_chr, st_idx, ed_chr])
-                    st_chr = (contig_data[ed_idx][CTG_DIR], contig_data[ed_idx][CHR_NAM])
-                    ed_chr = (contig_data[ed][CTG_DIR], contig_data[ed][CHR_NAM])
+                    st_chr = [contig_data[ed_idx][CTG_DIR], contig_data[ed_idx][CHR_NAM]]
+                    ed_chr = [contig_data[ed][CTG_DIR], contig_data[ed][CHR_NAM]]
+                    st_chr[0] = ed_chr[0] = '='
+                    st_chr = tuple(st_chr)
+                    ed_chr = tuple(ed_chr)
                     nclose_list.append([ed_idx, st_chr, ed, ed_chr])
                 else:
                     nclose_list.append([st, st_chr, ed, ed_chr])
+
                 for nclose in nclose_list:
                     st = nclose[0]
                     ed = nclose[2]
@@ -1770,10 +2048,17 @@ def extract_nclose_node(contig_data : list, bnd_contig : set, repeat_contig_name
                                 nclose_back_const = 2
                     if nclose_front_const + nclose_back_const >= 3:
                         continue
-
+                    if contig_data[st][CTG_NAM] == 'utg014079l':
+                        t=1
                     st_chr = nclose[1]
                     ed_chr = nclose[3]
-                    upd_contig_name = contig_data[st][CTG_NAM]  
+                    upd_contig_name = contig_data[st][CTG_NAM]
+                    cl_ind, c_ind = map(int, contig_data[st][CTG_GLOBALIDX].split('.'))
+                    if cl_ind < 2:
+                        cov_count_name = ori_ctg_name_data[cl_ind][c_ind]
+                    else:
+                        asm2cov[upd_contig_name] = -1
+                        cov_count_name = upd_contig_name
                     is_curr_ctg_repeat = upd_contig_name in repeat_contig_name
                     if chr2int(st_chr[1]) < chr2int(ed_chr[1]): 
                         for i in nclose_compress[(st_chr, ed_chr)]:
@@ -1784,8 +2069,10 @@ def extract_nclose_node(contig_data : list, bnd_contig : set, repeat_contig_name
                             dummy_list = [0,0,0,0,0,0,0,]
                             if distance_checker(contig_data[st], dummy_list+i[1]) < compress_limit \
                             and distance_checker(contig_data[ed], dummy_list + i[2]) < compress_limit:
+                                nclose_coverage[(i[3], i[4])] += asm2cov[cov_count_name]
                                 flag = False
                                 break
+                        # passed first filtering
                         if flag:
                             censat_st_chr = [st_chr[0], 0]
                             censat_ed_chr = [ed_chr[0], 0]
@@ -1803,6 +2090,7 @@ def extract_nclose_node(contig_data : list, bnd_contig : set, repeat_contig_name
                                         censat_ed_chr[1] = contig_data[ed][CHR_NAM] + "." + str(cnt)
                                         break
                                     cnt+=1
+                            # at least one of nclose is not censat
                             if censat_st_chr[1] == 0 \
                             or censat_ed_chr[1] == 0 :
                                 temp_list = [upd_contig_name, 
@@ -1820,9 +2108,12 @@ def extract_nclose_node(contig_data : list, bnd_contig : set, repeat_contig_name
                                     if flag:
                                         break
                                 nclose_compress[(st_chr, ed_chr)].append(temp_list)
+                                nclose_coverage[(st, ed)] += asm2cov[cov_count_name]
                                 nclose_dict[contig_data[s][CTG_NAM]].append((st, ed))
+                            # both are censat
                             else:
                                 key = (tuple(censat_st_chr), tuple(censat_ed_chr))
+                                # if censat only one can survive
                                 if key not in censat_nclose_compress:
                                     censat_nclose_compress.add(key)
                                     temp_list = [upd_contig_name, 
@@ -1840,6 +2131,7 @@ def extract_nclose_node(contig_data : list, bnd_contig : set, repeat_contig_name
                                         if flag:
                                             break
                                     nclose_compress[(st_chr, ed_chr)].append(temp_list)
+                                    nclose_coverage[(st, ed)] += asm2cov[cov_count_name]
                                     nclose_dict[contig_data[s][CTG_NAM]].append((st, ed))
                     elif chr2int(st_chr[1]) > chr2int(ed_chr[1]):
                         for i in nclose_compress[(ed_chr, st_chr)]:
@@ -1850,6 +2142,7 @@ def extract_nclose_node(contig_data : list, bnd_contig : set, repeat_contig_name
                             dummy_list = [0,0,0,0,0,0,0,]
                             if distance_checker(contig_data[st], dummy_list+i[2]) < compress_limit \
                             and distance_checker(contig_data[ed], dummy_list + i[1]) < compress_limit:
+                                nclose_coverage[(i[3], i[4])] += asm2cov[cov_count_name]
                                 flag = False
                                 break
                         if flag:
@@ -1885,6 +2178,7 @@ def extract_nclose_node(contig_data : list, bnd_contig : set, repeat_contig_name
                                         flag = True
                                     if flag:
                                         break
+                                nclose_coverage[(st, ed)] += asm2cov[cov_count_name]
                                 nclose_compress[(ed_chr, st_chr)].append(temp_list)
                                 nclose_dict[contig_data[s][CTG_NAM]].append((st, ed))
                             else:
@@ -1905,6 +2199,7 @@ def extract_nclose_node(contig_data : list, bnd_contig : set, repeat_contig_name
                                             flag = True
                                         if flag:
                                             break
+                                    nclose_coverage[(st, ed)] += asm2cov[cov_count_name]
                                     nclose_compress[(ed_chr, st_chr)].append(temp_list)
                                     nclose_dict[contig_data[s][CTG_NAM]].append((st, ed))
                     else:
@@ -1917,6 +2212,7 @@ def extract_nclose_node(contig_data : list, bnd_contig : set, repeat_contig_name
                                 dummy_list = [0,0,0,0,0,0,0,]
                                 if distance_checker(contig_data[st], dummy_list+i[1]) < compress_limit \
                                 and distance_checker(contig_data[ed], dummy_list + i[2]) < compress_limit:
+                                    nclose_coverage[(i[3], i[4])] += asm2cov[cov_count_name]
                                     flag = False
                                     break
                             if flag:
@@ -1962,6 +2258,7 @@ def extract_nclose_node(contig_data : list, bnd_contig : set, repeat_contig_name
                                                 nclose_end_compress[(st_chr, ed_chr)][i[0]].append(contig_data[s][CTG_NAM])
                                             if flag:
                                                 break
+                                    nclose_coverage[(st, ed)] += asm2cov[cov_count_name]
                                     nclose_compress[(st_chr, ed_chr)].append(temp_list)
                                     nclose_dict[contig_data[s][CTG_NAM]].append((st, ed))      
                                 else:
@@ -1992,6 +2289,7 @@ def extract_nclose_node(contig_data : list, bnd_contig : set, repeat_contig_name
                                                     nclose_end_compress[(st_chr, ed_chr)][i[0]].append(contig_data[s][CTG_NAM])
                                                 if flag:
                                                     break
+                                        nclose_coverage[(st, ed)] += asm2cov[cov_count_name]
                                         nclose_compress[(st_chr, ed_chr)].append(temp_list)
                                         nclose_dict[contig_data[s][CTG_NAM]].append((st, ed))  
                         else:
@@ -2003,6 +2301,7 @@ def extract_nclose_node(contig_data : list, bnd_contig : set, repeat_contig_name
                                 dummy_list = [0,0,0,0,0,0,0,]
                                 if distance_checker(contig_data[st], dummy_list+i[2]) < compress_limit \
                                 and distance_checker(contig_data[ed], dummy_list + i[1]) < compress_limit:
+                                    nclose_coverage[(i[3], i[4])] += asm2cov[cov_count_name]
                                     flag = False
                                     break
                             if flag:
@@ -2046,6 +2345,7 @@ def extract_nclose_node(contig_data : list, bnd_contig : set, repeat_contig_name
                                                 flag = True
                                         if flag:
                                             break
+                                    nclose_coverage[(st, ed)] += asm2cov[cov_count_name]
                                     nclose_compress[(ed_chr, st_chr)].append(temp_list)
                                     nclose_dict[contig_data[s][CTG_NAM]].append((st, ed))     
                                 else:
@@ -2074,10 +2374,11 @@ def extract_nclose_node(contig_data : list, bnd_contig : set, repeat_contig_name
                                                     flag = True
                                             if flag:
                                                 break
+                                        nclose_coverage[(st, ed)] += asm2cov[cov_count_name]
                                         nclose_compress[(ed_chr, st_chr)].append(temp_list)
                                         nclose_dict[contig_data[s][CTG_NAM]].append((st, ed))
         s = e+1
-    return nclose_dict, nclose_start_compress, nclose_end_compress, fake_bnd, all_nclose_compress
+    return nclose_dict, nclose_start_compress, nclose_end_compress, fake_bnd, all_nclose_compress, nclose_coverage
 
 def make_virtual_ord_ctg(contig_data, fake_bnd):
     contig_data_size = len(contig_data)
@@ -2561,7 +2862,7 @@ def contig_preprocessing_00(PAF_FILE_PATH_ : list):
 
     adjacency = initial_graph_build(real_final_contig, telo_bound_dict)
 
-    telo_connected_node, telo_connected_dict, _ = edge_optimization(real_final_contig, adjacency, telo_bound_dict)
+    telo_connected_node, telo_connected_dict, _, telo_coverage = edge_optimization(real_final_contig, adjacency, telo_bound_dict, asm2cov)
 
     # for i in range(total_len):
     #     if i in telo_connected_node:
@@ -2634,7 +2935,7 @@ def contig_preprocessing_00(PAF_FILE_PATH_ : list):
 
     adjacency = initial_graph_build(real_final_contig, telo_bound_dict)
 
-    telo_connected_node, telo_connected_dict, telo_connected_graph_dict = edge_optimization(real_final_contig, adjacency, telo_bound_dict)
+    telo_connected_node, telo_connected_dict, telo_connected_graph_dict, telo_coverage = edge_optimization(real_final_contig, adjacency, telo_bound_dict, asm2cov)
 
     rev_telo_connected_dict = defaultdict(list)
 
@@ -2667,6 +2968,8 @@ def contig_preprocessing_00(PAF_FILE_PATH_ : list):
             for j in i:
                 print(j, end="\t", file=f)
             print("", file=f)
+
+    return telo_coverage
 
 def nclose_calc():
     chr_len = find_chr_len(CHROMOSOME_INFO_FILE_PATH)
@@ -2703,17 +3006,18 @@ def nclose_calc():
             telo_node_count+=1
             telo_set.add(j[1])
 
-    rpt_con = extract_all_repeat_contig(contig_data, CTG_RPTCASE, NON_REPEAT_NOISE_RATIO)
-    rpt_censat_con = extract_all_repeat_contig(contig_data, CTG_CENSAT)
-    rpt_censat_con = check_censat_contig(rpt_censat_con, ORIGNAL_PAF_LOC_LIST)
+    repeat_data = import_repeat_data_00(REPEAT_INFO_FILE_PATH)
     repeat_censat_data = import_repeat_data(CENSAT_PATH)
+    rpt_con = extract_all_repeat_contig(contig_data, repeat_data, CTG_RPTCASE, NON_REPEAT_NOISE_RATIO)
+    rpt_censat_con = extract_all_repeat_contig(contig_data, repeat_censat_data, CTG_CENSAT)
+    rpt_censat_con = check_censat_contig(rpt_censat_con, PAF_FILE_PATH, ORIGNAL_PAF_LOC_LIST, contig_data)
 
     bnd_contig = extract_bnd_contig(contig_data)
 
 
     # Type 1, 2, 4에 대해서 
-    nclose_nodes, nclose_start_compress, nclose_end_compress, vctg_dict, all_nclose_comp = \
-        extract_nclose_node(contig_data, bnd_contig, rpt_con, rpt_censat_con, repeat_censat_data, ORIGNAL_PAF_LOC_LIST, telo_set, chr_len)
+    nclose_nodes, nclose_start_compress, nclose_end_compress, vctg_dict, all_nclose_comp, nclose_coverage = \
+        extract_nclose_node(contig_data, bnd_contig, rpt_con, rpt_censat_con, repeat_censat_data, PAF_FILE_PATH, ORIGNAL_PAF_LOC_LIST, telo_set, chr_len, asm2cov)
 
     virtual_ordinary_contig = make_virtual_ord_ctg(contig_data, vctg_dict)
     with open(f"{PREFIX}/virtual_ordinary_contig.txt", "wt") as f:
@@ -2746,10 +3050,12 @@ def nclose_calc():
         else:
             all_nclose_type[(contig_b[CHR_NAM], contig_a[CHR_NAM])].append((pair[1], pair[0]))
 
+    uncomp_node_count = 0
     with open(f"{PREFIX}/all_nclose_nodes_list.txt", "wt") as f:
         for i in all_nclose_type:
             print(f"{i[0]}, {i[1]}, {len(all_nclose_type[i])}", file=f)
             for pair in all_nclose_type[i]:
+                uncomp_node_count += 2
                 contig_a = contig_data[pair[0]]
                 contig_b = contig_data[pair[1]]
                 list_a = [contig_a[CTG_NAM], contig_a[CTG_DIR], contig_a[CHR_STR], contig_a[CHR_END]]
@@ -2832,13 +3138,26 @@ def nclose_calc():
             print("", file=f)
 
     nclose_node_count = 0
-
     with open(f"{PREFIX}/nclose_nodes_index.txt", "wt") as f: 
         for j in nclose_nodes:
             for i in nclose_nodes[j]:
                 nclose_node_count += 2
                 print(j, i[0], i[1], contig_data[i[0]][CTG_TYP], file=f)
+                
+    
+    with open(f'{PREFIX}/nclose2cov.pkl', 'wb') as f:
+        trusted_contig_name = set()
+        for aln_origin, origin in zip(PAF_FILE_PATH, ORIGNAL_PAF_LOC_LIST):
+            trusted_contig_name.update(is_trust_contig(origin, aln_origin, contig_data))
+        for k in nclose_coverage:
+            if contig_data[k[0]][CTG_TYP] == 2 or ((contig_data[k[0]][CTG_NAM] not in trusted_contig_name) or (contig_data[k[0]][CTG_NAM] in rpt_con)):
+                nclose_coverage[k] = -1
+        pkl.dump(nclose_coverage | telo_coverage, f)
+    with open(f'{PREFIX}/nclose2cov.txt', 'wt') as f:
+        for k, v in (nclose_coverage | telo_coverage).items():
+            print(k, v, file=f)
 
+    logging.info(f"Uncompressed NClose node count : {uncomp_node_count}")    
     logging.info(f"NClose node count : {nclose_node_count}")
     logging.info(f"Telomere connected node count : {telo_node_count}")
     return locals()
@@ -2870,11 +3189,11 @@ parser.add_argument("-t", "--thread",
 parser.add_argument("--progress", 
                     help="Show progress bar", action='store_true')
 parser.add_argument("--verbose", 
-                    help="Enable index, paf output (Counld be slow at HDD)", action='store_true')
+                    help="Enable index, paf output (Could be slow at HDD)", action='store_true')
 
 args = parser.parse_args()
 
-# t = "02_Build_Breakend_Graph_Limited.py /home/hyunwoo/ACCtools-pipeline/90_skype_run/HCC1187/20_alignasm/HCC1187.ctg.aln.paf public_data/chm13v2.0.fa.fai public_data/chm13v2.0_telomere.bed public_data/chm13v2.0_repeat.m.bed public_data/chm13v2.0_censat_v2.1.m.bed /home/hyunwoo/ACCtools-pipeline/90_skype_run/HCC1187/01_depth/HCC1187.win.stat.gz 30_skype_pipe/HCC1187_13_47_55 --alt /home/hyunwoo/ACCtools-pipeline/90_skype_run/HCC1187/20_alignasm/HCC1187.utg.aln.paf --orignal_paf_loc /home/hyunwoo/ACCtools-pipeline/90_skype_run/HCC1187/20_alignasm/HCC1187.ctg.paf /home/hyunwoo/ACCtools-pipeline/90_skype_run/HCC1187/20_alignasm/HCC1187.utg.paf -t 128"
+# t = "02_Build_Breakend_Graph_Limited.py /Data/hyunwoo/00_skype_run_data/U2OS/20_alignasm/U2OS.ctg.aln.paf public_data/chm13v2.0.fa.fai public_data/chm13v2.0_telomere.bed public_data/chm13v2.0_repeat.m.bed public_data/chm13v2.0_censat_v2.1.m.bed /Data/hyunwoo/00_skype_run_data/U2OS/01_depth/U2OS.win.stat.gz 30_skype_pipe/U2OS_00_09_34 --alt /Data/hyunwoo/00_skype_run_data/U2OS/20_alignasm/U2OS.utg.aln.paf --orignal_paf_loc /Data/hyunwoo/00_skype_run_data/U2OS/20_alignasm/U2OS.ctg.paf /Data/hyunwoo/00_skype_run_data/U2OS/20_alignasm/U2OS.utg.paf -t 64"
 # args = parser.parse_args(t.split()[1:])
 
 PREFIX = args.prefix
@@ -2896,8 +3215,23 @@ ORIGNAL_PAF_LOC_LIST = args.orignal_paf_loc
 main_stat_loc = args.main_stat_path
 PRINT_IDX_FILE = args.verbose
 
+gfa_file_path = []
+asm2cov = Counter()
+# with open(f'{PREFIX}/asm2cov.pkl', 'rb') as f:
+#     gfa_file_path, asm2cov = pkl.load(f)
+
+ori_ctg_name_data = []
+for ori_paf_loc in PAF_FILE_PATH:
+    ori_ctg_name_list = []
+    with open(ori_paf_loc, 'r') as f:
+        for paf_line in f:
+            paf_line = paf_line.split('\t')
+            ori_ctg_name_list.append(paf_line[CTG_NAM])
+    
+    ori_ctg_name_data.append(ori_ctg_name_list)
+
 is_unitig_reduced = False
-contig_preprocessing_00(PAF_FILE_PATH)
+telo_coverage = contig_preprocessing_00(PAF_FILE_PATH)
 globals().update(nclose_calc())
 
 if nclose_node_count > FAIL_NCLOSE_COUNT:
@@ -2909,7 +3243,7 @@ if nclose_node_count > FAIL_NCLOSE_COUNT:
         is_unitig_reduced = True
         logging.info("Retrying with the primary PAF file.")
         PAF_FILE_PATH = [args.paf_file_path, args.paf_file_path]
-        contig_preprocessing_00(PAF_FILE_PATH)
+        telo_coverage = contig_preprocessing_00(PAF_FILE_PATH)
         globals().update(nclose_calc())
         if nclose_node_count > FAIL_NCLOSE_COUNT:
             logging.info("No method to reduce nclose node count.")
@@ -3402,7 +3736,7 @@ if not last_success:
     else:
         is_unitig_reduced = True
         PAF_FILE_PATH = [args.paf_file_path, args.paf_file_path]
-        contig_preprocessing_00(PAF_FILE_PATH)
+        telo_coverage = contig_preprocessing_00(PAF_FILE_PATH)
         globals().update(nclose_calc())
         if nclose_node_count > FAIL_NCLOSE_COUNT:
             logging.info("NClose node count is too high.")

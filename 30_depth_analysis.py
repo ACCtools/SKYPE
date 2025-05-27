@@ -586,8 +586,9 @@ def get_vec_from_ki(ki):
     
     return ki, np.asarray(v, dtype=np.float32)
 with h5py.File(f'{PREFIX}/matrix.h5', 'r') as hf:
-    B = np.hstack([hf['B'][:], hf['B_fail'][:]])
-os.remove(f'{PREFIX}/matrix.h5')
+    ncm = hf['B_depth_start'][()]
+    B = np.hstack([hf['B'][ncm:], hf['B_fail'][:]])
+# os.remove(f'{PREFIX}/matrix.h5')
 
 with open(f'{PREFIX}/contig_pat_vec_data.pkl', 'rb') as f:
     paf_ans_list, key_list, int2key, _ = pkl.load(f)

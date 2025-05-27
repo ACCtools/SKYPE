@@ -211,7 +211,7 @@ def form_adjusted_contig(node, paf_data):
     new_node[CTG_END] = paf_data[3]
     new_node[9] = paf_data[4]
     new_node[10] = paf_data[5]
-    new_node[13] = 'cs:Z:' + paf_data[6]
+    new_node[-1] = 'cs:Z:' + paf_data[6]
     return new_node
 
 def cs_to_cigar(cs_tag: str) -> str:
@@ -547,14 +547,14 @@ def process_raw_contig_list(full_connected_path, key_cnt):
                     curr_contig_data = [curr_contig_rc[CHR_STR], curr_contig_rc[CHR_END],
                                         curr_contig_rc[CTG_STR], curr_contig_rc[CTG_END],
                                         curr_contig[9], curr_contig[10],
-                                        curr_contig[13][5:]]
+                                        curr_contig[-1][5:]]
 
                     next_contig_origin = form_normal_contig(next_contig)
                     
                     next_contig_data = [next_contig_rc[CHR_STR], next_contig_rc[CHR_END],
                                         next_contig_rc[CTG_STR], next_contig_rc[CTG_END],
                                         next_contig_origin[9], next_contig_origin[10],
-                                        next_contig_origin[13][5:]]
+                                        next_contig_origin[-1][5:]]
                     # try:
                     #     assert(not (inclusive_checker_pair(tuple(curr_contig_data[0:2]), tuple(next_contig_data[0:2])) \
                     #            or inclusive_checker_pair(tuple(next_contig_data[0:2]), tuple(curr_contig_data[0:2]))))

@@ -411,7 +411,7 @@ non_type4_top_path = []
 for ind, w in weights_sorted_data:
     paf_loc = tot_loc_list[ind]
     key = paf_loc.split('/')[-3]
-    if paf_loc.split('/')[-3] != '11_ref_ratio_outliers' and w > meandepth / 10: # weight > 1/2N
+    if paf_loc.split('/')[-3] != '11_ref_ratio_outliers' and w > meandepth / 100: # weight > 1/2N
         non_type4_top_path.append(paf_loc)
         path_dict[paf_loc] = w
 
