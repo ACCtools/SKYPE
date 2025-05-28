@@ -3152,7 +3152,6 @@ def nclose_calc():
     trusted_contig_name = set()
     for aln_origin, origin in zip(PAF_FILE_PATH, ORIGNAL_PAF_LOC_LIST):
         trusted_contig_name.update(is_trust_contig(origin, aln_origin, contig_data))
-    print("utg061785l" in trusted_contig_name)
     with open(f'{PREFIX}/nclose2cov.pkl', 'wb') as f:
         for k in nclose_coverage:
             if contig_data[k[0]][CTG_TYP] == 2 or ((contig_data[k[0]][CTG_NAM] not in trusted_contig_name) or (contig_data[k[0]][CTG_NAM] in rpt_con)):
