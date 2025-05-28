@@ -1272,7 +1272,7 @@ def pipeline_preprocess_contig(contig_data : list, telo_label : list, ref_qry_ra
     for i in range(1, contig_data_size+1):
         len_count[contig_data[i-1][CTG_NAM]]+=contig_data[i-1][CHR_END]-contig_data[i-1][CHR_STR]
         cnt+=1
-        if telo_label[i-1][0] != '0'  or ((i-1) in telo_connect_info):
+        if (i-1) in telo_connect_info:
             is_telo = True
         if contig_data[i-1][CHR_NAM]!='chrM':
             chrM_flag = False
@@ -1334,7 +1334,7 @@ def preprocess_contig(contig_data : list, telo_label : list, ref_qry_ratio : dic
     for i in range(1, contig_data_size+1):
         len_count[contig_data[i-1][CTG_NAM]]+=contig_data[i-1][CHR_END]-contig_data[i-1][CHR_STR]
         cnt+=1
-        if telo_label[i-1][0] != '0'  or ((i-1) in telo_connect_info):
+        if (i-1) in telo_connect_info:
             is_telo = True
         if contig_data[i-1][CHR_NAM]!='chrM':
             chrM_flag = False
@@ -1408,7 +1408,7 @@ def alt_preprocess_contig(contig_data : list, telo_label : list, ref_qry_ratio :
     for i in range(1, contig_data_size+1):
         len_count[contig_data[i-1][CTG_NAM]]+=contig_data[i-1][CHR_END]-contig_data[i-1][CHR_STR]
         cnt+=1
-        if telo_label[i-1][0] != '0' or ((i-1) in telo_connect_info):
+        if (i-1) in telo_connect_info:
             telo_node_count += 1
             is_telo = True
         if contig_data[i-1][CHR_NAM] != 'chrM':
@@ -3246,7 +3246,7 @@ parser.add_argument("--verbose",
 
 args = parser.parse_args()
 
-# t = "02_Build_Breakend_Graph_Limited.py /Data/hyunwoo/00_skype_run_data/U2OS/20_alignasm/U2OS.ctg.aln.paf public_data/chm13v2.0.fa.fai public_data/chm13v2.0_telomere.bed public_data/chm13v2.0_repeat.m.bed public_data/chm13v2.0_censat_v2.1.m.bed /Data/hyunwoo/00_skype_run_data/U2OS/01_depth/U2OS.win.stat.gz 30_skype_pipe/U2OS_00_09_34 --alt /Data/hyunwoo/00_skype_run_data/U2OS/20_alignasm/U2OS.utg.aln.paf --orignal_paf_loc /Data/hyunwoo/00_skype_run_data/U2OS/20_alignasm/U2OS.ctg.paf /Data/hyunwoo/00_skype_run_data/U2OS/20_alignasm/U2OS.utg.paf -t 64"
+# t = "02_Build_Breakend_Graph_Limited.py /home/hyunwoo/ACCtools-pipeline/90_skype_run/U2OS/20_alignasm/U2OS.ctg.aln.paf public_data/chm13v2.0.fa.fai public_data/chm13v2.0_telomere.bed public_data/chm13v2.0_repeat.m.bed public_data/chm13v2.0_censat_v2.1.m.bed /home/hyunwoo/ACCtools-pipeline/90_skype_run/U2OS/01_depth/U2OS.win.stat.gz 30_skype_pipe/U2OS_22_04_22 --alt /home/hyunwoo/ACCtools-pipeline/90_skype_run/U2OS/20_alignasm/U2OS.utg.aln.paf --orignal_paf_loc /home/hyunwoo/ACCtools-pipeline/90_skype_run/U2OS/20_alignasm/U2OS.ctg.paf /home/hyunwoo/ACCtools-pipeline/90_skype_run/U2OS/20_alignasm/U2OS.utg.paf -t 128"
 # args = parser.parse_args(t.split()[1:])
 
 PREFIX = args.prefix
