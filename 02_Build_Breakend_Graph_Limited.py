@@ -101,12 +101,14 @@ FORCE_TELOMERE_THRESHOLD = 10*K
 TELOMERE_CLUSTER_THRESHOLD = 500*K
 SUBTELOMERE_LENGTH = 500*K
 
+NCLOSE_COVERAGE_TRUSTABLE_ONLY = False
+
 MIN_FLANK_SIZE_BP = 1*M
 
 WEAK_BREAKEND_CEN_RATIO_THRESHOLD = 1.3
 BREAKEND_CEN_RATIO_THRESHOLD = 1.5
 
-repeat_merge_gap = 0
+REPEAT_MERGE_GAP = 0
 
 MAX_OVERLAP_SCORE = 3
 
@@ -174,7 +176,7 @@ def import_repeat_data_00(file_path : str) -> dict :
         if len(repeat_data[temp_list[0]])==0:
             repeat_data[temp_list[0]].append(curr_patch)
         else:
-            if abs(curr_patch[0] - repeat_data[temp_list[0]][-1][1]) < repeat_merge_gap:
+            if abs(curr_patch[0] - repeat_data[temp_list[0]][-1][1]) < REPEAT_MERGE_GAP:
                 repeat_data[temp_list[0]][-1] = (repeat_data[temp_list[0]][-1][0], curr_patch[1])
             else:
                 repeat_data[temp_list[0]].append(curr_patch)
@@ -1891,6 +1893,7 @@ def extract_nclose_node(contig_data : list, bnd_contig : set, repeat_contig_name
     fake_bnd = dict()
     contig_data_size = len(contig_data)
     nclose_compress = defaultdict(list)
+    nclose_compress_track = defaultdict(list)
     nclose_start_compress = defaultdict(lambda : defaultdict(list))
     nclose_end_compress = defaultdict(lambda : defaultdict(list))
     censat_nclose_compress = set()
@@ -2048,8 +2051,6 @@ def extract_nclose_node(contig_data : list, bnd_contig : set, repeat_contig_name
                                 nclose_back_const = 2
                     if nclose_front_const + nclose_back_const >= 3:
                         continue
-                    if contig_data[st][CTG_NAM] == 'utg014079l':
-                        t=1
                     st_chr = nclose[1]
                     ed_chr = nclose[3]
                     upd_contig_name = contig_data[st][CTG_NAM]
@@ -2070,6 +2071,7 @@ def extract_nclose_node(contig_data : list, bnd_contig : set, repeat_contig_name
                             if distance_checker(contig_data[st], dummy_list+i[1]) < compress_limit \
                             and distance_checker(contig_data[ed], dummy_list + i[2]) < compress_limit:
                                 nclose_coverage[(i[3], i[4])] += asm2cov[cov_count_name]
+                                nclose_compress_track[(i[3], i[4])].append((st, ed))
                                 flag = False
                                 break
                         # passed first filtering
@@ -2143,6 +2145,7 @@ def extract_nclose_node(contig_data : list, bnd_contig : set, repeat_contig_name
                             if distance_checker(contig_data[st], dummy_list+i[2]) < compress_limit \
                             and distance_checker(contig_data[ed], dummy_list + i[1]) < compress_limit:
                                 nclose_coverage[(i[3], i[4])] += asm2cov[cov_count_name]
+                                nclose_compress_track[(i[3], i[4])].append((st, ed))
                                 flag = False
                                 break
                         if flag:
@@ -2213,6 +2216,7 @@ def extract_nclose_node(contig_data : list, bnd_contig : set, repeat_contig_name
                                 if distance_checker(contig_data[st], dummy_list+i[1]) < compress_limit \
                                 and distance_checker(contig_data[ed], dummy_list + i[2]) < compress_limit:
                                     nclose_coverage[(i[3], i[4])] += asm2cov[cov_count_name]
+                                    nclose_compress_track[(i[3], i[4])].append((st, ed))
                                     flag = False
                                     break
                             if flag:
@@ -2302,6 +2306,7 @@ def extract_nclose_node(contig_data : list, bnd_contig : set, repeat_contig_name
                                 if distance_checker(contig_data[st], dummy_list+i[2]) < compress_limit \
                                 and distance_checker(contig_data[ed], dummy_list + i[1]) < compress_limit:
                                     nclose_coverage[(i[3], i[4])] += asm2cov[cov_count_name]
+                                    nclose_compress_track[(i[3], i[4])].append((st, ed))
                                     flag = False
                                     break
                             if flag:
@@ -2378,7 +2383,7 @@ def extract_nclose_node(contig_data : list, bnd_contig : set, repeat_contig_name
                                         nclose_compress[(ed_chr, st_chr)].append(temp_list)
                                         nclose_dict[contig_data[s][CTG_NAM]].append((st, ed))
         s = e+1
-    return nclose_dict, nclose_start_compress, nclose_end_compress, fake_bnd, all_nclose_compress, nclose_coverage
+    return nclose_dict, nclose_start_compress, nclose_end_compress, fake_bnd, all_nclose_compress, nclose_coverage, nclose_compress_track
 
 def make_virtual_ord_ctg(contig_data, fake_bnd):
     contig_data_size = len(contig_data)
@@ -3016,7 +3021,7 @@ def nclose_calc():
 
 
     # Type 1, 2, 4에 대해서 
-    nclose_nodes, nclose_start_compress, nclose_end_compress, vctg_dict, all_nclose_comp, nclose_coverage = \
+    nclose_nodes, nclose_start_compress, nclose_end_compress, vctg_dict, all_nclose_comp, nclose_coverage, nclose_compress_track = \
         extract_nclose_node(contig_data, bnd_contig, rpt_con, rpt_censat_con, repeat_censat_data, PAF_FILE_PATH, ORIGNAL_PAF_LOC_LIST, telo_set, chr_len, asm2cov)
 
     virtual_ordinary_contig = make_virtual_ord_ctg(contig_data, vctg_dict)
@@ -3144,15 +3149,64 @@ def nclose_calc():
                 nclose_node_count += 2
                 print(j, i[0], i[1], contig_data[i[0]][CTG_TYP], file=f)
                 
-    
+    trusted_contig_name = set()
+    for aln_origin, origin in zip(PAF_FILE_PATH, ORIGNAL_PAF_LOC_LIST):
+        trusted_contig_name.update(is_trust_contig(origin, aln_origin, contig_data))
+    print("utg061785l" in trusted_contig_name)
     with open(f'{PREFIX}/nclose2cov.pkl', 'wb') as f:
-        trusted_contig_name = set()
-        for aln_origin, origin in zip(PAF_FILE_PATH, ORIGNAL_PAF_LOC_LIST):
-            trusted_contig_name.update(is_trust_contig(origin, aln_origin, contig_data))
         for k in nclose_coverage:
             if contig_data[k[0]][CTG_TYP] == 2 or ((contig_data[k[0]][CTG_NAM] not in trusted_contig_name) or (contig_data[k[0]][CTG_NAM] in rpt_con)):
                 nclose_coverage[k] = -1
         pkl.dump(nclose_coverage | telo_coverage, f)
+
+    with open(f'{PREFIX}/nclose_cord_list.pkl', 'wb') as f:
+        nclose_cord_list = []
+        total_nclose_cord_list_contig_name = []
+        nclose_idx_corr = []
+        trusted_nclose_count = 0
+        for j in nclose_nodes:
+            for i in nclose_nodes[j]:
+                if contig_data[i[0]][CTG_TYP] == 2:
+                    continue
+                if contig_data[i[0]][CTG_NAM] not in trusted_contig_name and NCLOSE_COVERAGE_TRUSTABLE_ONLY:
+                    continue
+                trustable = True
+                s = i[0] if i[0] < i[1] else i[1]
+                e = i[1] if i[0] < i[1] else i[0]
+                curr_nclose_cord_list = []
+                nclose_cord_list_contig_name = []
+                nclose_maxcover_s = contig_data[s][CHR_END] if contig_data[s][CTG_DIR] == '+' else contig_data[s][CHR_STR]
+                nclose_maxcover_e = contig_data[e][CHR_STR] if contig_data[e][CTG_DIR] == '+' else contig_data[e][CHR_END]
+                start_chr = contig_data[i[0]][CHR_NAM] if i[0] < i[1] else contig_data[i[1]][CHR_NAM]
+                end_chr = contig_data[i[1]][CHR_NAM] if i[0] < i[1] else contig_data[i[0]][CHR_NAM]
+                curr_nclose_cord_list.append([start_chr, nclose_maxcover_s, contig_data[s][CTG_DIR],
+                                             end_chr, nclose_maxcover_e, contig_data[e][CTG_DIR],
+                                             trusted_nclose_count])
+                nclose_cord_list_contig_name.append(curr_nclose_cord_list[-1]+[contig_data[s][CTG_NAM]])
+                for compressed_contig in nclose_compress_track[tuple(i)]:
+                    compress_s = compressed_contig[0] if contig_data[compressed_contig[0]][CHR_NAM] == start_chr else compressed_contig[1]
+                    compress_e = compressed_contig[1] if contig_data[compressed_contig[1]][CHR_NAM] == end_chr else compressed_contig[0]
+                    compressed_contig_name = contig_data[compress_s][CTG_NAM]
+                    if compressed_contig_name not in trusted_contig_name and NCLOSE_COVERAGE_TRUSTABLE_ONLY:
+                        trustable = False
+                    nclose_maxcover_s = contig_data[compress_s][CHR_STR] if contig_data[compress_s][CTG_DIR] == '+' else contig_data[compress_s][CHR_END]
+                    nclose_maxcover_e = contig_data[compress_e][CHR_END] if contig_data[compress_e][CTG_DIR] == '+' else contig_data[compress_e][CHR_STR]
+                    curr_nclose_cord_list.append([start_chr, nclose_maxcover_s, contig_data[compress_s][CTG_DIR],
+                                                    end_chr, nclose_maxcover_e, contig_data[compress_e][CTG_DIR],
+                                                    trusted_nclose_count])
+                    nclose_cord_list_contig_name.append(curr_nclose_cord_list[-1]+[contig_data[s][CTG_NAM]])
+                if trustable:
+                    nclose_cord_list += curr_nclose_cord_list
+                    total_nclose_cord_list_contig_name += nclose_cord_list_contig_name
+                    nclose_idx_corr.append(i)
+                    trusted_nclose_count += 1
+        pkl.dump((nclose_cord_list, nclose_idx_corr), f)
+        def contig_form(contig):
+            return f"{contig[CTG_NAM]}, {contig[CHR_NAM]}, {contig[CHR_STR]}, {contig[CHR_END]}, {contig[CTG_DIR]}"
+        with open(f"{PREFIX}/nclose_cord_list.txt", "wt") as f2:
+            for i in total_nclose_cord_list_contig_name:
+                print(*i, sep="\t", file=f2)
+            print(nclose_idx_corr, file=f2)
     with open(f'{PREFIX}/nclose2cov.txt', 'wt') as f:
         for k, v in (nclose_coverage | telo_coverage).items():
             print(k, v, file=f)

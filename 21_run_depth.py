@@ -140,7 +140,7 @@ def get_key_from_index_folder(key):
     
     n = len(path_list_dict[key])
     for i in range(n):
-        index_key_data.append(get_key_from_index_file(f"{PREFIX}/00_raw/{key}/{i + 1}.inedx.txt"))
+        index_key_data.append(get_key_from_index_file(f"{PREFIX}/00_raw/{key}/{i + 1}.index.txt"))
 
     return key, index_key_data
 

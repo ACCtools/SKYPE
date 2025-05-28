@@ -54,10 +54,6 @@ CHROMOSOME_COUNT = 23
 DIR_FOR = 1
 TELOMERE_EXPANSION = 5 * K
 
-NCLOSE_WEIGHT = 0.5
-NCLOSE_WEIGHT_USE = True
-
-
 def import_index_path(file_path : str) -> list:
     file_path_list = file_path.split('/')
     key = file_path_list[-2]
@@ -336,6 +332,12 @@ parser.add_argument("prefix",
 parser.add_argument("-t", "--thread",
                     help="Number of thread", type=int)
 
+parser.add_argument("--nclose_weight",
+                    help="Nclose weight", type=float, default=0.5)
+
+parser.add_argument("--not_use_nclose_weight",
+                    help="Do not use nclose weight", action='store_false')
+
 parser.add_argument("--progress",
                     help="Show progress bar", action='store_true')
 
@@ -357,6 +359,9 @@ RATIO_OUTLIER_FOLDER = f"{PREFIX}/11_ref_ratio_outliers/"
 front_contig_path = RATIO_OUTLIER_FOLDER + "front_jump/"
 back_contig_path = RATIO_OUTLIER_FOLDER + "back_jump/"
 TELO_CONNECT_NODES_INFO_PATH = PREFIX + "/telomere_connected_list.txt"
+
+NCLOSE_WEIGHT = args.nclose_weight
+NCLOSE_WEIGHT_USE = args.not_use_nclose_weight
 
 contig_data = import_data2(PREPROCESSED_PAF_FILE_PATH)
 telo_connected_node = extract_telomere_connect_contig(TELO_CONNECT_NODES_INFO_PATH)
@@ -423,7 +428,7 @@ for (chrf, chrfid), (chrb, chrbid) in default_path_list:
     if tar_chr == 'chrX':
         non_bnd_path_list = []
         for i in range(n):
-            path_loc = f"{PREFIX}/00_raw/{key}/{i + 1}.inedx.txt"
+            path_loc = f"{PREFIX}/00_raw/{key}/{i + 1}.index.txt"
             idx_data = import_index_path(path_loc)
             path_counter_list = import_index_cnt(path_loc)
 
@@ -443,7 +448,7 @@ for (chrf, chrfid), (chrb, chrbid) in default_path_list:
     tar_path_loc = None
 
     for i in range(n):
-        path_loc = f"{PREFIX}/00_raw/{key}/{i + 1}.inedx.txt"
+        path_loc = f"{PREFIX}/00_raw/{key}/{i + 1}.index.txt"
         idx_data = import_index_path(path_loc)
         if {idx_data[1][1], idx_data[-2][1]} == {chrfid, chrbid} and (idx_data[-1][1], idx_data[-1][2]) == (0, 0):
             tar_path_loc = path_loc
@@ -452,7 +457,7 @@ for (chrf, chrfid), (chrb, chrbid) in default_path_list:
     if tar_path_loc is None:
         non_bnd_path_list = []
         for i in range(n):
-            path_loc = f"{PREFIX}/00_raw/{key}/{i + 1}.inedx.txt"
+            path_loc = f"{PREFIX}/00_raw/{key}/{i + 1}.index.txt"
             idx_data = import_index_path(path_loc)
             if (idx_data[-1][1], idx_data[-1][2]) != (0, 0):
                 break
