@@ -3165,7 +3165,7 @@ def nclose_calc():
         trusted_nclose_count = 0
         for j in nclose_nodes:
             for i in nclose_nodes[j]:
-                if contig_data[i[0]][CTG_TYP] == 2:
+                if contig_data[i[0]][CTG_TYP] == 2 or contig_data[i[0]][CTG_GLOBALIDX][0] == '2':
                     continue
                 if contig_data[i[0]][CTG_NAM] not in trusted_contig_name and NCLOSE_COVERAGE_TRUSTABLE_ONLY:
                     continue

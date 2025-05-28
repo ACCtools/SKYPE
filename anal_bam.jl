@@ -155,7 +155,7 @@ function analyze_alignments!(read_name::String, align_infos::Vector{AlnInfo},
     end
 end
 
-function anal_bam(bam_loc::String, fai_loc::String, nclose_cord_list::Vector{Vector{Any}})
+function anal_bam(bam_loc::String, fai_loc::String, nclose_cord_list::Vector{Vector{Any}}, is_progress_bar::Bool)
     global chr2int, chr_cord_data, chr_cord_info_data, idx2nclose
     chr2int = get_chr2int(fai_loc)
 
@@ -191,12 +191,17 @@ function anal_bam(bam_loc::String, fai_loc::String, nclose_cord_list::Vector{Vec
     ac_nclose_cnt = Counter(0)
     wa_nclose_cnt = Counter(0)
 
-    p = ProgressUnknown(desc="Analysis bam alignments:", dt=0.1, showspeed=true)
+    if is_progress_bar
+        p = ProgressUnknown(desc="Analysis bam alignments:", dt=0.1, showspeed=true)
+    end
+
     while !eof(reader)
         empty!(record)
         read!(reader, record)
         
-        next!(p)
+        if is_progress_bar
+            next!(p)
+        end
         read_name = XAM.BAM.tempname(record)
 
         if read_name != current_read_name
@@ -213,6 +218,10 @@ function anal_bam(bam_loc::String, fai_loc::String, nclose_cord_list::Vector{Vec
         end
     end
 
+    if is_progress_bar
+        println()
+    end
+    
     if current_read_name !== nothing && length(align_infos) >= 2
         analyze_alignments!(current_read_name, align_infos, ac_nclose_cnt, wa_nclose_cnt)
     end
