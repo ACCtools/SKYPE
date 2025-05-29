@@ -35,7 +35,7 @@ read_bam_loc = args.read_bam_loc
 reference_fai_path = args.reference_fai_path
 
 with open(f"{PREFIX}/nclose_cord_list.pkl", "rb") as f:
-    nclose_cord_list, nclose_idx_corr = pkl.load(f)
+    nclose_cord_list, nclose_idx_corr, total_nclose_cord_list_contig_name = pkl.load(f)
 
 jl.nclose_cord_vec = jl.Vector[jl.Vector[jl.Any]]()
 for l in nclose_cord_list:
@@ -55,6 +55,11 @@ for k, v in ac_nclose_cnt_dict.items():
 
 with open(f"{PREFIX}/nclose2cov.pkl", "wb") as f:
     pkl.dump(nclose2cov, f)
+
+with open(f"{PREFIX}/nclose_cord_list.txt", "wt") as f2:
+    for l in total_nclose_cord_list_contig_name:
+        print(*(l + [ac_nclose_cnt_dict.get(l[-2], -1), wa_nclose_cnt_dict.get(l[-2], -1)]),
+              sep="\t", file=f2)
 
 with open(f"{PREFIX}/bam_nclose_cnt.pkl", "wb") as f:
     pkl.dump((ac_nclose_cnt_dict, wa_nclose_cnt_dict), f)

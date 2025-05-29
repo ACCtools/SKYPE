@@ -3145,12 +3145,9 @@ def nclose_calc():
                     total_nclose_cord_list_contig_name += nclose_cord_list_contig_name
                     nclose_idx_corr.append(i)
                     trusted_nclose_count += 1
-        pkl.dump((nclose_cord_list, nclose_idx_corr), f)
+        pkl.dump((nclose_cord_list, nclose_idx_corr, total_nclose_cord_list_contig_name), f)
 
-        with open(f"{PREFIX}/nclose_cord_list.txt", "wt") as f2:
-            for i in total_nclose_cord_list_contig_name:
-                print(*i, sep="\t", file=f2)
-            print(nclose_idx_corr, file=f2)
+
     with open(f'{PREFIX}/nclose2cov.txt', 'wt') as f:
         for k, v in (nclose_coverage | telo_coverage).items():
             print(k, v, file=f)
