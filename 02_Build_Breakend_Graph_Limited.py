@@ -101,7 +101,6 @@ FORCE_TELOMERE_THRESHOLD = 10*K
 TELOMERE_CLUSTER_THRESHOLD = 500*K
 SUBTELOMERE_LENGTH = 500*K
 
-NCLOSE_COVERAGE_TRUSTABLE_ONLY = False
 
 MIN_FLANK_SIZE_BP = 1*M
 
@@ -196,28 +195,42 @@ def import_censat_repeat_data(file_path : str) -> dict :
     fai_file.close()
     return repeat_data
 
-def extract_unique_segments(intervals: list) -> list:
-    events = []
-    for st, nd in intervals:
-        events.append((st,  1))
-        events.append((nd, -1))
-        
-    events.sort(key=lambda x: (x[0], x[1]))
+def is_stepwise_nonoverlapping(intervals: list) -> bool:
+    n = len(intervals)
+    if n < 2:
+        return True
 
-    res = []
-    curr_cov = 0
-    start = None
+    for i in range(1, n):
+        st_i, nd_i       = intervals[i]
+        st_prev, nd_prev = intervals[i-1]
 
-    for x, delta in events:
-        prev = curr_cov
-        curr_cov += delta
+        if st_i <= st_prev:
+            return False
 
-        if prev != 1 and curr_cov == 1:
-            start = x
-        elif prev == 1 and curr_cov != 1:
-            res.append((start, x))
+        if nd_i <= nd_prev:
+            return False
 
-    return res
+        if i >= 2:
+            _, nd_prev2 = intervals[i-2]
+            if st_i < nd_prev2:
+                return False
+
+    return True
+
+def is_alt_contained_in_segments(segments: list, alt_segments: list) -> bool:
+    n = len(segments)
+    for st_b, nd_b in alt_segments:
+        ok = False
+        for i, (st_a, nd_a) in enumerate(segments):
+            cond_start = True if i == 0 else (st_a <= st_b)
+            cond_end   = True if i == n-1 else (nd_b <= nd_a)
+
+            if cond_start and cond_end:
+                ok = True
+                break
+        if not ok:
+            return False
+    return True
 
 def max_overlap(intervals, target_intervals):
     events = []
@@ -241,29 +254,6 @@ def max_overlap(intervals, target_intervals):
         max_cnt = max(max_cnt, curr)
     
     return max_cnt - temp_inf
-
-
-def is_stepwise_nonoverlapping(intervals: list) -> bool:
-    n = len(intervals)
-    if n < 2:
-        return True
-
-    for i in range(1, n):
-        st_i, nd_i       = intervals[i]
-        st_prev, nd_prev = intervals[i-1]
-
-        if st_i <= st_prev:
-            return False
-
-        if nd_i <= nd_prev:
-            return False
-
-        if i >= 2:
-            _, nd_prev2 = intervals[i-2]
-            if st_i < nd_prev2:
-                return False
-
-    return True
 
 def get_qry_cord_data(paf_path: str, get_ori_cord: bool = False) -> tuple:
     end_idx_dict = dict()
@@ -305,21 +295,6 @@ def get_qry_cord_data(paf_path: str, get_ori_cord: bool = False) -> tuple:
         end_idx_dict[current_contig] = (start_idx, len(paf_data_list) - 1)
     
     return paf_data_list, end_idx_dict
-
-def is_alt_contained_in_segments(segments: list, alt_segments: list) -> bool:
-    n = len(segments)
-    for st_b, nd_b in alt_segments:
-        ok = False
-        for i, (st_a, nd_a) in enumerate(segments):
-            cond_start = True if i == 0 else (st_a <= st_b)
-            cond_end   = True if i == n-1 else (nd_b <= nd_a)
-
-            if cond_start and cond_end:
-                ok = True
-                break
-        if not ok:
-            return False
-    return True
 
 def div_orignial_paf(original_paf_path: str, aln_paf_path: str, contig_data: list) -> set:
     not_using_contig = set()
@@ -366,20 +341,16 @@ def div_orignial_paf(original_paf_path: str, aln_paf_path: str, contig_data: lis
                 ori_aln_intervals.append((st, nd))
             else:
                 ori_alt_intervals.append((st, nd))
-
         
         if is_stepwise_nonoverlapping(ori_aln_intervals):
-            ori_unq_intervals = extract_unique_segments(ori_aln_intervals)
-            is_strong_paf = is_alt_contained_in_segments(ori_unq_intervals, ori_alt_intervals)
+            is_strong_paf = is_alt_contained_in_segments(ori_aln_intervals, ori_alt_intervals)
 
         if overlap_score >= MAX_OVERLAP_SCORE and not is_strong_paf:
             not_using_contig.add(ctg_name)
         
     return not_using_contig
 
-def is_trust_contig(original_paf_path: str, aln_paf_path: str, contig_data: list) -> set:
-    is_trust_contig_set = set()
-    
+def get_overlap_score_dict(original_paf_path: str, aln_paf_path: str, contig_data: list) -> dict:
     ori_paf_data_list, ori_end_idx_dict = get_qry_cord_data(original_paf_path)
     aln_paf_data_list, aln_end_idx_dict = get_qry_cord_data(aln_paf_path, get_ori_cord=True)
 
@@ -395,43 +366,16 @@ def is_trust_contig(original_paf_path: str, aln_paf_path: str, contig_data: list
 
         s = e+1
 
+    ctgname2overlap = dict()
     for ctg_name, (ppc_st, ppc_nd) in ppc_aln_end_idx_dict.items():
         ori_st, ori_nd = ori_end_idx_dict[ctg_name]
         aln_st, aln_nd = aln_end_idx_dict[ctg_name]
         assert(aln_st <= ppc_st and ppc_nd <= aln_nd)
 
         overlap_score = max_overlap(ori_paf_data_list[ori_st:ori_nd+1], [aln_paf_data_list[ppc_st], aln_paf_data_list[ppc_nd]])
-
-        is_strong_paf = False
-
-        ori_aln_ind = []
-        for aln_ind in range(ppc_st, ppc_nd + 1):
-            ori_ind = aln_paf_data_list[aln_ind][-1]
-
-            if ori_ind != -1:
-                ori_aln_ind.append(ori_ind)
-
-        ori_aln_ind_set = set(ori_aln_ind)
+        ctgname2overlap[ctg_name] = overlap_score
         
-        ori_aln_intervals = []
-        ori_alt_intervals = []
-        for ori_ind in range(ori_st, ori_nd + 1):
-            _, st, nd, _ = ori_paf_data_list[ori_ind]
-
-            if ori_ind in ori_aln_ind_set:
-                ori_aln_intervals.append((st, nd))
-            else:
-                ori_alt_intervals.append((st, nd))
-
-        
-        if is_stepwise_nonoverlapping(ori_aln_intervals):
-            ori_unq_intervals = extract_unique_segments(ori_aln_intervals)
-            is_strong_paf = is_alt_contained_in_segments(ori_unq_intervals, ori_alt_intervals)
-
-        if overlap_score < MAX_OVERLAP_SCORE and is_strong_paf:
-            is_trust_contig_set.add(ctg_name)
-        
-    return is_trust_contig_set
+    return ctgname2overlap
 
 def import_repeat_data(file_path : str) -> dict :
     fai_file = open(file_path, "r")
@@ -3149,14 +3093,15 @@ def nclose_calc():
                 nclose_node_count += 2
                 print(j, i[0], i[1], contig_data[i[0]][CTG_TYP], file=f)
                 
-    trusted_contig_name = set()
+    ctgname2overlap = dict()
     for aln_origin, origin in zip(PAF_FILE_PATH, ORIGNAL_PAF_LOC_LIST):
-        trusted_contig_name.update(is_trust_contig(origin, aln_origin, contig_data))
-    with open(f'{PREFIX}/nclose2cov.pkl', 'wb') as f:
-        for k in nclose_coverage:
-            if contig_data[k[0]][CTG_TYP] == 2 or ((contig_data[k[0]][CTG_NAM] not in trusted_contig_name) or (contig_data[k[0]][CTG_NAM] in rpt_con)):
-                nclose_coverage[k] = -1
-        pkl.dump(nclose_coverage | telo_coverage, f)
+        ctgname2overlap.update(get_overlap_score_dict(origin, aln_origin, contig_data))
+
+    # with open(f'{PREFIX}/nclose2cov.pkl', 'wb') as f:
+    #     for k in nclose_coverage:
+    #         if contig_data[k[0]][CTG_TYP] == 2 or ((contig_data[k[0]][CTG_NAM] not in trusted_contig_name) or (contig_data[k[0]][CTG_NAM] in rpt_con)):
+    #             nclose_coverage[k] = -1
+    #     pkl.dump(nclose_coverage | telo_coverage, f)
 
     with open(f'{PREFIX}/nclose_cord_list.pkl', 'wb') as f:
         nclose_cord_list = []
@@ -3167,7 +3112,7 @@ def nclose_calc():
             for i in nclose_nodes[j]:
                 if contig_data[i[0]][CTG_TYP] == 2 or contig_data[i[0]][CTG_GLOBALIDX][0] == '2':
                     continue
-                if contig_data[i[0]][CTG_NAM] not in trusted_contig_name and NCLOSE_COVERAGE_TRUSTABLE_ONLY:
+                if ctgname2overlap[contig_data[i[0]][CTG_NAM]] >= MAX_OVERLAP_SCORE:
                     continue
                 trustable = True
                 s = i[0] if i[0] < i[1] else i[1]
@@ -3186,7 +3131,7 @@ def nclose_calc():
                     compress_s = compressed_contig[0] if contig_data[compressed_contig[0]][CHR_NAM] == start_chr else compressed_contig[1]
                     compress_e = compressed_contig[1] if contig_data[compressed_contig[1]][CHR_NAM] == end_chr else compressed_contig[0]
                     compressed_contig_name = contig_data[compress_s][CTG_NAM]
-                    if compressed_contig_name not in trusted_contig_name and NCLOSE_COVERAGE_TRUSTABLE_ONLY:
+                    if ctgname2overlap[compressed_contig_name] >= MAX_OVERLAP_SCORE:
                         trustable = False
                     nclose_maxcover_s = contig_data[compress_s][CHR_STR] if contig_data[compress_s][CTG_DIR] == '+' else contig_data[compress_s][CHR_END]
                     nclose_maxcover_e = contig_data[compress_e][CHR_END] if contig_data[compress_e][CTG_DIR] == '+' else contig_data[compress_e][CHR_STR]
@@ -3194,14 +3139,14 @@ def nclose_calc():
                                                     end_chr, nclose_maxcover_e, contig_data[compress_e][CTG_DIR],
                                                     trusted_nclose_count])
                     nclose_cord_list_contig_name.append(curr_nclose_cord_list[-1]+[contig_data[s][CTG_NAM]])
+
                 if trustable:
                     nclose_cord_list += curr_nclose_cord_list
                     total_nclose_cord_list_contig_name += nclose_cord_list_contig_name
                     nclose_idx_corr.append(i)
                     trusted_nclose_count += 1
         pkl.dump((nclose_cord_list, nclose_idx_corr), f)
-        def contig_form(contig):
-            return f"{contig[CTG_NAM]}, {contig[CHR_NAM]}, {contig[CHR_STR]}, {contig[CHR_END]}, {contig[CTG_DIR]}"
+
         with open(f"{PREFIX}/nclose_cord_list.txt", "wt") as f2:
             for i in total_nclose_cord_list_contig_name:
                 print(*i, sep="\t", file=f2)

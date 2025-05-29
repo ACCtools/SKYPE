@@ -32,6 +32,8 @@ logging.basicConfig(
 )
 logging.info("30_depth_analysis start")
 
+BREAKEND_REMARKABLE_CN_RATIO = 0.05
+TELOMERE_REMARKABLE_CN_RATIO = 0.05
 
 CTG_NAM = 0
 CTG_LEN = 1
@@ -505,9 +507,8 @@ df = df.query('chr != "chrM"')
 
 meandepth = np.median(df['meandepth'])
 
-BREAKEND_REMARKABLE_CN = meandepth / 10
-TELOMERE_REMARKABLE_CN = meandepth / 10
-
+BREAKEND_REMARKABLE_CN = meandepth * BREAKEND_REMARKABLE_CN_RATIO
+TELOMERE_REMARKABLE_CN = meandepth * TELOMERE_REMARKABLE_CN_RATIO
 
 chr_order_list = extract_groups(list(df['chr']))
 
@@ -588,7 +589,7 @@ def get_vec_from_ki(ki):
 with h5py.File(f'{PREFIX}/matrix.h5', 'r') as hf:
     ncm = hf['B_depth_start'][()]
     B = np.hstack([hf['B'][ncm:], hf['B_fail'][:]])
-# os.remove(f'{PREFIX}/matrix.h5')
+os.remove(f'{PREFIX}/matrix.h5')
 
 with open(f'{PREFIX}/contig_pat_vec_data.pkl', 'rb') as f:
     paf_ans_list, key_list, int2key, _ = pkl.load(f)
