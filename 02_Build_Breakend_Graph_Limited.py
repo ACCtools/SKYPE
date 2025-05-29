@@ -2757,7 +2757,7 @@ def contig_preprocessing_00(PAF_FILE_PATH_ : list):
                 if new_contig_data[i][CTG_NAM] in contig_name_list:
                     c_type = preprocess_contig_type[new_contig_data[i][CTG_NAM]]
                     if c_type == 5:
-                        if (new_node_telo_label[i][0] != '0' or (i in telcon_set)):
+                        if i in telcon_set:
                             new_type = 3
                             temp_list = new_contig_data[i][:10]
                             temp_list.append(new_type)
@@ -2823,7 +2823,7 @@ def contig_preprocessing_00(PAF_FILE_PATH_ : list):
             for i in range(0, len(alt_final_contig)):
                 if alt_final_contig[i][CTG_NAM] in alt_final_using_contig_:
                     if alt_final_ctg_typ[alt_final_contig[i][CTG_NAM]] == 5:
-                        if (alt_final_telo_node_label[i][0] != '0' or alt_final_contig[i][CTG_TELCON] != '0'):
+                        if alt_final_contig[i][CTG_TELCON] != '0':
                             alt_final_contig[i][CTG_TYP] = 3
                             alt_final_contig[i][CTG_STRND] = alt_final_preprocess_terminal_nodes[alt_final_contig[i][CTG_NAM]][0] + bias
                             alt_final_contig[i][CTG_ENDND] = alt_final_preprocess_terminal_nodes[alt_final_contig[i][CTG_NAM]][1] + bias
