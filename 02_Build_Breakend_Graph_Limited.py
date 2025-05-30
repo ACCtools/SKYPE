@@ -3112,8 +3112,11 @@ def nclose_calc():
             for i in nclose_nodes[j]:
                 if contig_data[i[0]][CTG_TYP] == 2 or contig_data[i[0]][CTG_GLOBALIDX][0] == '2':
                     continue
-                if ctgname2overlap[contig_data[i[0]][CTG_NAM]] >= MAX_OVERLAP_SCORE:
+
+                cl_ind, c_ind = map(int, contig_data[i[0]][CTG_GLOBALIDX].split('.'))
+                if cl_ind >= 2 or ctgname2overlap[ori_ctg_name_data[cl_ind][c_ind]] >= MAX_OVERLAP_SCORE:
                     continue
+
                 trustable = True
                 s = i[0] if i[0] < i[1] else i[1]
                 e = i[1] if i[0] < i[1] else i[0]
@@ -3130,9 +3133,11 @@ def nclose_calc():
                 for compressed_contig in nclose_compress_track[tuple(i)]:
                     compress_s = compressed_contig[0] if contig_data[compressed_contig[0]][CHR_NAM] == start_chr else compressed_contig[1]
                     compress_e = compressed_contig[1] if contig_data[compressed_contig[1]][CHR_NAM] == end_chr else compressed_contig[0]
-                    compressed_contig_name = contig_data[compress_s][CTG_NAM]
-                    if ctgname2overlap[compressed_contig_name] >= MAX_OVERLAP_SCORE:
+                    
+                    cl_ind, c_ind = map(int, contig_data[compress_s][CTG_GLOBALIDX].split('.'))
+                    if cl_ind >= 2 or ctgname2overlap[ori_ctg_name_data[cl_ind][c_ind]] >= MAX_OVERLAP_SCORE:
                         trustable = False
+                    
                     nclose_maxcover_s = contig_data[compress_s][CHR_STR] if contig_data[compress_s][CTG_DIR] == '+' else contig_data[compress_s][CHR_END]
                     nclose_maxcover_e = contig_data[compress_e][CHR_END] if contig_data[compress_e][CTG_DIR] == '+' else contig_data[compress_e][CHR_STR]
                     curr_nclose_cord_list.append([start_chr, nclose_maxcover_s, contig_data[compress_s][CTG_DIR],
