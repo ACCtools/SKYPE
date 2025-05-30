@@ -84,7 +84,7 @@ end
 
 function analyze_alignments!(read_name::String, align_infos::Vector{AlnInfo},
                              ac_nclose_cnt::Counter, wa_nclose_cnt::Counter)
-    tar_data = DefaultDict{Int, Tuple{Tv, Tv}}((Tv(), Tv()))
+    tar_data = DefaultDict{Int, Tuple{Tv, Tv}}(() -> (Tv(), Tv()))
 
     for (qst, qnd, aln, rid, rst, rnd) in align_infos
         qlen = qnd - qst + 1
@@ -92,11 +92,10 @@ function analyze_alignments!(read_name::String, align_infos::Vector{AlnInfo},
         cord_data = chr_cord_data[rid]
         cord_info_data = chr_cord_info_data[rid]
 
-        i = bisect_left(cord_data, rst - qlen)
-        j = bisect_right(cord_data, rnd + qlen)
+        i = searchsortedfirst(cord_data, rst - qlen)
+        j = searchsortedlast(cord_data, rnd + qlen)
 
-        for idx in i:(j-1)
-            rtar = cord_data[idx]
+        for idx in i:j
             nidx, pairid, isfront = cord_info_data[idx] 
 
             push!(tar_data[nidx][pairid], (qst, isfront == aln))
@@ -162,17 +161,18 @@ function anal_bam(bam_loc::String, fai_loc::String, nclose_cord_list::Vector{Vec
     chr_cord_data = Vector{Vector{Int}}([Vector{Int}() for _ in 1:length(chr2int)])
     chr_cord_info_data = Vector{Vector{Tuple{Int, Int, Bool}}}([Vector{Tuple{Int, Bool}}() for _ in 1:length(chr2int)])
 
-    idx2nclose = Vector{Int}()
+    idx2nclose = Dict{Int, Int}()
     for (i, (chr1, cord1, dir1, chr2, cord2, dir2, num)) in enumerate(nclose_cord_list)
         for (chr, cord, dir, is_front) in [(chr1, cord1, dir1, true), (chr2, cord2, dir2, false)]
-            is_front_dir = dir == '+'
+            dir = string(dir)
+            is_front_dir = dir == "+"
             ci = chr2int[chr]
 
             push!(chr_cord_data[ci], cord)
             push!(chr_cord_info_data[ci], (i, is_front ? 1 : 2, is_front_dir == is_front))
         end
         
-        push!(idx2nclose, num)
+        idx2nclose[i] = num
     end
 
     for i in eachindex(chr_cord_data)

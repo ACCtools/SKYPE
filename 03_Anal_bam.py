@@ -13,6 +13,7 @@ logging.basicConfig(
 )
 logging.info("03_anal_bam start")
 
+AC_WA_RATIO_LIMIT = 5
 
 parser = argparse.ArgumentParser(description="SKYPE depth analysis")
 
@@ -49,16 +50,24 @@ ac_nclose_cnt_dict = dict(list(ac_nclose_cnt_list))
 wa_nclose_cnt_dict = dict(list(wa_nclose_cnt_list))
 
 nclose2cov = dict()
-for k, v in ac_nclose_cnt_dict.items():
-    if k not in wa_nclose_cnt_dict:
-        nclose2cov[nclose_idx_corr[k]] = v
+nclose_cov_target = set()
+for k, ac_v in ac_nclose_cnt_dict.items():
+    if k in wa_nclose_cnt_dict:
+        wa_v = wa_nclose_cnt_dict[k]
+        if ac_v / wa_v >= AC_WA_RATIO_LIMIT:
+            nclose2cov[nclose_idx_corr[k]] = ac_v
+            nclose_cov_target.add(k)
+    else:
+        nclose2cov[nclose_idx_corr[k]] = ac_v
+        nclose_cov_target.add(k)
 
 with open(f"{PREFIX}/nclose2cov.pkl", "wb") as f:
     pkl.dump(nclose2cov, f)
 
 with open(f"{PREFIX}/nclose_cord_list.txt", "wt") as f2:
     for l in total_nclose_cord_list_contig_name:
-        print(*(l + [ac_nclose_cnt_dict.get(l[-2], -1), wa_nclose_cnt_dict.get(l[-2], -1)]),
+        k = l[-2]
+        print(*(l + [ac_nclose_cnt_dict.get(k, -1), wa_nclose_cnt_dict.get(k, -1), 'COV' if k in nclose_cov_target else '*']),
               sep="\t", file=f2)
 
 with open(f"{PREFIX}/bam_nclose_cnt.pkl", "wb") as f:

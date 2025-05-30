@@ -527,7 +527,7 @@ for path, data in karyotypes_norm_data.items():
 cols = 10
 rows = 0
 for chr_name, data_list in grouped_norm_data.items():
-    rows += (len(data_list) // cols + 1)
+    rows += ((len(data_list) - 1) // cols + 1) if data_list else 0
 
 cell_col = 3
 cell_row = 4.5
@@ -557,7 +557,7 @@ for chr_name, data_list in sorted_grouped_norm_data_items:
         plot_virtual_chromosome(ax_array[i // cols + now_col][i % cols + len(prefix_ratios)], data, cut_dict,
                                 label=f"{round(float(loc2weight[data[0]] / meandepth * 2), 2)}N")
 
-    now_col += (len(data_list) // cols + 1)
+    now_col += ((len(data_list) - 1) // cols + 1) if data_list else 0
     for col in range(bef_now_col, now_col):
         plot_scale_bar(ax_array[col][len(prefix_ratios) - 1], chr_name)
 
