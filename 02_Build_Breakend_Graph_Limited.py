@@ -297,11 +297,26 @@ def get_qry_cord_data(paf_path: str, get_ori_cord: bool = False) -> tuple:
     
     return paf_data_list, end_idx_dict
 
-def div_orignial_paf(original_paf_path: str, aln_paf_path: str, contig_data: list) -> set:
+def div_repeat_paf(original_paf_path_list: list, aln_paf_path_list: list, contig_data: list) -> set:
     not_using_contig = set()
     
-    ori_paf_data_list, ori_end_idx_dict = get_qry_cord_data(original_paf_path)
-    aln_paf_data_list, aln_end_idx_dict = get_qry_cord_data(aln_paf_path, get_ori_cord=True)
+    ori_paf_data_list_data = []
+    ori_end_idx_dict_data = []
+
+    for original_paf_path in original_paf_path_list:
+        ori_paf_data_list, ori_end_idx_dict = get_qry_cord_data(original_paf_path)
+
+        ori_paf_data_list_data.append(ori_paf_data_list)
+        ori_end_idx_dict_data.append(ori_end_idx_dict)
+
+    aln_paf_data_list_data = []
+    aln_end_idx_dict_data = []
+
+    for aln_paf_path in aln_paf_path_list:
+        aln_paf_data_list, aln_end_idx_dict = get_qry_cord_data(aln_paf_path, get_ori_cord=True)
+
+        aln_paf_data_list_data.append(aln_paf_data_list)
+        aln_end_idx_dict_data.append(aln_end_idx_dict)
 
     ppc_aln_end_idx_dict = dict()
 
@@ -309,15 +324,30 @@ def div_orignial_paf(original_paf_path: str, aln_paf_path: str, contig_data: lis
     contig_data_size = len(contig_data)
     while s < contig_data_size:
         e = contig_data[s][CTG_ENDND]
-        ctg_name = contig_data[s][CTG_NAM]
-        if ctg_name in ori_end_idx_dict:
-            ppc_aln_end_idx_dict[ctg_name] = (int(contig_data[s][CTG_GLOBALIDX][2:]), int(contig_data[e][CTG_GLOBALIDX][2:]))
+        ori_ctg_name = contig_data[s][CTG_NAM]
+        
+        s_cl_ind, s_c_ind = map(int, contig_data[s][CTG_GLOBALIDX].split('.'))
+        e_cl_ind, e_c_ind = map(int, contig_data[e][CTG_GLOBALIDX].split('.'))
 
+        assert(s_cl_ind == e_cl_ind)
+
+        if s_cl_ind < 2:
+            assert(ori_ctg_name_data[s_cl_ind][s_c_ind] == ori_ctg_name_data[e_cl_ind][e_c_ind])
+            ppc_aln_end_idx_dict[ori_ctg_name] = (s_cl_ind, s_c_ind, e_c_ind)
+        
         s = e+1
 
-    for ctg_name, (ppc_st, ppc_nd) in ppc_aln_end_idx_dict.items():
-        ori_st, ori_nd = ori_end_idx_dict[ctg_name]
-        aln_st, aln_nd = aln_end_idx_dict[ctg_name]
+    for ctg_name, (cl_ind, ppc_st, ppc_nd) in ppc_aln_end_idx_dict.items():
+        ori_paf_data_list = ori_paf_data_list_data[cl_ind]
+        ori_end_idx_dict = ori_end_idx_dict_data[cl_ind]
+
+        aln_paf_data_list = aln_paf_data_list_data[cl_ind]
+        aln_end_idx_dict = aln_end_idx_dict_data[cl_ind]
+
+        ori_ctg_name = ori_ctg_name_data[cl_ind][ppc_st]
+
+        ori_st, ori_nd = ori_end_idx_dict[ori_ctg_name]
+        aln_st, aln_nd = aln_end_idx_dict[ori_ctg_name]
         assert(aln_st <= ppc_st and ppc_nd <= aln_nd)
 
         overlap_score = max_overlap(ori_paf_data_list[ori_st:ori_nd+1], [aln_paf_data_list[ppc_st], aln_paf_data_list[ppc_nd]])
@@ -351,9 +381,24 @@ def div_orignial_paf(original_paf_path: str, aln_paf_path: str, contig_data: lis
         
     return not_using_contig
 
-def get_overlap_score_dict(original_paf_path: str, aln_paf_path: str, contig_data: list) -> dict:
-    ori_paf_data_list, ori_end_idx_dict = get_qry_cord_data(original_paf_path)
-    aln_paf_data_list, aln_end_idx_dict = get_qry_cord_data(aln_paf_path, get_ori_cord=True)
+def get_overlap_score_dict(original_paf_path_list: list, aln_paf_path_list: list, contig_data: list) -> dict:
+    ori_paf_data_list_data = []
+    ori_end_idx_dict_data = []
+
+    for original_paf_path in original_paf_path_list:
+        ori_paf_data_list, ori_end_idx_dict = get_qry_cord_data(original_paf_path)
+
+        ori_paf_data_list_data.append(ori_paf_data_list)
+        ori_end_idx_dict_data.append(ori_end_idx_dict)
+
+    aln_paf_data_list_data = []
+    aln_end_idx_dict_data = []
+
+    for aln_paf_path in aln_paf_path_list:
+        aln_paf_data_list, aln_end_idx_dict = get_qry_cord_data(aln_paf_path, get_ori_cord=True)
+
+        aln_paf_data_list_data.append(aln_paf_data_list)
+        aln_end_idx_dict_data.append(aln_end_idx_dict)
 
     ppc_aln_end_idx_dict = dict()
 
@@ -361,16 +406,30 @@ def get_overlap_score_dict(original_paf_path: str, aln_paf_path: str, contig_dat
     contig_data_size = len(contig_data)
     while s < contig_data_size:
         e = contig_data[s][CTG_ENDND]
-        ctg_name = contig_data[s][CTG_NAM]
-        if ctg_name in ori_end_idx_dict:
-            ppc_aln_end_idx_dict[ctg_name] = (int(contig_data[s][CTG_GLOBALIDX][2:]), int(contig_data[e][CTG_GLOBALIDX][2:]))
+        ori_ctg_name = contig_data[s][CTG_NAM]
+        
+        s_cl_ind, s_c_ind = map(int, contig_data[s][CTG_GLOBALIDX].split('.'))
+        e_cl_ind, e_c_ind = map(int, contig_data[e][CTG_GLOBALIDX].split('.'))
 
+        assert(s_cl_ind == e_cl_ind)
+
+        if s_cl_ind < 2:
+            assert(ori_ctg_name_data[s_cl_ind][s_c_ind] == ori_ctg_name_data[e_cl_ind][e_c_ind])
+            ppc_aln_end_idx_dict[ori_ctg_name] = (s_cl_ind, s_c_ind, e_c_ind)
         s = e+1
 
     ctgname2overlap = dict()
-    for ctg_name, (ppc_st, ppc_nd) in ppc_aln_end_idx_dict.items():
-        ori_st, ori_nd = ori_end_idx_dict[ctg_name]
-        aln_st, aln_nd = aln_end_idx_dict[ctg_name]
+    for ctg_name, (cl_ind, ppc_st, ppc_nd) in ppc_aln_end_idx_dict.items():
+        ori_paf_data_list = ori_paf_data_list_data[cl_ind]
+        ori_end_idx_dict = ori_end_idx_dict_data[cl_ind]
+
+        aln_paf_data_list = aln_paf_data_list_data[cl_ind]
+        aln_end_idx_dict = aln_end_idx_dict_data[cl_ind]
+
+        ori_ctg_name = ori_ctg_name_data[cl_ind][ppc_st]
+
+        ori_st, ori_nd = ori_end_idx_dict[ori_ctg_name]
+        aln_st, aln_nd = aln_end_idx_dict[ori_ctg_name]
         assert(aln_st <= ppc_st and ppc_nd <= aln_nd)
 
         overlap_score = max_overlap(ori_paf_data_list[ori_st:ori_nd+1], [aln_paf_data_list[ppc_st], aln_paf_data_list[ppc_nd]])
@@ -472,9 +531,7 @@ def extract_all_repeat_contig(contig_data : list, repeat_data : dict, ctg_index 
     return rpt_con
 
 def check_censat_contig(all_repeat_censat_con : set, ALIGNED_PAF_LOC_LIST : list, ORIGNAL_PAF_LOC_LIST : list, contig_data : list):
-    div_repeat_paf_name = set()
-    for aln_origin, origin in zip(ALIGNED_PAF_LOC_LIST, ORIGNAL_PAF_LOC_LIST):
-        div_repeat_paf_name.update(div_orignial_paf(origin, aln_origin, contig_data))
+    div_repeat_paf_name = div_repeat_paf(ORIGNAL_PAF_LOC_LIST, ALIGNED_PAF_LOC_LIST, contig_data)
     return all_repeat_censat_con & div_repeat_paf_name
     
 def extract_bnd_contig(contig_data : list) -> set:
@@ -1849,9 +1906,7 @@ def extract_nclose_node(contig_data : list, bnd_contig : set, repeat_contig_name
     for i in telo_set:
         telo_name_set.add(contig_data[i][CTG_NAM])
 
-    div_repeat_paf_name = set()
-    for aln_origin, origin in zip(ALIGNED_PAF_LOC_LIST, ORIGNAL_PAF_LOC_LIST):
-        div_repeat_paf_name.update(div_orignial_paf(origin, aln_origin, contig_data))
+    div_repeat_paf_name = div_repeat_paf(ORIGNAL_PAF_LOC_LIST, ALIGNED_PAF_LOC_LIST, contig_data)
 
     while s<contig_data_size:
         e = contig_data[s][CTG_ENDND]
@@ -3094,9 +3149,7 @@ def nclose_calc():
                 nclose_node_count += 2
                 print(j, i[0], i[1], contig_data[i[0]][CTG_TYP], file=f)
                 
-    ctgname2overlap = dict()
-    for aln_origin, origin in zip(PAF_FILE_PATH, ORIGNAL_PAF_LOC_LIST):
-        ctgname2overlap.update(get_overlap_score_dict(origin, aln_origin, contig_data))
+    ctgname2overlap = get_overlap_score_dict(ORIGNAL_PAF_LOC_LIST, PAF_FILE_PATH, contig_data)
 
     # with open(f'{PREFIX}/nclose2cov.pkl', 'wb') as f:
     #     for k in nclose_coverage:
@@ -3113,9 +3166,9 @@ def nclose_calc():
             for i in nclose_nodes[j]:
                 if contig_data[i[0]][CTG_TYP] == 2 or contig_data[i[0]][CTG_GLOBALIDX][0] == '2':
                     continue
-
-                cl_ind, c_ind = map(int, contig_data[i[0]][CTG_GLOBALIDX].split('.'))
-                if cl_ind >= 2 or ctgname2overlap[ori_ctg_name_data[cl_ind][c_ind]] >= MAX_OVERLAP_SCORE:
+                    
+                cl_ind, _ = map(int, contig_data[i[0]][CTG_GLOBALIDX].split('.'))
+                if cl_ind >= 2 or ctgname2overlap[contig_data[i[0]][CTG_NAM]] >= MAX_OVERLAP_SCORE:
                     continue
 
                 trustable = True
@@ -3135,8 +3188,8 @@ def nclose_calc():
                     compress_s = compressed_contig[0] if contig_data[compressed_contig[0]][CHR_NAM] == start_chr else compressed_contig[1]
                     compress_e = compressed_contig[1] if contig_data[compressed_contig[1]][CHR_NAM] == end_chr else compressed_contig[0]
                     
-                    cl_ind, c_ind = map(int, contig_data[compress_s][CTG_GLOBALIDX].split('.'))
-                    if cl_ind >= 2 or ctgname2overlap[ori_ctg_name_data[cl_ind][c_ind]] >= MAX_OVERLAP_SCORE:
+                    cl_ind, _ = map(int, contig_data[compress_s][CTG_GLOBALIDX].split('.'))
+                    if cl_ind >= 2 or ctgname2overlap[contig_data[compress_s][CTG_NAM]] >= MAX_OVERLAP_SCORE:
                         trustable = False
                     
                     nclose_maxcover_s = contig_data[compress_s][CHR_STR] if contig_data[compress_s][CTG_DIR] == '+' else contig_data[compress_s][CHR_END]
