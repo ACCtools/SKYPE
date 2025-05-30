@@ -29,6 +29,7 @@ logging.basicConfig(
     level=logging.INFO,
     datefmt='%m/%d/%Y %I:%M:%S %p',
 )
+logging.info('SKYPE pipeline start')
 logging.info("02_Build_Breakend_Graph start")
 
 CTG_NAM = 0
