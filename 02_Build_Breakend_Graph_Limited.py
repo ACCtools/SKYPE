@@ -3298,7 +3298,6 @@ is_unitig_reduced = False
 telo_coverage = contig_preprocessing_00(PAF_FILE_PATH)
 globals().update(nclose_calc())
 
-exit(1)
 
 if nclose_node_count > FAIL_NCLOSE_COUNT:
     logging.info("NClose node count is too high.")
