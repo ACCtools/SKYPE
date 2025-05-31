@@ -15,10 +15,6 @@
         "DataStructures": {
             "uuid": "864edb3b-99cc-5e75-8d2d-829cb0a9cfe8"
         },
-        "BisectPy": {
-            "uuid": "e91bece4-a713-11e8-30d4-f1bdfdaa459e",
-            "url": "https://github.com/singularitti/BisectPy.jl"
-        },
         "BioAlignments": {
             "uuid": "00701ae9-d1dc-5365-b64a-a3a3ebf5695e"
         },
