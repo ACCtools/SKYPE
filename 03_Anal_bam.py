@@ -212,7 +212,7 @@ for k, ac_v in post_ac_nclose_cnt_dict.items():
 with open(f"{PREFIX}/nclose2cov.pkl", "wb") as f:
     pkl.dump(nclose2cov, f)
 
-with open(f"{PREFIX}/nclose_cord_list.txt", "wt") as f2:
+with open(f"{PREFIX}/nclose_cov_report.tsv", "wt") as f2:
     print(*['NCLOSE_CHR1', 'NCLOSE_CORD1', 'NCLOSE_DIR1', 'NCLOSE_CHR2', 'NCLOSE_CORD2', 'NCLOSE_DIR2', 'NCLOSE_ID',
             'ORIGIN_CONTIG_NAME', 'ACCEPT_COUNT', 'FAIL_COUNT', 'COV_TARGET', 'PREPROCESS_FAIL_CODE',
             'NCLOSE_DEPTH_LEFT1', 'NCLOSE_DEPTH_RIGHT1', 'NCLOSE_DEPTH_LEFT2', 'NCLOSE_DEPTH_RIGHT2', 'POSTPROCESS_FAIL_CODE'], sep="\t", file=f2)
