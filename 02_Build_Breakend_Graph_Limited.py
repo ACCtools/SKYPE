@@ -3151,12 +3151,6 @@ def nclose_calc():
                 
     ctgname2overlap = get_overlap_score_dict(ORIGNAL_PAF_LOC_LIST, PAF_FILE_PATH, contig_data)
 
-    # with open(f'{PREFIX}/nclose2cov.pkl', 'wb') as f:
-    #     for k in nclose_coverage:
-    #         if contig_data[k[0]][CTG_TYP] == 2 or ((contig_data[k[0]][CTG_NAM] not in trusted_contig_name) or (contig_data[k[0]][CTG_NAM] in rpt_con)):
-    #             nclose_coverage[k] = -1
-    #     pkl.dump(nclose_coverage | telo_coverage, f)
-
     with open(f'{PREFIX}/nclose_cord_list.pkl', 'wb') as f:
         nclose_cord_list = []
         total_nclose_cord_list_contig_name = []
@@ -3206,10 +3200,6 @@ def nclose_calc():
                     trusted_nclose_count += 1
         pkl.dump((nclose_cord_list, nclose_idx_corr, total_nclose_cord_list_contig_name), f)
 
-
-    with open(f'{PREFIX}/nclose2cov.txt', 'wt') as f:
-        for k, v in (nclose_coverage | telo_coverage).items():
-            print(k, v, file=f)
 
     logging.info(f"Uncompressed NClose node count : {uncomp_node_count}")    
     logging.info(f"NClose node count : {nclose_node_count}")

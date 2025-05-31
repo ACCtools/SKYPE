@@ -223,7 +223,7 @@ with open(f"{PREFIX}/nclose_cov_report.tsv", "wt") as f2:
         print_list = l + [ac_nclose_cnt_dict.get(k, -1), wa_nclose_cnt_dict.get(k, -1), 'COV' if k in nclose_cov_target else '*']
         print_list.append(pre_fail_key_dict.get(k, '*'))
         print_list.extend(both_end_depth_dict.get(k, ['*'] * 4))
-        print_list.append(pos_fail_key_dict.get(k, '*'))
+        print_list.append(pos_fail_key_dict.get(k, '*') if k in nclose_cov_target else '*')
 
         print(*print_list, sep="\t", file=f2)
 
