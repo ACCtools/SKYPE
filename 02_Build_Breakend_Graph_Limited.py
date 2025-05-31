@@ -3775,7 +3775,7 @@ def run_graph_pipeline():
             logging.info(f'SUCCESS at {(CHR_CHANGE_LIMIT_PREFIX, DIR_CHANGE_LIMIT_PREFIX)}, with {path_count} paths')
             
             # Simple estimated path count 
-            if path_count * (transloc_nclose_pair_count / CHROMOSOME_COUNT) >= TOT_PATH_LIMIT:
+            if path_count >= TOT_PATH_LIMIT / 2:
                 logging.info('FAIL estimated with next stage.')
                 break
             idx -= 1

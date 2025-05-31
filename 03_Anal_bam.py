@@ -53,8 +53,9 @@ def preprocess_breakends(nclose_cord_list, df, repeat_censat_data) -> list:
         for chrom, intervals in repeat_censat_data.items()
     }
 
+    not_using_key = set()
+
     for nclose_cord in nclose_cord_list:
-        using_nclose = True
         key = nclose_cord[-1]
 
         for i in (0, 3):
@@ -76,19 +77,22 @@ def preprocess_breakends(nclose_cord_list, df, repeat_censat_data) -> list:
                 iv_start, iv_end = intervals[idx]
             if iv_start <= coord and coord <= iv_end:
                 pre_fail_key_dict[key] = 'CENSAT_NCLOSE'
-                using_nclose = False
+                not_using_key.add(key)
                 break
 
             df_bin = df_chr[(df_chr["st"] <= coord) & (coord < df_chr["nd"])]
             assert(df_bin.empty == False)
             if np.median(df_bin["meandepth"]) > ABS_MAX_COVERAGE_RATIO * meandepth:
                 pre_fail_key_dict[key] = 'HIGH_DEPTH_REGION_NCLOSE'
-                using_nclose = False
+                not_using_key.add(key)
                 break
             
-        if using_nclose:
+    
+    using_nclose_list = []
+    for nclose_cord in nclose_cord_list:
+        key = nclose_cord[-1]
+        if key not in not_using_key:
             using_nclose_list.append(nclose_cord)
-             
 
     return using_nclose_list
 
@@ -108,6 +112,9 @@ def postprocess_breakends(df, pre_cord_nclose_list, ac_nclose_cnt_dict) -> dict:
             ac_cnt = ac_nclose_cnt_dict[key]
             if ac_cnt > ABS_MAX_COVERAGE_RATIO * meandepth:
                 use_ac = False
+            
+            both_dict_check = key in both_end_depth_dict
+            
             for i in (0, 3):
                 chrom = bd[i]
                 coord = bd[i + 1]
@@ -130,7 +137,8 @@ def postprocess_breakends(df, pre_cord_nclose_list, ac_nclose_cnt_dict) -> dict:
 
                 left_mean = df_left["meandepth"].mean() if not df_left.empty else 0.0
                 right_mean = df_right["meandepth"].mean() if not df_right.empty else 0.0
-                both_end_depth_dict[key].extend([round(left_mean, 2), round(right_mean, 2)])
+                if not both_dict_check:
+                    both_end_depth_dict[key].extend([round(left_mean, 2), round(right_mean, 2)])
 
                 mean_diff = abs(left_mean - right_mean)
                 if max(ac_cnt, 0) * BREAKEND_DEPTH_RATIO > mean_diff:
