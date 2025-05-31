@@ -3214,8 +3214,22 @@ def nclose_calc():
     logging.info(f"Uncompressed NClose node count : {uncomp_node_count}")    
     logging.info(f"NClose node count : {nclose_node_count}")
     logging.info(f"Telomere connected node count : {telo_node_count}")
+
     return locals()
 
+def get_ori_ctg_name_data(PAF_FILE_PATH : list) -> list:
+    ori_ctg_name_data = []
+
+    for ori_paf_loc in PAF_FILE_PATH:
+        ori_ctg_name_list = []
+        with open(ori_paf_loc, 'r') as f:
+            for paf_line in f:
+                paf_line = paf_line.split('\t')
+                ori_ctg_name_list.append(paf_line[CTG_NAM])
+
+        ori_ctg_name_data.append(ori_ctg_name_list)
+
+    return ori_ctg_name_data
             
 parser = argparse.ArgumentParser(description="Find breakend contigs with contig data and map data")
 
@@ -3265,24 +3279,20 @@ CHROMOSOME_INFO_FILE_PATH = args.reference_fai_path
 TELOMERE_INFO_FILE_PATH = args.telomere_bed_path
 REPEAT_INFO_FILE_PATH = args.repeat_bed_path
 CENSAT_PATH = args.censat_bed_path
-ORIGNAL_PAF_LOC_LIST = args.orignal_paf_loc
+ORIGNAL_PAF_LOC_LIST_ = args.orignal_paf_loc
 main_stat_loc = args.main_stat_path
 PRINT_IDX_FILE = args.verbose
+
+ORIGNAL_PAF_LOC_LIST = ORIGNAL_PAF_LOC_LIST_
+
+assert(len(PAF_FILE_PATH) == len(ORIGNAL_PAF_LOC_LIST))
 
 gfa_file_path = []
 asm2cov = Counter()
 # with open(f'{PREFIX}/asm2cov.pkl', 'rb') as f:
 #     gfa_file_path, asm2cov = pkl.load(f)
 
-ori_ctg_name_data = []
-for ori_paf_loc in PAF_FILE_PATH:
-    ori_ctg_name_list = []
-    with open(ori_paf_loc, 'r') as f:
-        for paf_line in f:
-            paf_line = paf_line.split('\t')
-            ori_ctg_name_list.append(paf_line[CTG_NAM])
-    
-    ori_ctg_name_data.append(ori_ctg_name_list)
+ori_ctg_name_data = get_ori_ctg_name_data(PAF_FILE_PATH)
 
 is_unitig_reduced = False
 telo_coverage = contig_preprocessing_00(PAF_FILE_PATH)
@@ -3296,9 +3306,14 @@ if nclose_node_count > FAIL_NCLOSE_COUNT:
     else:
         is_unitig_reduced = True
         logging.info("Retrying with the primary PAF file.")
+
         PAF_FILE_PATH = [args.paf_file_path, args.paf_file_path]
+        ORIGNAL_PAF_LOC_LIST = [ORIGNAL_PAF_LOC_LIST_[0], ORIGNAL_PAF_LOC_LIST_[0]]
+        ori_ctg_name_data = get_ori_ctg_name_data(PAF_FILE_PATH)
+
         telo_coverage = contig_preprocessing_00(PAF_FILE_PATH)
         globals().update(nclose_calc())
+
         if nclose_node_count > FAIL_NCLOSE_COUNT:
             logging.info("No method to reduce nclose node count.")
             sys.exit(1)
@@ -3789,13 +3804,20 @@ if not last_success:
         sys.exit(1)
     else:
         is_unitig_reduced = True
+        logging.info("Retrying with the primary PAF file.")
+
         PAF_FILE_PATH = [args.paf_file_path, args.paf_file_path]
+        ORIGNAL_PAF_LOC_LIST = [ORIGNAL_PAF_LOC_LIST_[0], ORIGNAL_PAF_LOC_LIST_[0]]
+        ori_ctg_name_data = get_ori_ctg_name_data(PAF_FILE_PATH)
+
         telo_coverage = contig_preprocessing_00(PAF_FILE_PATH)
         globals().update(nclose_calc())
+
         if nclose_node_count > FAIL_NCLOSE_COUNT:
             logging.info("NClose node count is too high.")
             logging.info("No method to reduce nclose node count.")
             sys.exit(1)
+        
         last_success = run_graph_pipeline()
         if not last_success:
             logging.info('Breakend graph is too divergent.')
