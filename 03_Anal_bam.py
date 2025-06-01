@@ -124,7 +124,7 @@ def postprocess_breakends(df, pre_cord_nclose_list, ac_nclose_cnt_dict) -> dict:
                 df_chr = df_by_chr[chrom]
 
                 df_bin = df_chr[(df_chr["st"] <= coord) & (coord < df_chr["nd"])]
-                
+
                 if not df_bin.empty:
                     low_bound       = max(0, coord - FLANK_LENGTH)
                     left_window_end = coord
@@ -209,7 +209,10 @@ post_ac_nclose_cnt_dict = postprocess_breakends(df, pre_nclose_cord_list, ac_ncl
 
 nclose2cov = dict()
 nclose_cov_target = set()
+run_k_set = set()
 for k, ac_v in post_ac_nclose_cnt_dict.items():
+    run_k_set.add(k)
+
     if k in wa_nclose_cnt_dict:
         wa_v = wa_nclose_cnt_dict[k]
         if ac_v / wa_v >= AC_WA_RATIO_LIMIT:
@@ -233,7 +236,7 @@ with open(f"{PREFIX}/nclose_cov_report.tsv", "wt") as f2:
         print_list = l + [ac_nclose_cnt_dict.get(k, -1), wa_nclose_cnt_dict.get(k, -1), 'COV' if k in nclose_cov_target else '*']
         print_list.append(pre_fail_key_dict.get(k, '*'))
         print_list.extend(both_end_depth_dict.get(k, ['*'] * 4))
-        print_list.append(pos_fail_key_dict.get(k, '*') if k in nclose_cov_target else '*')
+        print_list.append(pos_fail_key_dict.get(k, '*') if k in run_k_set else '*')
 
         print(*print_list, sep="\t", file=f2)
 
