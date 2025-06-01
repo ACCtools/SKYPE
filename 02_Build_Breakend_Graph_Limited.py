@@ -3372,7 +3372,8 @@ def nclose_calc():
                 l1, r1, l2, r2 = both_end_depth_dict[k]
 
                 if similar_check(ac_v, rac_v) and similar_check(l1, r1) and similar_check(l2, r2):
-                    task_dict[k] = 2
+                    if min([ac_v, rac_v]) < min([l1, r1, l2, r2]):
+                        task_dict[k] = 2
                 else:
                     mi, ma = sorted([ac_v, rac_v])
                     if ma / mi < DIFF_COMPARE_RAITO:
