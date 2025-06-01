@@ -170,10 +170,10 @@ parser.add_argument("main_stat_path",
 parser.add_argument("--progress", 
                     help="Show progress bar", action='store_true')
 
-# args = parser.parse_args()
+args = parser.parse_args()
 
-t = "03_Anal_bam.py 30_skype_pipe/uLMS_sample_JC28_22_42_51 /home/hyunwoo/ACCtools-pipeline/90_skype_run/uLMS_sample_JC28/01_depth/uLMS_sample_JC28.bam public_data/chm13v2.0_censat_v2.1.m.bed public_data/chm13v2.0.fa.fai /home/hyunwoo/ACCtools-pipeline/90_skype_run/uLMS_sample_JC28/01_depth/uLMS_sample_JC28.win.stat.gz"
-args = parser.parse_args(t.split()[1:])
+# t = "03_Anal_bam.py 30_skype_pipe/uLMS_sample_JC28_22_42_51 /home/hyunwoo/ACCtools-pipeline/90_skype_run/uLMS_sample_JC28/01_depth/uLMS_sample_JC28.bam public_data/chm13v2.0_censat_v2.1.m.bed public_data/chm13v2.0.fa.fai /home/hyunwoo/ACCtools-pipeline/90_skype_run/uLMS_sample_JC28/01_depth/uLMS_sample_JC28.win.stat.gz"
+# args = parser.parse_args(t.split()[1:])
 
 PREFIX = args.prefix
 read_bam_loc = args.read_bam_loc
