@@ -124,25 +124,25 @@ def postprocess_breakends(df, pre_cord_nclose_list, ac_nclose_cnt_dict) -> dict:
                 df_chr = df_by_chr[chrom]
 
                 df_bin = df_chr[(df_chr["st"] <= coord) & (coord < df_chr["nd"])]
-                assert(not df_bin.empty)
+                
+                if not df_bin.empty:
+                    low_bound       = max(0, coord - FLANK_LENGTH)
+                    left_window_end = coord
+                    right_window_start = coord
+                    high_bound      = min(coord + FLANK_LENGTH, chrom_max)
 
-                low_bound       = max(0, coord - FLANK_LENGTH)
-                left_window_end = coord
-                right_window_start = coord
-                high_bound      = min(coord + FLANK_LENGTH, chrom_max)
+                    df_left = df_chr[(df_chr["nd"] > low_bound) & (df_chr["nd"] <= left_window_end)].copy()
+                    df_right = df_chr[(df_chr["st"] >= right_window_start) & (df_chr["st"] < high_bound)].copy()
 
-                df_left = df_chr[(df_chr["nd"] > low_bound) & (df_chr["nd"] <= left_window_end)].copy()
-                df_right = df_chr[(df_chr["st"] >= right_window_start) & (df_chr["st"] < high_bound)].copy()
+                    left_mean = df_left["meandepth"].mean() if not df_left.empty else 0.0
+                    right_mean = df_right["meandepth"].mean() if not df_right.empty else 0.0
+                    if not both_dict_check:
+                        both_end_depth_dict[key].extend([round(left_mean, 2), round(right_mean, 2)])
 
-                left_mean = df_left["meandepth"].mean() if not df_left.empty else 0.0
-                right_mean = df_right["meandepth"].mean() if not df_right.empty else 0.0
-                if not both_dict_check:
-                    both_end_depth_dict[key].extend([round(left_mean, 2), round(right_mean, 2)])
-
-                mean_diff = abs(left_mean - right_mean)
-                if max(ac_cnt, 0) * BREAKEND_DEPTH_RATIO > mean_diff:
-                    pos_fail_key_dict[key] = 'FAIL_DEPTH_NCLOSE'
-                    use_ac = False
+                    mean_diff = abs(left_mean - right_mean)
+                    if max(ac_cnt, 0) * BREAKEND_DEPTH_RATIO > mean_diff:
+                        pos_fail_key_dict[key] = 'FAIL_DEPTH_NCLOSE'
+                        use_ac = False
             
             if use_ac:
                 using_ac_nclose_cnt_dict[key] = ac_nclose_cnt_dict[key] 
