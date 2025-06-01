@@ -375,6 +375,9 @@ with open(f'{PREFIX}/path_di_data.pkl', 'rb') as f:
 with open(f'{PREFIX}/nclose2cov.pkl', 'rb') as f:
     nclose2cov = pkl.load(f)
 
+if len(nclose2cov) == 0:
+    NCLOSE_WEIGHT_USE = False
+
 ncm = 0
 nclose2int = dict()
 
