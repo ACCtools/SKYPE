@@ -45,6 +45,8 @@ CTG_RPTCASE = 17
 CTG_MAINFLOWDIR = 18
 CTG_MAINFLOWCHR = 19
 
+DEFAULT_NCLOSE_WEIGHT = 0.2
+
 ABS_MAX_COVERAGE_RATIO = 3
 K = 1000
 M = K * 1000
@@ -333,7 +335,7 @@ parser.add_argument("-t", "--thread",
                     help="Number of thread", type=int)
 
 parser.add_argument("--nclose_weight",
-                    help="Nclose weight", type=float, default=0.5)
+                    help="Nclose weight", type=float, default=DEFAULT_NCLOSE_WEIGHT)
 
 parser.add_argument("--not_use_nclose_weight",
                     help="Do not use nclose weight", action='store_false')
