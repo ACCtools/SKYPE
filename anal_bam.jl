@@ -17,8 +17,12 @@ const READ_OPS = (
     OP_HARD_CLIP     # H
 )
 
-const TAR_RESULT = Set([(true, false)])
-const TAR_REV_RESULT = Set([(false, true)])
+const DIR2INT = Dict(
+    (true,  false) => 1,
+    (false, true)  => 2,
+    (true,  true)  => 3,
+    (false, false) => 4
+)
 
 function get_chr2int(fai_loc::String)
     chr2int = Dict{String, Int}()
@@ -84,7 +88,8 @@ function get_alignment_info(rec::XAM.BAM.Record)
 end
 
 function analyze_alignments!(read_name::String, align_infos::Vector{AlnInfo},
-                             ac_nclose_cnt::Counter, wa_nclose_cnt::Counter, rac_nclose_cnt::Counter)
+                             nclose_cnt_vec::Vector{Counter}, wa_nclose_cnt::Counter)
+
     tar_data = DefaultDict{Int, Tuple{Tv, Tv}}(() -> (Tv(), Tv()))
 
     for (qst, qnd, aln, rid, rst, rnd) in align_infos
@@ -103,8 +108,7 @@ function analyze_alignments!(read_name::String, align_infos::Vector{AlnInfo},
         end
     end
 
-    ac_nclose_set = Set{Int}()
-    rac_nclose_set = Set{Int}()
+    nclose_set_vec = [Set{Int}() for _ in 1:4]
     wa_nclose_set = Set{Int}()
 
     for (nidx, (qry_data_vec1, qry_data_vec2)) in pairs(tar_data)
@@ -139,22 +143,18 @@ function analyze_alignments!(read_name::String, align_infos::Vector{AlnInfo},
         
         if length(result) > 0
             ncl = idx2nclose[nidx]
-            if result == TAR_RESULT
-                push!(ac_nclose_set, ncl)
-            elseif result == TAR_REV_RESULT
-                push!(rac_nclose_set, ncl)
+            if length(result) == 1
+                push!(nclose_set_vec[DIR2INT[first(result)]], ncl)
             else
                 push!(wa_nclose_set, ncl)
             end
         end
     end
 
-    for ac_n in ac_nclose_set
-        ac_nclose_cnt[ac_n] += 1
-    end
-
-    for rac_n in rac_nclose_set
-        rac_nclose_cnt[rac_n] += 1
+    for i in 1:4
+        for n in nclose_set_vec[i]
+            nclose_cnt_vec[i][n] += 1
+        end
     end
 
     for wa_n in wa_nclose_set
@@ -196,8 +196,7 @@ function anal_bam(bam_loc::String, fai_loc::String, nclose_cord_list::Vector{Vec
     reader = open(BAM.Reader, bam_loc)
     record = BAM.Record()
 
-    ac_nclose_cnt = Counter(0)
-    rac_nclose_cnt = Counter(0)
+    nclose_cnt_vec = [Counter(0) for _ in 1:4]
     wa_nclose_cnt = Counter(0)
 
     if is_progress_bar
@@ -215,7 +214,7 @@ function anal_bam(bam_loc::String, fai_loc::String, nclose_cord_list::Vector{Vec
 
         if read_name != current_read_name
             if current_read_name !== nothing && length(align_infos) >= 2
-                analyze_alignments!(current_read_name, align_infos, ac_nclose_cnt, wa_nclose_cnt, rac_nclose_cnt)
+                analyze_alignments!(current_read_name, align_infos, nclose_cnt_vec, wa_nclose_cnt)
             end
 
             current_read_name = read_name
@@ -232,8 +231,8 @@ function anal_bam(bam_loc::String, fai_loc::String, nclose_cord_list::Vector{Vec
     end
     
     if current_read_name !== nothing && length(align_infos) >= 2
-        analyze_alignments!(current_read_name, align_infos, ac_nclose_cnt, wa_nclose_cnt, rac_nclose_cnt)
+        analyze_alignments!(current_read_name, align_infos, nclose_cnt_vec, wa_nclose_cnt)
     end
 
-    return [(k, v) for (k, v) in ac_nclose_cnt], [(k, v) for (k, v) in rac_nclose_cnt], [(k, v) for (k, v) in wa_nclose_cnt]
+    return [[(k, v) for (k, v) in nclose_cnt_vec[i]] for i in 1:4], [(k, v) for (k, v) in wa_nclose_cnt]
 end

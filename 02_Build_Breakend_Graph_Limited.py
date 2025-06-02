@@ -1,7 +1,7 @@
-from juliacall import Main as jl
-
 import sys
 import argparse
+import subprocess
+
 import shutil
 import os
 import pickle as pkl
@@ -97,13 +97,6 @@ MAPQ_BOUND = 60
 TELOMERE_EXPANSION = 5 * K
 TELOMERE_COMPRESS_RANGE = 100*K
 CENSAT_COMPRESSABLE_THRESHOLD = 1000*K
-
-FLANK_LENGTH = 1 * M
-BREAKEND_DEPTH_RATIO = 0.2
-ABS_MAX_COVERAGE_RATIO = 3
-
-DIFF_COMPARE_RAITO = 5
-SIM_COMPARE_RAITO = 1.2
 
 FORCE_TELOMERE_THRESHOLD = 10*K
 TELOMERE_CLUSTER_THRESHOLD = 500*K
@@ -202,102 +195,6 @@ def import_censat_repeat_data(file_path : str) -> dict :
             repeat_data[temp_list[0]].append(ref_data)
     fai_file.close()
     return repeat_data
-
-
-def preprocess_breakends(nclose_cord_list, df, repeat_censat_data) -> tuple:
-    pre_fail_key_dict = dict()
-    # Todo : kill outliers respect to meandepth
-    # Remove breakends from centromeres
-    meandepth = np.median(df['meandepth'])
-    using_nclose_list = []
-    df_by_chr = {}
-    for chrom, subdf in df.groupby("chr"):
-        df_by_chr[chrom] = subdf.reset_index(drop=True)
-
-    ends_map = {
-        chrom: [iv[1] for iv in intervals]
-        for chrom, intervals in repeat_censat_data.items()
-    }
-
-    not_using_key = set()
-
-    for nclose_cord in nclose_cord_list:
-        key = nclose_cord[-1]
-
-        for i in (0, 3):
-            chrom = nclose_cord[i]
-            coord = nclose_cord[i + 1]
-
-            # If chromosome not present in df, skip to next coordinate
-            if chrom not in df_by_chr:
-                continue
-            df_chr = df_by_chr[chrom]
-
-            intervals = repeat_censat_data.get(chrom, [])
-            ends = ends_map.get(chrom, [])
-            idx = bisect.bisect_left(ends, coord)
-            iv_start = 0
-            iv_end = 0
-
-            if idx < len(intervals):
-                iv_start, iv_end = intervals[idx]
-            if iv_start <= coord and coord <= iv_end:
-                pre_fail_key_dict[key] = 'CENSAT_NCLOSE'
-                not_using_key.add(key)
-                break
-
-            df_bin = df_chr[(df_chr["st"] <= coord) & (coord < df_chr["nd"])]
-            if not df_bin.empty and np.median(df_bin["meandepth"]) > ABS_MAX_COVERAGE_RATIO * meandepth:
-                pre_fail_key_dict[key] = 'HIGH_DEPTH_REGION_NCLOSE'
-                not_using_key.add(key)
-                break
-            
-    
-    using_nclose_list = []
-    for nclose_cord in nclose_cord_list:
-        key = nclose_cord[-1]
-        if key not in not_using_key:
-            using_nclose_list.append(nclose_cord)
-
-    return using_nclose_list, pre_fail_key_dict
-
-
-def postprocess_breakends(df, pre_cord_nclose_list) -> dict:
-    both_end_depth_dict = defaultdict(list)
-    # Pre‐group by chromosome for faster lookup
-    df_by_chr = {chrom: subdf.reset_index(drop=True) for chrom, subdf in df.groupby("chr")}
-    chr_max_end = {chrom: subdf["nd"].max() for chrom, subdf in df_by_chr.items()}
-
-    for bd in pre_cord_nclose_list:
-        key = bd[-1]
-        both_dict_check = key in both_end_depth_dict
-        
-        for i in (0, 3):
-            chrom = bd[i]
-            coord = bd[i + 1]
-
-            chrom_max = chr_max_end[chrom]
-
-            assert(chrom in df_by_chr)
-            df_chr = df_by_chr[chrom]
-
-            df_bin = df_chr[(df_chr["st"] <= coord) & (coord < df_chr["nd"])]
-
-            if not df_bin.empty:
-                low_bound       = max(0, coord - FLANK_LENGTH)
-                left_window_end = coord
-                right_window_start = coord
-                high_bound      = min(coord + FLANK_LENGTH, chrom_max)
-
-                df_left = df_chr[(df_chr["nd"] > low_bound) & (df_chr["nd"] <= left_window_end)].copy()
-                df_right = df_chr[(df_chr["st"] >= right_window_start) & (df_chr["st"] < high_bound)].copy()
-
-                left_mean = df_left["meandepth"].mean() if not df_left.empty else 0.0
-                right_mean = df_right["meandepth"].mean() if not df_right.empty else 0.0
-                if not both_dict_check:
-                    both_end_depth_dict[key].extend([round(left_mean, 2), round(right_mean, 2)])
-
-    return both_end_depth_dict
 
 def is_stepwise_nonoverlapping(intervals: list) -> bool:
     n = len(intervals)
@@ -3079,11 +2976,6 @@ def contig_preprocessing_00(PAF_FILE_PATH_ : list):
 
     return telo_coverage
 
-def similar_check(v1, v2):
-    assert(v1 >= 0 and v2 >= 0)
-    mi, ma = sorted([v1, v2])
-    return False if mi == 0 else (ma / mi <= SIM_COMPARE_RAITO)
-
 def nclose_calc():
     chr_len = find_chr_len(CHROMOSOME_INFO_FILE_PATH)
     contig_data = import_data2(PREPROCESSED_PAF_FILE_PATH)
@@ -3262,23 +3154,22 @@ def nclose_calc():
     nclose_cord_list = []
     total_nclose_cord_list_contig_name = []
     nclose_idx_corr = []
-    total_rev_dict = {}
+    total_dir_data = {}
+    transloc_k_set = set()
 
     trusted_nclose_count = 0
     for j in nclose_nodes:
         for i in nclose_nodes[j]:
             if contig_data[i[0]][CTG_TYP] == 2 or contig_data[i[0]][CTG_GLOBALIDX][0] == '2':
                 continue
-                
-            cl_ind, _ = map(int, contig_data[i[0]][CTG_GLOBALIDX].split('.'))
-            if cl_ind >= 2 or ctgname2overlap[contig_data[i[0]][CTG_NAM]] >= MAX_OVERLAP_SCORE:
-                continue
+
             dir_set = set()
-            trustable = True
+            tf_set = set()
+
             s = i[0] if i[0] < i[1] else i[1]
             e = i[1] if i[0] < i[1] else i[0]
             curr_nclose_cord_list = []
-            rev_dict = {}
+            dir_data = defaultdict(dict)
             nclose_cord_list_contig_name = []
             nclose_maxcover_s = contig_data[s][CHR_END] if contig_data[s][CTG_DIR] == '+' else contig_data[s][CHR_STR]
             nclose_maxcover_e = contig_data[e][CHR_STR] if contig_data[e][CTG_DIR] == '+' else contig_data[e][CHR_END]
@@ -3287,133 +3178,63 @@ def nclose_calc():
             temp_list = [start_chr, nclose_maxcover_s, contig_data[s][CTG_DIR],
                         end_chr, nclose_maxcover_e, contig_data[e][CTG_DIR],
                         trusted_nclose_count]
+
             template_dir = (contig_data[s][CTG_DIR], contig_data[e][CTG_DIR])
             dir_set.add((contig_data[s][CTG_DIR], contig_data[e][CTG_DIR]))
+            tf_set.add((True, False))
+            dir_data[trusted_nclose_count][(True, False)] = (contig_data[s][CTG_NAM], s, e, contig_data[s][CTG_TYP])
             curr_nclose_cord_list.append(temp_list)
             nclose_cord_list_contig_name.append(curr_nclose_cord_list[-1]+[contig_data[s][CTG_NAM]])
+
             for compressed_contig in nclose_compress_track[tuple(i)]:
                 compress_s = compressed_contig[0] if contig_data[compressed_contig[0]][CHR_NAM] == start_chr else compressed_contig[1]
                 compress_e = compressed_contig[1] if contig_data[compressed_contig[1]][CHR_NAM] == end_chr else compressed_contig[0]
-                
-                cl_ind, _ = map(int, contig_data[compress_s][CTG_GLOBALIDX].split('.'))
-                if cl_ind >= 2 or ctgname2overlap[contig_data[compress_s][CTG_NAM]] >= MAX_OVERLAP_SCORE:
-                    trustable = False
                 
                 nclose_maxcover_s = contig_data[compress_s][CHR_STR] if contig_data[compress_s][CTG_DIR] == '+' else contig_data[compress_s][CHR_END]
                 nclose_maxcover_e = contig_data[compress_e][CHR_END] if contig_data[compress_e][CTG_DIR] == '+' else contig_data[compress_e][CHR_STR]
                 temp_list = [start_chr, nclose_maxcover_s, contig_data[compress_s][CTG_DIR],
                             end_chr, nclose_maxcover_e, contig_data[compress_e][CTG_DIR],
                             trusted_nclose_count]
-                if template_dir == ('-' if contig_data[compress_s][CTG_DIR]=='+' else '+', 
-                                    '-' if contig_data[compress_e][CTG_DIR]=='+' else '+'):
-                    rev_dict[trusted_nclose_count] = (contig_data[compress_s][CTG_NAM], compress_s, compress_e, contig_data[compress_s][CTG_TYP])
+                
+                reference_dir = (True if contig_data[compress_s][CTG_DIR] == template_dir[0] else False, 
+                                 False if contig_data[compress_e][CTG_DIR] == template_dir[1] else True)
+                
+                dir_data[trusted_nclose_count][reference_dir] = (contig_data[compress_s][CTG_NAM], compress_s, compress_e, contig_data[compress_s][CTG_TYP])
                 dir_set.add((contig_data[compress_s][CTG_DIR], contig_data[compress_e][CTG_DIR]))
+                tf_set.add(reference_dir)
                 curr_nclose_cord_list.append(temp_list)
                 nclose_cord_list_contig_name.append(curr_nclose_cord_list[-1]+[contig_data[s][CTG_NAM]])
-                rev_dict[tuple(temp_list)] = contig_data[compress_s][CTG_NAM]
-            if len(dir_set) != 2:
-                trustable = False
-            else:
-                if dir_set == {('+', '-'), ('-', '+')} or dir_set == {('+', '+'), ('-', '-')}:
-                    trustable = True
-                else:
-                    trustable = False
-            if trustable:
+            
+            if len(dir_set) >= 2:
+                if dir_set == {('+', '+'), ('-', '-')}:
+                    transloc_k_set.add(trusted_nclose_count)
+                
+                assert(len(dir_data.values()) == 1)
+                dd = list(dir_data.values())[0]
+
+                assert(len(dd) >= 2)
+                assert((True, False) in dd)
+
                 nclose_cord_list += curr_nclose_cord_list
                 total_nclose_cord_list_contig_name += nclose_cord_list_contig_name
                 nclose_idx_corr.append(i)
-                total_rev_dict.update(rev_dict)
+                total_dir_data.update(dir_data)
                 trusted_nclose_count += 1
 
-    # 03_anal_bam pipeline
-    repeat_censat_data = import_censat_repeat_data(CENSAT_PATH)
+    with open(f"{PREFIX}/nclose_cord_list.pkl", "wb") as f:
+        pkl.dump((nclose_cord_list, nclose_idx_corr, total_nclose_cord_list_contig_name, total_dir_data, transloc_k_set), f)
 
-    df = pd.read_csv(main_stat_loc, compression='gzip', comment='#', sep='\t', names=['chr', 'st', 'nd', 'length', 'covsite', 'totaldepth', 'cov', 'meandepth'])
-    df = df.query('chr != "chrM"')
+    thread_lim = min(16, THREAD)
+    PROGRESS = ['--progress'] if args.progress else []
+    subprocess.run(['python', "-X", f"juliacall-threads={thread_lim}", "-X", "juliacall-handle-signals=yes", 
+                    os.path.join(os.path.dirname(os.path.abspath(__file__)), '03_Anal_bam.py'),
+                    PREFIX, read_bam_loc, CENSAT_PATH, CHROMOSOME_INFO_FILE_PATH, main_stat_loc] + PROGRESS)
 
-    pre_nclose_cord_list, pre_fail_key_dict = preprocess_breakends(nclose_cord_list, df, repeat_censat_data)
+    with open(f"{PREFIX}/task_dict.pkl", "rb") as f:
+        task_dict = pkl.load(f)
 
-    run_k_set = set()
-    jl.nclose_cord_vec = jl.Vector[jl.Vector[jl.Any]]()
-    for l in pre_nclose_cord_list:
-        run_k_set.add(l[-1])
-        jl.push_b(jl.nclose_cord_vec, jl.Vector[jl.Any](l))
-
-    is_progress_bar = sys.stdout.isatty() or args.progress
-    jl.include(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'anal_bam.jl'))
-
-    ac_nclose_cnt_list, rac_nclose_cnt_list, wa_nclose_cnt_list = jl.anal_bam(read_bam_loc, reference_fai_path, jl.nclose_cord_vec, is_progress_bar)
-    
-    ac_nclose_cnt_dict = dict(list(ac_nclose_cnt_list))
-    rac_nclose_cnt_dict = dict(list(rac_nclose_cnt_list))
-    wa_nclose_cnt_dict = dict(list(wa_nclose_cnt_list))
-
-    with open(f"{PREFIX}/bam_nclose_cnt.pkl", "wb") as f:
-        pkl.dump((ac_nclose_cnt_dict, rac_nclose_cnt_dict, wa_nclose_cnt_dict), f)
-    
-    both_end_depth_dict = postprocess_breakends(df, pre_nclose_cord_list)
-
-    task_dict = dict()
-    for k in run_k_set:
-        ac_v = ac_nclose_cnt_dict.get(k, 0)
-        rac_v = rac_nclose_cnt_dict.get(k, 0)
-        wa_v = wa_nclose_cnt_dict.get(k, 0)
-
-        if ac_v == 0 and rac_v > 0:
-            task_dict[k] = 1
-        elif ac_v > 0 and rac_v > 0:
-            if wa_v == 0 or (rac_v + ac_v) / wa_v >= DIFF_COMPARE_RAITO:
-                l1, r1, l2, r2 = both_end_depth_dict[k]
-
-                if similar_check(ac_v, rac_v) and similar_check(l1, r1) and similar_check(l2, r2):
-                    if min([ac_v, rac_v]) < min([l1, r1, l2, r2]):
-                        task_dict[k] = 2
-                else:
-                    mi, ma = sorted([ac_v, rac_v])
-                    if ma / mi < DIFF_COMPARE_RAITO:
-                        task_dict[k] = 1
-
-    nclose2cov = dict()
-    with open(f"{PREFIX}/nclose_nodes_index.txt", "a") as f:
-        for k, v in task_dict.items():
-            rev_ctg_data = total_rev_dict[k]
-            print(*rev_ctg_data, file=f)
-
-            if v == 2:
-                rac_v = rac_nclose_cnt_dict.get(k, 0)
-                ac_v = ac_nclose_cnt_dict.get(k, 0)
-
-                nclose2cov[nclose_idx_corr[k]] = ac_v
-                nclose2cov[(rev_ctg_data[1], rev_ctg_data[2])] = rac_v
-
-    with open(f"{PREFIX}/nclose2cov.pkl", "wb") as f:
-        pkl.dump(nclose2cov, f)
-    
-    with open(f"{PREFIX}/nclose_cov_report.tsv", "wt") as f2:
-        print(*['NCLOSE_CHR1', 'NCLOSE_CORD1', 'NCLOSE_DIR1', 'NCLOSE_CHR2', 'NCLOSE_CORD2', 'NCLOSE_DIR2', 'NCLOSE_ID',
-                'ORIGIN_CONTIG_NAME', 'ACCEPT_COUNT', 'REV_ACCEPT_COUNT', 'FAIL_COUNT', 'NCLOSE_TYPE', 'PREPROCESS_FAIL_CODE',
-                'NCLOSE_DEPTH_LEFT1', 'NCLOSE_DEPTH_RIGHT1', 'NCLOSE_DEPTH_LEFT2', 'NCLOSE_DEPTH_RIGHT2'], sep="\t", file=f2)
-        
-        for l in total_nclose_cord_list_contig_name:
-            k = l[-2]
-
-            print_list = l
-            if k in run_k_set:
-                nclose_type = '*'
-                if k in task_dict:
-                    if task_dict[k] == 1:
-                        nclose_type = 'REV_NCLOSE'
-                    elif task_dict[k] == 2:
-                        nclose_type = 'TRANSLOC_NCLOSE'
-
-                print_list.extend([ac_nclose_cnt_dict.get(k, 0), rac_nclose_cnt_dict.get(k, 0), wa_nclose_cnt_dict.get(k, 0), nclose_type])
-            else:
-                print_list.extend([-1, -1, -1, '*'])
-            print_list.append(pre_fail_key_dict.get(k, '*'))
-            print_list.extend(both_end_depth_dict.get(k, ['*'] * 4))
-
-            print(*print_list, sep="\t", file=f2)
-    
+    with open(f"{PREFIX}/nclose2cov.pkl", "rb") as f:
+        nclose2cov = pkl.load(f)
 
     nclose_node_count += len(task_dict)
 
@@ -3456,7 +3277,7 @@ parser.add_argument("main_stat_path",
 parser.add_argument("prefix", 
                     help="Pefix for pipeline")
 parser.add_argument("read_bam_loc", 
-                    help="read_aln_loc")
+                    help="Raw read alignment bam location")
 parser.add_argument("--alt", 
                     help="Path to an alternative PAF file (optional).")
 parser.add_argument("--orignal_paf_loc", nargs='+',
@@ -3492,9 +3313,9 @@ ORIGNAL_PAF_LOC_LIST_ = args.orignal_paf_loc
 main_stat_loc = args.main_stat_path
 read_bam_loc = args.read_bam_loc
 PRINT_IDX_FILE = args.verbose
+THREAD=args.thread
 
 ORIGNAL_PAF_LOC_LIST = ORIGNAL_PAF_LOC_LIST_
-reference_fai_path = CHROMOSOME_INFO_FILE_PATH
 
 
 assert(len(PAF_FILE_PATH) == len(ORIGNAL_PAF_LOC_LIST))
@@ -3921,8 +3742,6 @@ def run_graph_pipeline():
     for i in range(contig_data_size, contig_data_size + 2*CHROMOSOME_COUNT):
         for j in range(i, contig_data_size + 2*CHROMOSOME_COUNT):
             tar_ind_list.append((i, j))
-
-    THREAD=args.thread
 
     limit_combinations = [
         (c, DIR_CHANGE_LIMIT_ABS_MAX)
