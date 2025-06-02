@@ -204,7 +204,8 @@ def import_censat_repeat_data(file_path : str) -> dict :
     return repeat_data
 
 
-def preprocess_breakends(nclose_cord_list, df, repeat_censat_data) -> list:
+def preprocess_breakends(nclose_cord_list, df, repeat_censat_data) -> tuple:
+    pre_fail_key_dict = dict()
     # Todo : kill outliers respect to meandepth
     # Remove breakends from centromeres
     meandepth = np.median(df['meandepth'])
@@ -258,10 +259,11 @@ def preprocess_breakends(nclose_cord_list, df, repeat_censat_data) -> list:
         if key not in not_using_key:
             using_nclose_list.append(nclose_cord)
 
-    return using_nclose_list
+    return using_nclose_list, pre_fail_key_dict
 
 
-def postprocess_breakends(df, pre_cord_nclose_list):
+def postprocess_breakends(df, pre_cord_nclose_list) -> dict:
+    both_end_depth_dict = defaultdict(list)
     # Pre‐group by chromosome for faster lookup
     df_by_chr = {chrom: subdf.reset_index(drop=True) for chrom, subdf in df.groupby("chr")}
     chr_max_end = {chrom: subdf["nd"].max() for chrom, subdf in df_by_chr.items()}
@@ -293,7 +295,9 @@ def postprocess_breakends(df, pre_cord_nclose_list):
                 left_mean = df_left["meandepth"].mean() if not df_left.empty else 0.0
                 right_mean = df_right["meandepth"].mean() if not df_right.empty else 0.0
                 if not both_dict_check:
-                    both_end_depth_dict[key].extend([round(left_mean, 2), round(right_mean, 2)])   
+                    both_end_depth_dict[key].extend([round(left_mean, 2), round(right_mean, 2)])
+
+    return both_end_depth_dict
 
 def is_stepwise_nonoverlapping(intervals: list) -> bool:
     n = len(intervals)
@@ -3081,8 +3085,6 @@ def similar_check(v1, v2):
     return False if mi == 0 else (ma / mi <= SIM_COMPARE_RAITO)
 
 def nclose_calc():
-    global pos_fail_key_dict, pre_fail_key_dict, both_end_depth_dict
-
     chr_len = find_chr_len(CHROMOSOME_INFO_FILE_PATH)
     contig_data = import_data2(PREPROCESSED_PAF_FILE_PATH)
 
@@ -3323,21 +3325,13 @@ def nclose_calc():
                 total_rev_dict.update(rev_dict)
                 trusted_nclose_count += 1
 
-
-    logging.info(f"Uncompressed NClose node count : {uncomp_node_count}")    
-    logging.info(f"NClose node count : {nclose_node_count}")
-    logging.info(f"Telomere connected node count : {telo_node_count}")
-
+    # 03_anal_bam pipeline
     repeat_censat_data = import_censat_repeat_data(CENSAT_PATH)
 
     df = pd.read_csv(main_stat_loc, compression='gzip', comment='#', sep='\t', names=['chr', 'st', 'nd', 'length', 'covsite', 'totaldepth', 'cov', 'meandepth'])
     df = df.query('chr != "chrM"')
 
-    pos_fail_key_dict = dict()
-    pre_fail_key_dict = dict()
-    both_end_depth_dict = defaultdict(list)
-
-    pre_nclose_cord_list = preprocess_breakends(nclose_cord_list, df, repeat_censat_data)
+    pre_nclose_cord_list, pre_fail_key_dict = preprocess_breakends(nclose_cord_list, df, repeat_censat_data)
 
     run_k_set = set()
     jl.nclose_cord_vec = jl.Vector[jl.Vector[jl.Any]]()
@@ -3357,7 +3351,7 @@ def nclose_calc():
     with open(f"{PREFIX}/bam_nclose_cnt.pkl", "wb") as f:
         pkl.dump((ac_nclose_cnt_dict, rac_nclose_cnt_dict, wa_nclose_cnt_dict), f)
     
-    postprocess_breakends(df, pre_nclose_cord_list)
+    both_end_depth_dict = postprocess_breakends(df, pre_nclose_cord_list)
 
     task_dict = dict()
     for k in run_k_set:
@@ -3419,6 +3413,14 @@ def nclose_calc():
             print_list.extend(both_end_depth_dict.get(k, ['*'] * 4))
 
             print(*print_list, sep="\t", file=f2)
+    
+
+    nclose_node_count += len(task_dict)
+
+    logging.info(f"Uncompressed NClose node count : {uncomp_node_count}")    
+    logging.info(f"NClose node count : {nclose_node_count}")
+    logging.info(f"Telomere connected node count : {telo_node_count}")
+    logging.info(f"Translocation NClose node with coverage : {len(nclose2cov)}")
 
     return locals()
 
