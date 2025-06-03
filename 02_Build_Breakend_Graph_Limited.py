@@ -3242,10 +3242,11 @@ def nclose_calc():
                     PREFIX, read_bam_loc, CENSAT_PATH, CHROMOSOME_INFO_FILE_PATH, main_stat_loc] + PROGRESS)
 
     with open(f"{PREFIX}/03_anal_bam_output.pkl", "rb") as f:
-        nclose_nodes = pkl.load(f)
-
-    with open(f"{PREFIX}/nclose2cov.pkl", "rb") as f:
-        nclose2cov = pkl.load(f)
+        nclose_nodes, task_cnt = pkl.load(f)
+    
+    logging.info(f"Deleted NClose node with no coverage : {task_cnt[3]}")
+    logging.info(f"Added directed NClose node with coverage : {task_cnt[1]}")
+    logging.info(f"Translocation NClose node with coverage : {task_cnt[2]}")
 
     nclose_node_count = 0
     with open(f"{PREFIX}/nclose_nodes_index.txt", "wt") as f: 
@@ -3257,7 +3258,6 @@ def nclose_calc():
     logging.info(f"Uncompressed NClose node count : {uncomp_node_count}")    
     logging.info(f"NClose node count : {nclose_node_count}")
     logging.info(f"Telomere connected node count : {telo_node_count}")
-    logging.info(f"Translocation NClose node with coverage : {len(nclose2cov)}")
 
     return locals()
 

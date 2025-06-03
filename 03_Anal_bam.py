@@ -6,7 +6,8 @@ import pickle as pkl
 import pandas as pd
 import numpy as np
 import bisect
-from collections import defaultdict 
+
+from collections import defaultdict, Counter
 
 from juliacall import Main as jl
 
@@ -192,6 +193,7 @@ df = df.query('chr != "chrM"')
 
 pre_nclose_cord_list, pre_fail_key_dict = preprocess_breakends(nclose_cord_list, df, repeat_censat_data)
 
+task_cnt = Counter()
 task_dict = dict()
 run_k_set = set()
 
@@ -234,15 +236,21 @@ for k in run_k_set:
     if is_zero:
         ctg_data = total_dir_data[k][(True, False)]
         del nclose_nodes[ctg_data[0]]
+
         task_dict[k] = 3
+        task_cnt[task_dict[k]] += 1
+
     else:
         for d in total_dir_data[k]:
             if d != (True, False):
                 v = nclose_cnt_dict[d].get(k, 0)
                 if over_check(v, wa_v):
                     line = total_dir_data[k][d]
-                    task_dict[k] = 1
+
                     nclose_nodes[line[0]].append((int(line[1]), int(line[2])))
+
+                    task_dict[k] = 1
+                    task_cnt[task_dict[k]] += 1
                     
         if k in transloc_k_set:
             ac_v = nclose_cnt_dict[(True, False)].get(k, 0)
@@ -257,10 +265,12 @@ for k in run_k_set:
 
                         nclose2cov[nclose_idx_corr[k]] = ac_v
                         nclose2cov[(rev_ctg_data[1], rev_ctg_data[2])] = rac_v
+
                         task_dict[k] = 2
+                        task_cnt[task_dict[k]] += 2
 
 with open(f"{PREFIX}/03_anal_bam_output.pkl", "wb") as f:
-    pkl.dump(nclose_nodes, f)
+    pkl.dump((nclose_nodes, task_cnt), f)
 
 with open(f"{PREFIX}/nclose_cov_report.tsv", "wt") as f2:
     print(*['NCLOSE_CHR1', 'NCLOSE_CORD1', 'NCLOSE_DIR1', 'NCLOSE_CHR2', 'NCLOSE_CORD2', 'NCLOSE_DIR2', 'NCLOSE_ID',
