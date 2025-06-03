@@ -179,8 +179,9 @@ main_stat_loc = args.main_stat_path
 CENSAT_PATH = args.censat_bed_path
 repeat_censat_data = import_censat_repeat_data(CENSAT_PATH)
 
-with open(f"{PREFIX}/nclose_cord_list.pkl", "rb") as f:
-    nclose_cord_list, nclose_idx_corr, total_nclose_cord_list_contig_name, total_dir_data, transloc_k_set = pkl.load(f)
+with open(f"{PREFIX}/03_anal_bam_input.pkl", "rb") as f:
+    nclose_cord_list, nclose_idx_corr, total_nclose_cord_list_contig_name, \
+    total_dir_data, transloc_k_set, nclose_nodes = pkl.load(f)
 
 task_dict = defaultdict(list)
 nclose2cov = dict()
@@ -220,18 +221,29 @@ with open(f"{PREFIX}/bam_nclose_cnt.pkl", "wb") as f:
 
 both_end_depth_dict = postprocess_breakends(df, pre_nclose_cord_list)
 
-with open(f"{PREFIX}/nclose_nodes_index.txt", "a") as f:
-    for k in run_k_set:
-        wa_v = wa_nclose_cnt_dict.get(k, 0)
-
+for k in run_k_set:
+    wa_v = wa_nclose_cnt_dict.get(k, 0)
+    
+    is_zero = wa_v == 0
+    for d in dir_order_list:
+        v = nclose_cnt_dict[d].get(k, 0)
+        if v > 0:
+            is_zero = False
+            break
+    
+    if is_zero:
+        ctg_data = total_dir_data[k][(True, False)]
+        del nclose_nodes[ctg_data[0]]
+        task_dict[k] = 3
+    else:
         for d in total_dir_data[k]:
             if d != (True, False):
                 v = nclose_cnt_dict[d].get(k, 0)
                 if over_check(v, wa_v):
-                    rev_ctg_data = total_dir_data[k][d]
+                    line = total_dir_data[k][d]
                     task_dict[k] = 1
-                    print(*rev_ctg_data, file=f)
-        
+                    nclose_nodes[line[0]].append((int(line[1]), int(line[2])))
+                    
         if k in transloc_k_set:
             ac_v = nclose_cnt_dict[(True, False)].get(k, 0)
             rac_v = nclose_cnt_dict[(False, True)].get(k, 0)
@@ -247,8 +259,8 @@ with open(f"{PREFIX}/nclose_nodes_index.txt", "a") as f:
                         nclose2cov[(rev_ctg_data[1], rev_ctg_data[2])] = rac_v
                         task_dict[k] = 2
 
-with open(f"{PREFIX}/task_dict.pkl", "wb") as f:
-    pkl.dump(task_dict, f)
+with open(f"{PREFIX}/03_anal_bam_output.pkl", "wb") as f:
+    pkl.dump(nclose_nodes, f)
 
 with open(f"{PREFIX}/nclose_cov_report.tsv", "wt") as f2:
     print(*['NCLOSE_CHR1', 'NCLOSE_CORD1', 'NCLOSE_DIR1', 'NCLOSE_CHR2', 'NCLOSE_CORD2', 'NCLOSE_DIR2', 'NCLOSE_ID',
@@ -263,9 +275,11 @@ with open(f"{PREFIX}/nclose_cov_report.tsv", "wt") as f2:
             nclose_type = '*'
             if k in task_dict:
                 if task_dict[k] == 1:
-                    nclose_type = 'REV_NCLOSE'
+                    nclose_type = 'ADD_NCLOSE'
                 elif task_dict[k] == 2:
                     nclose_type = 'TRANSLOC_NCLOSE'
+                elif task_dict[k] == 3:
+                    nclose_type = 'DEL_NCLOSE'
 
             print_list.extend([nclose_cnt_dict[(True, False)].get(k, 0), nclose_cnt_dict[(False, True)].get(k, 0),
                                nclose_cnt_dict[(False, False)].get(k, 0), nclose_cnt_dict[(True, True)].get(k, 0),
