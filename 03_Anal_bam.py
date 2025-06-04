@@ -274,7 +274,7 @@ with open(f"{PREFIX}/03_anal_bam_output.pkl", "wb") as f:
 
 with open(f"{PREFIX}/nclose_cov_report.tsv", "wt") as f2:
     print(*['NCLOSE_CHR1', 'NCLOSE_CORD1', 'NCLOSE_DIR1', 'NCLOSE_CHR2', 'NCLOSE_CORD2', 'NCLOSE_DIR2', 'NCLOSE_ID',
-            'ORIGIN_CONTIG_NAME', 'ACCEPT_COUNT', 'REV_COUNT', 'CORD1_REV_COUNT', 'CORD2_REV_COUNT', 'FAIL_COUNT', 'NCLOSE_TYPE', 'PREPROCESS_FAIL_CODE',
+            'CONTIG_NAME', 'ACCEPT_COUNT', 'REV_COUNT', 'CORD1_REV_COUNT', 'CORD2_REV_COUNT', 'FAIL_COUNT', 'NCLOSE_TYPE', 'PREPROCESS_FAIL_CODE',
             'NCLOSE_DEPTH_LEFT1', 'NCLOSE_DEPTH_RIGHT1', 'NCLOSE_DEPTH_LEFT2', 'NCLOSE_DEPTH_RIGHT2'], sep="\t", file=f2)
     
     for l in total_nclose_cord_list_contig_name:

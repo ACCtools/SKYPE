@@ -2978,6 +2978,17 @@ def contig_preprocessing_00(PAF_FILE_PATH_ : list):
 
     return telo_coverage
 
+def get_corr_dir(is_for : bool, dir_str : str) -> str:
+    assert(dir_str == '+' or dir_str == '-')
+
+    if is_for:
+        return dir_str
+    else:
+        if dir_str == '+':
+            return '-'
+        else:
+            return '+'
+
 def nclose_calc():
     chr_len = find_chr_len(CHROMOSOME_INFO_FILE_PATH)
     contig_data = import_data2(PREPROCESSED_PAF_FILE_PATH)
@@ -3065,8 +3076,10 @@ def nclose_calc():
                 uncomp_node_count += 2
                 contig_a = contig_data[pair[0]]
                 contig_b = contig_data[pair[1]]
-                list_a = [contig_a[CTG_NAM], contig_a[CTG_DIR], contig_a[CHR_STR], contig_a[CHR_END]]
-                list_b = [contig_b[CTG_NAM], contig_b[CTG_DIR], contig_b[CHR_STR], contig_b[CHR_END]]
+
+                is_for = pair[0] < pair[1]
+                list_a = [contig_a[CTG_NAM], get_corr_dir(is_for, contig_a[CTG_DIR]), contig_a[CHR_STR], contig_a[CHR_END]]
+                list_b = [contig_b[CTG_NAM], get_corr_dir(is_for, contig_b[CTG_DIR]), contig_b[CHR_STR], contig_b[CHR_END]]
                 if contig_a[CTG_NAM] in rpt_con:
                     print(list_a, list_b, "all_repeat", file=f)
                 else:
@@ -3133,11 +3146,14 @@ def nclose_calc():
             for pair in nclose_type[i]:
                 contig_a = contig_data[pair[0]]
                 contig_b = contig_data[pair[1]]
+
                 if st_flag:
                     if contig_a[CTG_NAM] in nclose_start_compress[(('=', i[0]), ('=', i[1]))]:
                         pass
-                list_a = [contig_a[CTG_NAM], contig_a[CTG_DIR], contig_a[CHR_STR], contig_a[CHR_END]]
-                list_b = [contig_b[CTG_NAM], contig_b[CTG_DIR], contig_b[CHR_STR], contig_b[CHR_END]]
+                
+                is_for = pair[0] < pair[1]
+                list_a = [contig_a[CTG_NAM], get_corr_dir(is_for, contig_a[CTG_DIR]), contig_a[CHR_STR], contig_a[CHR_END]]
+                list_b = [contig_b[CTG_NAM], get_corr_dir(is_for, contig_b[CTG_DIR]), contig_b[CHR_STR], contig_b[CHR_END]]
                 if contig_a[CTG_NAM] in rpt_con:
                     print(list_a, list_b, "all_repeat", file=f)
                 else:
@@ -3155,8 +3171,6 @@ def nclose_calc():
     trusted_nclose_count = 0
     for j in nclose_nodes:
         for i in nclose_nodes[j]:
-
-            dir_set = set()
             tf_set = set()
 
             s = i[0]
@@ -3173,50 +3187,48 @@ def nclose_calc():
                         trusted_nclose_count]
 
             template_dir = (contig_data[s][CTG_DIR], contig_data[e][CTG_DIR])
-            dir_set.add((contig_data[s][CTG_DIR], contig_data[e][CTG_DIR]))
             tf_set.add((True, False))
+
             dir_data[trusted_nclose_count][(True, False)] = (contig_data[s][CTG_NAM], s, e, contig_data[s][CTG_TYP])
             curr_nclose_cord_list.append(temp_list)
             nclose_cord_list_contig_name.append(curr_nclose_cord_list[-1]+[contig_data[s][CTG_NAM]])
 
             for compressed_contig in nclose_compress_track[tuple(i)]:
 
-                flag = False
+                is_forward = None
                 if contig_data[compressed_contig[0]][CHR_NAM] == start_chr and contig_data[compressed_contig[1]][CHR_NAM] == end_chr:
                     compress_s = compressed_contig[0]
                     compress_e = compressed_contig[1]
-                    flag = True
+                    is_forward = True
                 elif contig_data[compressed_contig[0]][CHR_NAM] == end_chr and contig_data[compressed_contig[1]][CHR_NAM] == start_chr:
                     compress_s = compressed_contig[1]
                     compress_e = compressed_contig[0]
-                    flag = False
+                    is_forward = False
                 else:
                     assert(False)
+
+                nclose_corr_dir = (get_corr_dir(is_forward, contig_data[compress_s][CTG_DIR]),
+                                   get_corr_dir(is_forward, contig_data[compress_e][CTG_DIR]))
                 
-                nclose_maxcover_s = contig_data[compress_s][CHR_STR] if contig_data[compress_s][CTG_DIR] == '+' else contig_data[compress_s][CHR_END]
-                nclose_maxcover_e = contig_data[compress_e][CHR_END] if contig_data[compress_e][CTG_DIR] == '+' else contig_data[compress_e][CHR_STR]
+                nclose_maxcover_s = contig_data[compress_s][CHR_STR] if nclose_corr_dir[0] == '+' else contig_data[compress_s][CHR_END]
+                nclose_maxcover_e = contig_data[compress_e][CHR_END] if nclose_corr_dir[1] == '+' else contig_data[compress_e][CHR_STR]
 
-                temp_list = [start_chr, nclose_maxcover_s, contig_data[compress_s][CTG_DIR],
-                            end_chr, nclose_maxcover_e, contig_data[compress_e][CTG_DIR],
-                            trusted_nclose_count]
+                temp_list = [start_chr, nclose_maxcover_s, nclose_corr_dir[0],
+                             end_chr, nclose_maxcover_e, nclose_corr_dir[1],
+                             trusted_nclose_count]
 
-                if flag:
-                    reference_dir = (True if contig_data[compress_s][CTG_DIR] == template_dir[0] else False, 
-                                    False if contig_data[compress_e][CTG_DIR] == template_dir[1] else True)
-                else:
-                    reference_dir = (False if contig_data[compress_s][CTG_DIR] == template_dir[0] else True, 
-                                    True if contig_data[compress_e][CTG_DIR] == template_dir[1] else False)
+                reference_dir = (True if nclose_corr_dir[0] == template_dir[0] else False, 
+                                 False if nclose_corr_dir[1] == template_dir[1] else True)
 
                 if reference_dir not in dir_data[trusted_nclose_count]:
                     dir_data[trusted_nclose_count][reference_dir] = (contig_data[compress_s][CTG_NAM], compress_s, compress_e, contig_data[compress_s][CTG_TYP])
                 
-                dir_set.add((contig_data[compress_s][CTG_DIR], contig_data[compress_e][CTG_DIR]))
                 tf_set.add(reference_dir)
                 curr_nclose_cord_list.append(temp_list)
-                nclose_cord_list_contig_name.append(curr_nclose_cord_list[-1]+[contig_data[s][CTG_NAM]])
+                nclose_cord_list_contig_name.append(curr_nclose_cord_list[-1]+[contig_data[compress_e][CTG_NAM]])
             
-            if len(dir_set) >= 1:
-                if dir_set == {('+', '+'), ('-', '-')}:
+            if len(tf_set) >= 1:
+                if tf_set == {(True, False), (False, True)} and template_dir[0] == template_dir[1]:
                     transloc_k_set.add(trusted_nclose_count)
                 
                 assert(len(dir_data.values()) == 1)
