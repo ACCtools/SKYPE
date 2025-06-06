@@ -2962,34 +2962,38 @@ def contig_preprocessing_00(PAF_FILE_PATH_ : list):
             if contig_name in target_split_contig_nameset \
                and real_final_contig[s][CTG_GLOBALIDX].split(".")[0]=='1' \
                and e-s >= 2:
-                curr_type3_st = s
-                curr_type3_ed = curr_type3_st
-                
-                while curr_type3_ed <= e:
-                    st_chr = (real_final_contig[curr_type3_st][CTG_DIR], real_final_contig[curr_type3_st][CHR_NAM])
-                    ed_chr = (real_final_contig[curr_type3_ed][CTG_DIR], real_final_contig[curr_type3_ed][CHR_NAM])
-                    if st_chr == ed_chr:
-                        curr_fragment_ratio, _ = calculate_single_contig_ref_ratio(real_final_contig[curr_type3_st:curr_type3_ed+1])
-                        if abs(curr_fragment_ratio - 1) < BND_CONTIG_BOUND:
-                            curr_type3_ed += 1
-                        else:
-                            curr_type3_st = curr_type3_ed
-                            
-                            if real_final_contig[curr_type3_st][CTG_END] - real_final_contig[curr_type3_st - 1][CTG_STR] >= SPLIT_CTG_LEN_LIMIT:
-                                split_contig_counter[contig_name] += 1
-                                temp_list = copy.deepcopy(real_final_contig[curr_type3_st-1:curr_type3_st+1])
-                                temp_list[0][CTG_MAPQ] = temp_list[1][CTG_MAPQ] = 60
-                                temp_list[0][CTG_NAM] = temp_list[1][CTG_NAM] = f"split_contig_{contig_name}_{split_contig_counter[contig_name]}"
-                                overlap_low_split_contig += temp_list
-                    else:
-                        curr_type3_st = curr_type3_ed
+                chunk_start_idx = s
+                current_idx = s + 1
 
-                        if real_final_contig[curr_type3_st][CTG_END] - real_final_contig[curr_type3_st - 1][CTG_STR] >= SPLIT_CTG_LEN_LIMIT:
+                while current_idx <= e:
+                    start_chr_info = (real_final_contig[chunk_start_idx][CTG_DIR], real_final_contig[chunk_start_idx][CHR_NAM])
+                    current_chr_info = (real_final_contig[current_idx][CTG_DIR], real_final_contig[current_idx][CHR_NAM])
+                    is_same_chromosome = (start_chr_info == current_chr_info)
+
+                    is_ratio_valid = False
+                    if is_same_chromosome:
+                        chunk_slice = real_final_contig[chunk_start_idx : current_idx + 1]
+                        curr_fragment_ratio, _ = calculate_single_contig_ref_ratio(chunk_slice)
+                        if abs(curr_fragment_ratio - 1) < BND_CONTIG_BOUND:
+                            is_ratio_valid = True
+
+                    if not is_same_chromosome or not is_ratio_valid:
+                        prev_element_idx = current_idx - 1
+                        
+                        if real_final_contig[current_idx][CTG_END] - real_final_contig[prev_element_idx][CTG_STR] >= SPLIT_CTG_LEN_LIMIT:
                             split_contig_counter[contig_name] += 1
-                            temp_list = copy.deepcopy(real_final_contig[curr_type3_st-1:curr_type3_st+1])
+                            
+                            temp_list = copy.deepcopy(real_final_contig[prev_element_idx : current_idx + 1])
+                            
+                            new_name = f"split_contig_{contig_name}_{split_contig_counter[contig_name]}"
                             temp_list[0][CTG_MAPQ] = temp_list[1][CTG_MAPQ] = 60
-                            temp_list[0][CTG_NAM] = temp_list[1][CTG_NAM] = f"split_contig_{contig_name}_{split_contig_counter[contig_name]}"
+                            temp_list[0][CTG_NAM] = temp_list[1][CTG_NAM] = new_name
+                            
                             overlap_low_split_contig += temp_list
+                        
+                        chunk_start_idx = current_idx
+                        
+                    current_idx += 1
             s = e+1
 
     if len(overlap_low_split_contig) > 0:
