@@ -26,6 +26,7 @@ FLANK_LENGTH = 1 * M
 
 DIFF_COMPARE_RAITO = 5
 SIM_COMPARE_RAITO = 1.2
+HARD_COMPARE_RAITO = 1.1
 
 ABS_MAX_COVERAGE_RATIO = 3
 CENSAT_COMPRESSABLE_THRESHOLD = 1000 * K
@@ -136,10 +137,10 @@ def postprocess_breakends(df, pre_cord_nclose_list) -> dict:
 
     return both_end_depth_dict
 
-def similar_check(v1, v2):
+def similar_check(v1, v2, ratio=SIM_COMPARE_RAITO):
     assert(v1 >= 0 and v2 >= 0)
     mi, ma = sorted([v1, v2])
-    return False if mi == 0 else (ma / mi <= SIM_COMPARE_RAITO)
+    return False if mi == 0 else (ma / mi <= ratio)
 
 def over_check(v1, v2):
     assert(v1 >= 0 and v2 >= 0)
@@ -224,6 +225,7 @@ with open(f"{PREFIX}/bam_nclose_cnt.pkl", "wb") as f:
 both_end_depth_dict = postprocess_breakends(df, pre_nclose_cord_list)
 
 for k in run_k_set:
+    l1, r1, l2, r2 = both_end_depth_dict[k]
     wa_v = wa_nclose_cnt_dict.get(k, 0)
     
     is_zero = wa_v == 0
@@ -233,7 +235,10 @@ for k in run_k_set:
             is_zero = False
             break
     
-    if is_zero:
+    if is_zero \
+       and similar_check(l1, r1, ratio=HARD_COMPARE_RAITO) \
+       and similar_check(l2, r2, ratio=HARD_COMPARE_RAITO):
+        
         ctg_data = total_dir_data[k][(True, False)]
         del nclose_nodes[ctg_data[0]]
 
@@ -257,8 +262,6 @@ for k in run_k_set:
             rac_v = nclose_cnt_dict[(False, True)].get(k, 0)
 
             if over_check(ac_v, wa_v) and over_check(rac_v, wa_v):
-                l1, r1, l2, r2 = both_end_depth_dict[k]
-
                 if similar_check(ac_v, rac_v) and similar_check(l1, r1) and similar_check(l2, r2):
                     if min([ac_v, rac_v]) < min([l1, r1, l2, r2]):
                         rev_ctg_data = total_dir_data[k][(False, True)]
