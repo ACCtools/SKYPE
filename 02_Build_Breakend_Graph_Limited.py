@@ -112,6 +112,8 @@ REPEAT_MERGE_GAP = 0
 
 MAX_OVERLAP_SCORE = 3
 
+SPLIT_CTG_LEN_LIMIT = 100 * K
+
 def import_data(file_path : str) -> list :
     contig_data = []
     int_induce_idx = [1, 2, 3, 6, 7, 8, 9]
@@ -381,7 +383,7 @@ def div_repeat_paf(original_paf_path_list: list, aln_paf_path_list: list, contig
         
     return not_using_contig
 
-def get_overlap_score_dict(original_paf_path_list: list, aln_paf_path_list: list, contig_data: list) -> dict:
+def get_overlap_bothend_score_dict(original_paf_path_list: list, aln_paf_path_list: list, contig_data: list) -> dict:
     ori_paf_data_list_data = []
     ori_end_idx_dict_data = []
 
@@ -434,6 +436,29 @@ def get_overlap_score_dict(original_paf_path_list: list, aln_paf_path_list: list
 
         overlap_score = max_overlap(ori_paf_data_list[ori_st:ori_nd+1], [aln_paf_data_list[ppc_st], aln_paf_data_list[ppc_nd]])
         ctgname2overlap[ctg_name] = overlap_score
+        
+    return ctgname2overlap
+
+def get_overlap_total_score_dict(original_paf_path_list: list) -> dict:
+    ori_paf_data_list_data = []
+    ori_end_idx_dict_data = []
+
+    for original_paf_path in original_paf_path_list:
+        ori_paf_data_list, ori_end_idx_dict = get_qry_cord_data(original_paf_path)
+
+        ori_paf_data_list_data.append(ori_paf_data_list)
+        ori_end_idx_dict_data.append(ori_end_idx_dict)
+
+    ctgname2overlap = dict()
+    for cl_ind, ori_end_idx_dict in enumerate(ori_end_idx_dict_data):
+        for ori_ctg_name in ori_end_idx_dict.keys():
+            ori_paf_data_list = ori_paf_data_list_data[cl_ind]
+            ori_end_idx_dict = ori_end_idx_dict_data[cl_ind]
+
+            ori_st, ori_nd = ori_end_idx_dict[ori_ctg_name]
+
+            overlap_score = max_overlap(ori_paf_data_list[ori_st:ori_nd+1], [])
+            ctgname2overlap[ori_ctg_name] = overlap_score
         
     return ctgname2overlap
 
@@ -1923,9 +1948,15 @@ def extract_nclose_node(contig_data : list, bnd_contig : set, repeat_contig_name
                 ed_chr = [contig_data[e][CTG_DIR], contig_data[e][CHR_NAM]]
                 while st <= e and [contig_data[st][CTG_DIR], contig_data[st][CHR_NAM]] == st_chr:
                     st+=1
+                    cut_ratio, _ = calculate_single_contig_ref_ratio(contig_data[s:st+1])
+                    if abs(cut_ratio-1) > BND_CONTIG_BOUND:
+                        break
                 st-=1
                 while ed >= s and [contig_data[ed][CTG_DIR], contig_data[ed][CHR_NAM]] == ed_chr:
                     ed-=1
+                    cut_ratio, _ = calculate_single_contig_ref_ratio(contig_data[ed:e+1])
+                    if abs(cut_ratio-1) > BND_CONTIG_BOUND:
+                        break
                 ed+=1
 
                 if st + 1 < ed:
@@ -2892,7 +2923,6 @@ def contig_preprocessing_00(PAF_FILE_PATH_ : list):
     else:
         final_subtelo_ppc_node = []
 
-
     for i in final_break_contig:
         temp_list = i
         temp_list[CTG_STRND] += total_len
@@ -2914,31 +2944,71 @@ def contig_preprocessing_00(PAF_FILE_PATH_ : list):
         temp_list[CTG_STRND] += total_len
         temp_list[CTG_ENDND] += total_len
         real_final_contig.append(temp_list)
-
-    add_node_count = len(final_break_contig) + len(final_cen_vtg_contig)
-    s = 0
-    r_l = len(real_final_contig)
-    logging.info(f"Original PAF file length : {original_node_count}")
-    logging.info(f"Final preprocessed PAF file length: {r_l}")
-    logging.info(f"Number of virtual contigs added on preprocessing : {add_node_count}")
-    contig = set()
-    while s<r_l:
-        e=real_final_contig[s][CTG_ENDND]
-        chkcensat = False
-        chktelo=False
-        for i in range(s, e+1):
-            if real_final_contig[i][CTG_TELCHR] != '0':
-                chkcensat = True
-            elif real_final_contig[i][CTG_CENSAT] != '0':
-                chktelo = True
-        
-        if chkcensat and chktelo:
-            contig.add(contig_data[s][CTG_NAM])
-        
-        s = e+1
     
-    # for i in contig:
-    #     print(i)
+    overlap_low_split_contig = []
+    if is_unitig_reduced == False:
+        ctgname2overlap = get_overlap_total_score_dict(ORIGNAL_PAF_LOC_LIST)
+        target_split_contig_nameset = set()
+        for k, v in ctgname2overlap.items():
+            if v <= 2:
+                target_split_contig_nameset.add(k)
+
+        s = 0
+        r_l = len(real_final_contig)
+        split_contig_counter = Counter()
+        while s < r_l:
+            contig_name = real_final_contig[s][CTG_NAM]
+            e = real_final_contig[s][CTG_ENDND]
+            if contig_name in target_split_contig_nameset \
+               and real_final_contig[s][CTG_GLOBALIDX].split(".")[0]=='1' \
+               and e-s >= 2:
+                curr_type3_st = s
+                curr_type3_ed = curr_type3_st
+                
+                while curr_type3_ed <= e:
+                    st_chr = (real_final_contig[curr_type3_st][CTG_DIR], real_final_contig[curr_type3_st][CHR_NAM])
+                    ed_chr = (real_final_contig[curr_type3_ed][CTG_DIR], real_final_contig[curr_type3_ed][CHR_NAM])
+                    if st_chr == ed_chr:
+                        curr_fragment_ratio, _ = calculate_single_contig_ref_ratio(real_final_contig[curr_type3_st:curr_type3_ed+1])
+                        if abs(curr_fragment_ratio - 1) < BND_CONTIG_BOUND:
+                            curr_type3_ed += 1
+                        else:
+                            curr_type3_st = curr_type3_ed
+                            
+                            if real_final_contig[curr_type3_st][CTG_END] - real_final_contig[curr_type3_st - 1][CTG_STR] >= SPLIT_CTG_LEN_LIMIT:
+                                split_contig_counter[contig_name] += 1
+                                temp_list = copy.deepcopy(real_final_contig[curr_type3_st-1:curr_type3_st+1])
+                                temp_list[0][CTG_MAPQ] = temp_list[1][CTG_MAPQ] = 60
+                                temp_list[0][CTG_NAM] = temp_list[1][CTG_NAM] = f"split_contig_{contig_name}_{split_contig_counter[contig_name]}"
+                                overlap_low_split_contig += temp_list
+                    else:
+                        curr_type3_st = curr_type3_ed
+
+                        if real_final_contig[curr_type3_st][CTG_END] - real_final_contig[curr_type3_st - 1][CTG_STR] >= SPLIT_CTG_LEN_LIMIT:
+                            split_contig_counter[contig_name] += 1
+                            temp_list = copy.deepcopy(real_final_contig[curr_type3_st-1:curr_type3_st+1])
+                            temp_list[0][CTG_MAPQ] = temp_list[1][CTG_MAPQ] = 60
+                            temp_list[0][CTG_NAM] = temp_list[1][CTG_NAM] = f"split_contig_{contig_name}_{split_contig_counter[contig_name]}"
+                            overlap_low_split_contig += temp_list
+            s = e+1
+
+    if len(overlap_low_split_contig) > 0:
+        final_low_split_contig = pass_pipeline(overlap_low_split_contig, telo_dict, telo_bound_dict, repeat_data, repeat_censat_data, False)
+    else:
+        final_low_split_contig = []
+
+    for i in final_low_split_contig:
+        temp_list = i
+        temp_list[CTG_STRND] += total_len
+        temp_list[CTG_ENDND] += total_len
+        real_final_contig.append(temp_list)
+    
+    total_len += len(final_low_split_contig)
+
+    add_node_count = len(final_break_contig) + len(final_cen_vtg_contig) + len(final_low_split_contig)
+    logging.info(f"Original PAF file length : {original_node_count}")
+    logging.info(f"Final preprocessed PAF file length: {len(real_final_contig)}")
+    logging.info(f"Number of virtual contigs added on preprocessing : {add_node_count}")
 
     adjacency = initial_graph_build(real_final_contig, telo_bound_dict)
 
@@ -3064,9 +3134,8 @@ def nclose_calc():
             contig_b = contig_data[pair[1]]
             if chr2int(contig_a[CHR_NAM]) <= chr2int(contig_b[CHR_NAM]):
                 all_nclose_type[(contig_a[CHR_NAM], contig_b[CHR_NAM])].append(pair)
-
-        else:
-            all_nclose_type[(contig_b[CHR_NAM], contig_a[CHR_NAM])].append((pair[1], pair[0]))
+            else:
+                all_nclose_type[(contig_b[CHR_NAM], contig_a[CHR_NAM])].append((pair[1], pair[0]))
 
     uncomp_node_count = 0
     with open(f"{PREFIX}/all_nclose_nodes_list.txt", "wt") as f:
@@ -3159,8 +3228,6 @@ def nclose_calc():
                 else:
                     print(list_a, list_b, file=f)
             print("", file=f)
-                
-    ctgname2overlap = get_overlap_score_dict(ORIGNAL_PAF_LOC_LIST, PAF_FILE_PATH, contig_data)
 
     nclose_cord_list = []
     total_nclose_cord_list_contig_name = []
@@ -3210,8 +3277,8 @@ def nclose_calc():
                 nclose_corr_dir = (get_corr_dir(is_forward, contig_data[compress_s][CTG_DIR]),
                                    get_corr_dir(is_forward, contig_data[compress_e][CTG_DIR]))
                 
-                nclose_maxcover_s = contig_data[compress_s][CHR_STR] if nclose_corr_dir[0] == '+' else contig_data[compress_s][CHR_END]
-                nclose_maxcover_e = contig_data[compress_e][CHR_END] if nclose_corr_dir[1] == '+' else contig_data[compress_e][CHR_STR]
+                nclose_maxcover_s = contig_data[compress_s][CHR_END] if nclose_corr_dir[0] == '+' else contig_data[compress_s][CHR_STR]
+                nclose_maxcover_e = contig_data[compress_e][CHR_STR] if nclose_corr_dir[1] == '+' else contig_data[compress_e][CHR_END]
 
                 temp_list = [start_chr, nclose_maxcover_s, nclose_corr_dir[0],
                              end_chr, nclose_maxcover_e, nclose_corr_dir[1],
@@ -3319,7 +3386,7 @@ parser.add_argument("--verbose",
 
 args = parser.parse_args()
 
-# t = "02_Build_Breakend_Graph_Limited.py /home/hyunwoo/ACCtools-pipeline/90_skype_run/SNU-245/20_alignasm/SNU-245.ctg.aln.paf public_data/chm13v2.0.fa.fai public_data/chm13v2.0_telomere.bed public_data/chm13v2.0_repeat.m.bed public_data/chm13v2.0_censat_v2.1.m.bed /home/hyunwoo/ACCtools-pipeline/90_skype_run/SNU-245/01_depth/SNU-245.win.stat.gz 30_skype_pipe/SNU-245_01_53_09 /home/hyunwoo/ACCtools-pipeline/90_skype_run/SNU-245/01_depth/SNU-245.bam --alt /home/hyunwoo/ACCtools-pipeline/90_skype_run/SNU-245/20_alignasm/SNU-245.utg.aln.paf --orignal_paf_loc /home/hyunwoo/ACCtools-pipeline/90_skype_run/SNU-245/20_alignasm/SNU-245.ctg.paf /home/hyunwoo/ACCtools-pipeline/90_skype_run/SNU-245/20_alignasm/SNU-245.utg.paf -t 128"
+# t = "02_Build_Breakend_Graph_Limited.py /home/hyunwoo/ACCtools-pipeline/90_skype_run/PC-3/20_alignasm/PC-3.ctg.aln.paf public_data/chm13v2.0.fa.fai public_data/chm13v2.0_telomere.bed public_data/chm13v2.0_repeat.m.bed public_data/chm13v2.0_censat_v2.1.m.bed /home/hyunwoo/ACCtools-pipeline/90_skype_run/PC-3/01_depth/PC-3.win.stat.gz 30_skype_pipe/PC-3_13_21_51 /home/hyunwoo/ACCtools-pipeline/90_skype_run/PC-3/01_depth/PC-3.bam --alt /home/hyunwoo/ACCtools-pipeline/90_skype_run/PC-3/20_alignasm/PC-3.utg.aln.paf --orignal_paf_loc /home/hyunwoo/ACCtools-pipeline/90_skype_run/PC-3/20_alignasm/PC-3.ctg.paf /home/hyunwoo/ACCtools-pipeline/90_skype_run/PC-3/20_alignasm/PC-3.utg.paf -t 128"
 # args = parser.parse_args(t.split()[1:])
 
 PREFIX = args.prefix
