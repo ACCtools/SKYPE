@@ -2945,6 +2945,8 @@ def contig_preprocessing_00(PAF_FILE_PATH_ : list):
         temp_list[CTG_ENDND] += total_len
         real_final_contig.append(temp_list)
     
+    total_len += len(final_subtelo_ppc_node)
+
     overlap_low_split_contig = []
     if is_unitig_reduced == False:
         ctgname2overlap = get_overlap_total_score_dict(ORIGNAL_PAF_LOC_LIST)
