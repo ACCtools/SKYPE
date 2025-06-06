@@ -113,6 +113,7 @@ REPEAT_MERGE_GAP = 0
 MAX_OVERLAP_SCORE = 3
 
 SPLIT_CTG_LEN_LIMIT = 100 * K
+TRUST_SPLIT_CTG_LEN_LIMIT = 20 * K
 
 def import_data(file_path : str) -> list :
     contig_data = []
@@ -461,6 +462,29 @@ def get_overlap_total_score_dict(original_paf_path_list: list) -> dict:
             ctgname2overlap[ori_ctg_name] = overlap_score
         
     return ctgname2overlap
+
+def get_not_trust_contig_name(original_paf_path_list: list) -> set:
+    not_using_contig = set()
+    for file_path in original_paf_path_list:
+        with open(file_path, "r") as paf_file:
+            for curr_contig in paf_file:
+                a = curr_contig.split("\t")
+                flag = None
+                for i in a:
+                    if i.startswith("tp:A:"):
+                        if i[5] == 'P':
+                            flag = False
+                        else:
+                            flag = True
+                        break
+                assert(flag is not None)
+
+                if flag:
+                    not_using_contig.add(a[0])
+                if int(a[11]) < 60:
+                    not_using_contig.add(a[0])
+        
+    return not_using_contig
 
 def import_repeat_data(file_path : str) -> dict :
     fai_file = open(file_path, "r")
@@ -2950,6 +2974,8 @@ def contig_preprocessing_00(PAF_FILE_PATH_ : list):
     overlap_low_split_contig = []
     if is_unitig_reduced == False:
         ctgname2overlap = get_overlap_total_score_dict(ORIGNAL_PAF_LOC_LIST)
+        not_trust_contig_name = get_not_trust_contig_name(ORIGNAL_PAF_LOC_LIST)
+
         target_split_contig_nameset = set()
         for k, v in ctgname2overlap.items():
             if v <= 2:
@@ -2964,6 +2990,11 @@ def contig_preprocessing_00(PAF_FILE_PATH_ : list):
             if contig_name in target_split_contig_nameset \
                and real_final_contig[s][CTG_GLOBALIDX].split(".")[0]=='1' \
                and e-s >= 2:
+                
+                split_limit = SPLIT_CTG_LEN_LIMIT
+                if contig_name not in not_trust_contig_name:
+                    split_limit = TRUST_SPLIT_CTG_LEN_LIMIT
+                
                 chunk_start_idx = s
                 current_idx = s + 1
 
@@ -2982,7 +3013,7 @@ def contig_preprocessing_00(PAF_FILE_PATH_ : list):
                     if not is_same_chromosome or not is_ratio_valid:
                         prev_element_idx = current_idx - 1
                         
-                        if real_final_contig[current_idx][CTG_END] - real_final_contig[prev_element_idx][CTG_STR] >= SPLIT_CTG_LEN_LIMIT:
+                        if real_final_contig[current_idx][CTG_END] - real_final_contig[prev_element_idx][CTG_STR] >= split_limit:
                             split_contig_counter[contig_name] += 1
                             
                             temp_list = copy.deepcopy(real_final_contig[prev_element_idx : current_idx + 1])
