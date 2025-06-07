@@ -266,8 +266,9 @@ for k in run_k_set:
                     if min([ac_v, rac_v]) < min([l1, r1, l2, r2]):
                         rev_ctg_data = total_dir_data[k][(False, True)]
 
-                        nclose2cov[nclose_idx_corr[k]] = ac_v
-                        nclose2cov[(rev_ctg_data[1], rev_ctg_data[2])] = rac_v
+                        # Coverage constraint limit
+                        nclose2cov[nclose_idx_corr[k]] = ac_v / 2
+                        nclose2cov[(rev_ctg_data[1], rev_ctg_data[2])] = rac_v / 2
 
                         task_dict[k] = 2
                         task_cnt[task_dict[k]] += 2
