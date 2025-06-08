@@ -371,9 +371,6 @@ telo_connected_node = extract_telomere_connect_contig(TELO_CONNECT_NODES_INFO_PA
 with open(f'{PREFIX}/path_data.pkl', 'rb') as f:
     path_list_dict = pkl.load(f)
 
-with open(f'{PREFIX}/path_di_data.pkl', 'rb') as f:
-    path_di_list_dict = pkl.load(f)
-
 with open(f'{PREFIX}/nclose2cov.pkl', 'rb') as f:
     nclose2cov = pkl.load(f)
 
@@ -613,7 +610,7 @@ if NCLOSE_WEIGHT_USE:
     logging.info(f"Nclose norm weight : {norm_nclose_weight}")
 
 with open(f'{PREFIX}/contig_pat_vec_data.pkl', 'rb') as f:
-    paf_ans_list, key_list, int2key, key_ord_list = pkl.load(f)
+    paf_ans_list, key_list, int2key, dep_list = pkl.load(f)
 
 vec_dict = [None] * (len(key_list) + 1)
 output_folder = f'{PREFIX}/21_pat_depth'
@@ -671,6 +668,11 @@ for path, key_int_list in tqdm(paf_ans_list, desc='Recover depth from separated 
 
     # Place coverage vector into A
     A[ncm:, ncnt] = tmp_v
+
+    path_rel = get_relative_path(path)
+    if path_rel in tar_def_path_set:
+        tar_def_path_ind_dict[path_rel] = ncnt
+
     ncnt += 1
 
 # Process forward-directed outlier contigs
@@ -691,6 +693,10 @@ for i in tqdm(range(1, fclen // 4 + 1), desc='Parse coverage from forward-direct
     A[ncm:, ncnt] = ov - bv
     ncnt += 1
 
+init_cols = [tar_def_path_ind_dict[i] for i in tar_chr_data.values()]
+A_pri = A[ncm:fm, init_cols]
+w_pri = nnls(A_pri, B[:filter_len])[0]
+
 # Process backward-directed outlier contigs
 for i in tqdm(range(1, bclen // 4 + 1), desc='Parse coverage from backward-directed outlier contig gz files',
               disable=not sys.stdout.isatty() and not args.progress):
@@ -710,6 +716,12 @@ for i in tqdm(range(1, bclen // 4 + 1), desc='Parse coverage from backward-direc
 
 B = np.hstack((B_nclose, B))
 
+dep_list.extend([0] * (fclen // 4 + bclen // 4))
+
+assert(len(dep_list) == n)
+for (i1, i2) in itertools.pairwise(dep_list):
+    assert(i1 >= i2)
+
 with h5py.File(f'{PREFIX}/matrix.h5', 'w') as hf:
     dset_A = hf.create_dataset('A', shape=A[:fm, :].shape, dtype=A.dtype)
     dset_A.write_direct(A, source_sel=np.s_[:fm, :])
@@ -724,3 +736,6 @@ with h5py.File(f'{PREFIX}/matrix.h5', 'w') as hf:
     dset_B_fail.write_direct(B, source_sel=np.s_[fm:])
 
     hf.create_dataset('B_depth_start', data=ncm)
+
+with open(f"{PREFIX}/23_input.pkl", "wb") as f:
+    pkl.dump((dep_list, init_cols, w_pri), f)

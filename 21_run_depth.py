@@ -8,6 +8,7 @@ import logging
 import argparse
 import subprocess
 
+import numpy as np
 import pickle as pkl
 import networkx as nx
 
@@ -1220,5 +1221,23 @@ with ProcessPoolExecutor(max_workers=THREAD) as executor:
                        disable=not sys.stdout.isatty() and not args.progress):
         future.result()
 
+with open(f'{PREFIX}/path_di_data.pkl', 'rb') as f:
+    path_di_list_dict = pkl.load(f)
+
+dep_list = []
+for k in key_ord_list:
+    dep_list.extend(path_di_list_dict[k])
+
+assert(len(dep_list) == len(paf_ans_list))
+dep_sort_ind_list = np.argsort(-np.asarray(dep_list)).tolist()
+
+
+dep_sort_list = []
+paf_sort_ans_list = []
+
+for sort_ind in dep_sort_ind_list:
+    dep_sort_list.append(dep_list[sort_ind])
+    paf_sort_ans_list.append(paf_ans_list[sort_ind])
+
 with open(f'{PREFIX}/contig_pat_vec_data.pkl', 'wb') as f:
-    pkl.dump((paf_ans_list, list(key2int.values()), int2key, key_ord_list), f)
+    pkl.dump((paf_sort_ans_list, list(key2int.values()), int2key, dep_sort_list), f)
