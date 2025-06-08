@@ -1,10 +1,14 @@
-import os
-import psutil
+import h5py
 import logging
 import argparse
 
 import numpy as np
-import pickle as pkl
+
+from skglm import GeneralizedLinearEstimator
+from skglm.datafits import Quadratic
+from skglm.penalties import PositiveConstraint
+from skglm.solvers import AndersonCD
+
 
 logging.basicConfig(
     format='%(asctime)s %(levelname)s:%(message)s',
@@ -19,60 +23,38 @@ parser.add_argument("-t", "--thread", help="Number of threads", type=int)
 args = parser.parse_args()
 
 PREFIX = args.prefix
-THREAD = min(args.thread, psutil.cpu_count(logical=False))
+THREAD = args.thread
 
-with open(f'{PREFIX}/USING_SINNLS.pkl', 'rb') as f:
-    USING_SINNLS = pkl.load(f)
+with h5py.File(f"{PREFIX}/matrix.h5", "r") as f:
+    dA = f["A"]
+    A = np.empty(dA.shape, dtype=dA.dtype)
+    dA.read_direct(A)
 
-if USING_SINNLS:
-    from juliacall import Main as jl
+    dB = f["B"]
+    B = np.empty(dB.shape, dtype=dB.dtype)
+    dB.read_direct(B)
 
-    jl.include(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'run_nnls.jl'))
-    error, b_norm, weights_jl, predict_B_jl, b_start_ind = jl.run_nnls(PREFIX, THREAD)
+    dAf = f["A_fail"]
+    A_fail = np.empty(dAf.shape, dtype=dAf.dtype)
+    dAf.read_direct(A_fail)
 
-    weights = np.asarray(weights_jl)
-    predict_B = np.asarray(predict_B_jl)[b_start_ind:]
+    b_start_ind = int(f["B_depth_start"][()])
 
-else:
-    import h5py
 
-    from skglm import GeneralizedLinearEstimator
-    from skglm.datafits import Quadratic
-    from skglm.penalties import PositiveConstraint
-    from skglm.solvers import AndersonCD
+nnls = GeneralizedLinearEstimator(
+    datafit=Quadratic(),
+    penalty=PositiveConstraint(),
+    solver=AndersonCD(fit_intercept=False)
+)
 
-    with h5py.File(f"{PREFIX}/matrix.h5", "r") as f:
-        dA = f["A"]
-        A = np.empty(dA.shape, dtype=dA.dtype)
-        dA.read_direct(A)
+nnls.fit(A, B)
+weights = nnls.coef_
 
-        # B 읽기
-        dB = f["B"]
-        B = np.empty(dB.shape, dtype=dB.dtype)
-        dB.read_direct(B)
+predict_suc_B = A.dot(weights)
+error   = np.linalg.norm(predict_suc_B - B)
+b_norm  = np.linalg.norm(B)
 
-        # A_fail 읽기
-        dAf = f["A_fail"]
-        A_fail = np.empty(dAf.shape, dtype=dAf.dtype)
-        dAf.read_direct(A_fail)
-
-        b_start_ind = int(f["B_depth_start"][()])
-
-    
-    nnls = GeneralizedLinearEstimator(
-        datafit=Quadratic(),
-        penalty=PositiveConstraint(),
-        solver=AndersonCD(fit_intercept=False)
-    )
-
-    nnls.fit(A, B)
-    weights = nnls.coef_
-
-    predict_suc_B = A.dot(weights)
-    error   = np.linalg.norm(predict_suc_B - B)
-    b_norm  = np.linalg.norm(B)
-
-    predict_B = np.concatenate([predict_suc_B, A_fail.dot(weights)])[b_start_ind:]
+predict_B = np.concatenate([predict_suc_B, A_fail.dot(weights)])[b_start_ind:]
 
 logging.info(f'Error       : {error:.4f}')
 logging.info(f'Relative err: {error/b_norm:.4f}')

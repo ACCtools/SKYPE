@@ -399,13 +399,6 @@ paf_ans_dict = dict(paf_ans_list)
 with open(f'{PREFIX}/depth_weight.pkl', 'rb') as f:
     tot_loc_list, weights = pkl.load(f)
 
-with open(f'{PREFIX}/for_dir_data.pkl', 'rb') as f:
-    for_dir_data = pkl.load(f)
-
-# Normalize type 4
-for def_ind, tind, w in for_dir_data:
-    weights[def_ind] += weights[tind] * w
-
 weights_sorted_data = sorted(enumerate(weights), key=lambda t:t[1], reverse=True)
 
 path_dict = {}

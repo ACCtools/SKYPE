@@ -45,7 +45,7 @@ CTG_RPTCASE = 17
 CTG_MAINFLOWDIR = 18
 CTG_MAINFLOWCHR = 19
 
-DEFAULT_NCLOSE_WEIGHT = 0.2
+DEFAULT_NCLOSE_WEIGHT = 0.1
 
 ABS_MAX_COVERAGE_RATIO = 3
 K = 1000
@@ -343,10 +343,6 @@ parser.add_argument("--not_use_nclose_weight",
 parser.add_argument("--progress",
                     help="Show progress bar", action='store_true')
 
-parser.add_argument("--not_using_sinnls",
-                    help="Show progress bar", action='store_true')
-
-
 args = parser.parse_args()
 
 # t = "22_save_matrix.py public_data/chm13v2.0_censat_v2.1.m.bed /Data/hyunwoo/00_skype_run_data/Caki-1/20_alignasm/Caki-1.ctg.aln.paf.ppc.paf /Data/hyunwoo/00_skype_run_data/Caki-1/01_depth/Caki-1.win.stat.gz public_data/chm13v2.0_telomere.bed public_data/chm13v2.0.fa.fai public_data/chm13v2.0_cytobands_allchrs.bed 30_skype_pipe/Caki-1_01_17_11 -t 64"
@@ -360,7 +356,6 @@ CHROMOSOME_INFO_FILE_PATH = args.reference_fai_path
 main_stat_loc = args.main_stat_loc
 TELOMERE_INFO_FILE_PATH = args.telomere_bed_path
 PREPROCESSED_PAF_FILE_PATH = args.ppc_paf_file_path
-USING_SINNLS = not args.not_using_sinnls
 
 RATIO_OUTLIER_FOLDER = f"{PREFIX}/11_ref_ratio_outliers/"
 front_contig_path = RATIO_OUTLIER_FOLDER + "front_jump/"
@@ -638,11 +633,7 @@ m = np.shape(B)[0]
 n = len(paf_ans_list) + fclen // 4 + bclen // 4
 ncnt = 0
 
-if USING_SINNLS:
-    A = np.empty((n, ncm + m), dtype=np.float32, order='C')
-else:
-    A = np.empty((ncm + m, n), dtype=np.float32, order='C')
-
+A = np.empty((ncm + m, n), dtype=np.float32, order='C')
 fm = ncm + filter_len
 
 filter_vec_list = []
@@ -653,154 +644,78 @@ tmp_n = np.zeros(ncm, dtype=np.float32)
 tmp_v = np.zeros(m, dtype=np.float32)
 
 tar_def_path_ind_dict = {}
-for path, key_int_list in tqdm(paf_ans_list, desc='Recover depth from seperated paths',
+ncnt = 0
+for path, key_int_list in tqdm(paf_ans_list, desc='Recover depth from separated paths',
                               disable=not sys.stdout.isatty() and not args.progress):
     ki = key_int_list[0]
     np.copyto(tmp_v, vec_dict[ki])
     for ki in key_int_list[1:]:
         tmp_v += vec_dict[ki]
 
+    # Handle nclose weights if used
     if NCLOSE_WEIGHT_USE:
         tmp_n.fill(0)
         idx_edge_nclose_list = [pair[1] for pair in import_index_path(path)[1:-1]]
         for i in [0, -1]:
             if idx_edge_nclose_list[i] in cov_telo_set:
                 tmp_n[nclose2int[idx_edge_nclose_list[i]]] += norm_nclose_weight
-        for nclose_pair in itertools.pairwise(idx_edge_nclose_list):
-            nclose_rev_pair = (nclose_pair[1], nclose_pair[0])
-            for obj in [nclose_pair, nclose_rev_pair]:
-                if obj in cov_nclose_set:
-                    tmp_n[nclose2int[obj]] += norm_nclose_weight
+        for pair in itertools.pairwise(idx_edge_nclose_list):
+            rev = (pair[1], pair[0])
+            if pair in cov_nclose_set:
+                tmp_n[nclose2int[pair]] += norm_nclose_weight
+            if rev in cov_nclose_set:
+                tmp_n[nclose2int[rev]] += norm_nclose_weight
 
-    if NCLOSE_WEIGHT_USE:
-        if USING_SINNLS:
-            A[ncnt, :ncm] = tmp_n
-        else:
-            A[:ncm, ncnt] = tmp_n
-    
-    if USING_SINNLS:
-        A[ncnt, ncm:] = tmp_v
-    else:
-        A[ncm:, ncnt] = tmp_v
+        # Place nclose part into A
+        A[:ncm, ncnt] = tmp_n
 
-    path_rel = get_relative_path(path)
-    if path_rel in tar_def_path_set:
-        tar_def_path_ind_dict[path_rel] = ncnt
-
+    # Place coverage vector into A
+    A[ncm:, ncnt] = tmp_v
     ncnt += 1
 
+# Process forward-directed outlier contigs
 tmp_n.fill(0)
-
-for_dir_data = []
 for i in tqdm(range(1, fclen // 4 + 1), desc='Parse coverage from forward-directed outlier contig gz files',
               disable=not sys.stdout.isatty() and not args.progress):
     bv_paf_loc = front_contig_path + f"{i}_base.paf"
     ov_loc = front_contig_path + f"{i}.win.stat.gz"
     bv_loc = front_contig_path + f"{i}_base.win.stat.gz"
     bv_loc_list.append(bv_paf_loc)
+
     ov = get_vec_from_stat_loc(ov_loc)
     bv = get_vec_from_stat_loc(bv_loc)
-    vec = ov - bv
-
-    with open(bv_paf_loc, 'r') as f:
-        ll = f.readline().split('\t')
-        tar_chr = ll[CHR_NAM]
-
-    tar_def_loc = tar_chr_data[tar_chr]
-    temp_ncnt = tar_def_path_ind_dict[tar_def_loc]
-
-    ref_vec = A[temp_ncnt, ncm:][chr_filt_idx_dict[tar_chr]] if USING_SINNLS else A[ncm:, temp_ncnt][chr_filt_idx_dict[tar_chr]]
-    ref_loc_vec = vec[chr_filt_idx_dict[tar_chr]]
-    ref_loc_vec[ref_vec == 0] = 0
-
-    vec_div = np_safe_divide(ref_loc_vec, ref_vec)
-    ref_weight = -np.min(vec_div)
-
-    if ref_weight > 5:
-        ref_weight = 0
-        vec = np.zeros_like(vec)
-    elif ref_weight > 0:
-        vec[chr_filt_idx_dict[tar_chr]] = ref_loc_vec
-        vec += (A[temp_ncnt, ncm:] if USING_SINNLS else A[ncm:, temp_ncnt]) * ref_weight
-    else:
-        ref_weight = 0
-
-    if tar_chr == 'chrY' and chrY_type4_skip:
-        ref_weight = 0
-        vec = np.zeros_like(vec)
-        temp_ncnt = 0
 
     if NCLOSE_WEIGHT_USE:
-        if USING_SINNLS:
-            A[ncnt, :ncm] = tmp_n
-        else:
-            A[:ncm, ncnt] = tmp_n
-    
-    if USING_SINNLS:
-        A[ncnt, ncm:] = vec
-    else:
-        A[ncm:, ncnt] = ov - bv
+        A[:ncm, ncnt] = tmp_n
 
-    for_dir_data.append([temp_ncnt, ncnt, ref_weight if USING_SINNLS else 0])
+    A[ncm:, ncnt] = ov - bv
     ncnt += 1
 
-init_cols = [tar_def_path_ind_dict[i] for i in tar_chr_data.values()]
-A_pri = (A[init_cols, ncm:fm].T if USING_SINNLS else A[ncm:fm, init_cols])
-w_pri = nnls(A_pri, B[:filter_len])[0]
-
-with open(f'{PREFIX}/for_dir_data.pkl', 'wb') as f:
-    pkl.dump(for_dir_data, f)
-
+# Process backward-directed outlier contigs
 for i in tqdm(range(1, bclen // 4 + 1), desc='Parse coverage from backward-directed outlier contig gz files',
               disable=not sys.stdout.isatty() and not args.progress):
     bv_paf_loc = back_contig_path + f"{i}_base.paf"
     ov_loc = back_contig_path + f"{i}.win.stat.gz"
     bv_loc = back_contig_path + f"{i}_base.win.stat.gz"
     bv_loc_list.append(bv_paf_loc)
+
     ov = get_vec_from_stat_loc(ov_loc)
     bv = get_vec_from_stat_loc(bv_loc)
 
     if NCLOSE_WEIGHT_USE:
-        if USING_SINNLS:
-            A[ncnt, :ncm] = tmp_n
-        else:
-            A[:ncm, ncnt] = tmp_n
-    if USING_SINNLS:
-        A[ncnt, ncm:] = ov + bv
-    else:
-        A[ncm:, ncnt] = ov + bv
+        A[:ncm, ncnt] = tmp_n
+
+    A[ncm:, ncnt] = ov + bv
     ncnt += 1
 
 B = np.hstack((B_nclose, B))
 
-dep_list = []
-for k in key_ord_list:
-    dep_list.extend(path_di_list_dict[k])
-dep_list.extend([0] * (fclen // 4 + bclen // 4))
-dep_array = np.asarray(dep_list, dtype=np.int64)
-
-assert dep_array.size == n
-
 with h5py.File(f'{PREFIX}/matrix.h5', 'w') as hf:
-    dset_A = hf.create_dataset(
-        'A',
-        shape=A[:, :fm].shape if USING_SINNLS else A[:fm, :].shape,
-        dtype=A.dtype
-    )
-    dset_A.write_direct(
-        A,
-        source_sel=(np.s_[:, :fm] if USING_SINNLS else np.s_[:fm, :])
-    )
+    dset_A = hf.create_dataset('A', shape=A[:fm, :].shape, dtype=A.dtype)
+    dset_A.write_direct(A, source_sel=np.s_[:fm, :])
 
-    dset_A_fail = hf.create_dataset(
-        'A_fail',
-        shape=A[:, fm:].shape if USING_SINNLS else A[fm:, :].shape,
-        dtype=A.dtype
-    )
-    dset_A_fail.write_direct(
-        A,
-        source_sel=(np.s_[:, fm:] if USING_SINNLS else np.s_[fm:, :])
-    )
+    dset_A_fail = hf.create_dataset('A_fail', shape=A[fm:, :].shape, dtype=A.dtype)
+    dset_A_fail.write_direct(A, source_sel=np.s_[fm:, :])
 
     dset_B = hf.create_dataset('B', shape=B[:fm].shape, dtype=B.dtype)
     dset_B.write_direct(B, source_sel=np.s_[:fm])
@@ -808,10 +723,4 @@ with h5py.File(f'{PREFIX}/matrix.h5', 'w') as hf:
     dset_B_fail = hf.create_dataset('B_fail', shape=B[fm:].shape, dtype=B.dtype)
     dset_B_fail.write_direct(B, source_sel=np.s_[fm:])
 
-    hf.create_dataset('dep_data', data=np.asarray(dep_list, dtype=np.int64))
-    hf.create_dataset('init_cols', data=np.asarray(init_cols, dtype=np.int64))
-    hf.create_dataset('w_pri', data=np.asarray(w_pri, dtype=np.float64))
     hf.create_dataset('B_depth_start', data=ncm)
-
-with open(f'{PREFIX}/USING_SINNLS.pkl', 'wb') as f:
-    pkl.dump(USING_SINNLS, f)

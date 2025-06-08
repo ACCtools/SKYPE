@@ -108,16 +108,13 @@ function analyze_alignments!(read_name::String, align_infos::Vector{AlnInfo},
         end
     end
 
-    nclose_set_vec = [Set{Int}() for _ in 1:4]
-    wa_nclose_set = Set{Int}()
-
+    nclose_total_set = DefaultDict{Int, Set{Int}}(() -> Set{Int}())
     for (nidx, (qry_data_vec1, qry_data_vec2)) in pairs(tar_data)
         result = Set{Tuple{Bool,Bool}}()
 
         if !isempty(qry_data_vec1) && !isempty(qry_data_vec2)
             sort!(qry_data_vec1, by = x -> x[1])
             sort!(qry_data_vec2, by = x -> x[1])
-
 
             i = 1
             j = 1
@@ -144,21 +141,24 @@ function analyze_alignments!(read_name::String, align_infos::Vector{AlnInfo},
         if length(result) > 0
             ncl = idx2nclose[nidx]
             if length(result) == 1
-                push!(nclose_set_vec[DIR2INT[first(result)]], ncl)
+                push!(nclose_total_set[ncl], DIR2INT[first(result)])
             else
-                push!(wa_nclose_set, ncl)
+                push!(nclose_total_set[ncl], 0)
             end
         end
     end
 
-    for i in 1:4
-        for n in nclose_set_vec[i]
-            nclose_cnt_vec[i][n] += 1
+    for (ncl, type_set) in nclose_total_set
+        if length(type_set) == 1
+            d = first(type_set)
+            if d == 0
+                wa_nclose_cnt[ncl] += 1
+            else
+                nclose_cnt_vec[d][ncl] += 1
+            end
+        else
+            wa_nclose_cnt[ncl] += 1
         end
-    end
-
-    for wa_n in wa_nclose_set
-        wa_nclose_cnt[wa_n] += 1
     end
 end
 
