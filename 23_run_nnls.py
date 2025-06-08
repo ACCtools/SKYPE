@@ -1,3 +1,4 @@
+from concurrent.futures import thread
 import h5py
 import logging
 import argparse
@@ -8,7 +9,7 @@ from skglm import GeneralizedLinearEstimator
 from skglm.datafits import Quadratic
 from skglm.penalties import PositiveConstraint
 from skglm.solvers import AndersonCD
-
+from threadpoolctl import threadpool_limits
 
 logging.basicConfig(
     format='%(asctime)s %(levelname)s:%(message)s',
@@ -47,7 +48,9 @@ nnls = GeneralizedLinearEstimator(
     solver=AndersonCD(fit_intercept=False)
 )
 
-nnls.fit(A, B)
+with threadpool_limits(limits=THREAD):
+    nnls.fit(A, B)
+
 weights = nnls.coef_
 
 predict_suc_B = A.dot(weights)
