@@ -1,5 +1,4 @@
 using XAM
-using BisectPy
 using BioAlignments
 using ProgressMeter
 using DataStructures
