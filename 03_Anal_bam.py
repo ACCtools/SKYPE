@@ -240,7 +240,13 @@ for k in run_k_set:
        and similar_check(l2, r2, ratio=HARD_COMPARE_RAITO):
         
         ctg_data = total_dir_data[k][(True, False)]
-        del nclose_nodes[ctg_data[0]]
+
+        key = ctg_data[0]
+        nclose_tuple = (ctg_data[1], ctg_data[2])
+        nclose_nodes[key].remove(nclose_tuple)
+
+        if nclose_nodes[key] == []:
+            del nclose_nodes[key]
 
         task_dict[k] = 3
         task_cnt[task_dict[k]] += 1
