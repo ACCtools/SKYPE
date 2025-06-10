@@ -7,7 +7,7 @@ Tv = Vector{Tuple{Int, Bool}}
 AlnInfo = Tuple{Int, Int, Bool, Int, Int, Int}
 Counter = DefaultDict{Int, Int, Int}
 
-const READ_OPS = (
+const QRY_OPS = (
     OP_MATCH,        # M
     OP_SEQ_MATCH,    # =
     OP_SEQ_MISMATCH, # X
@@ -16,12 +16,22 @@ const READ_OPS = (
     OP_HARD_CLIP     # H
 )
 
+const REF_OPS = (
+    OP_MATCH,        # M
+    OP_SEQ_MATCH,    # =
+    OP_SEQ_MISMATCH, # X
+    OP_DELETE,       # D
+    OP_SKIP          # N
+)
+
 const DIR2INT = Dict(
     (true,  false) => 1,
     (false, true)  => 2,
     (true,  true)  => 3,
     (false, false) => 4
 )
+
+NCLOSE_COMPRESS_LIMIT = 100 * 1e3
 
 function get_chr2int(fai_loc::String)
     chr2int = Dict{String, Int}()
@@ -60,7 +70,7 @@ function get_alignment_info(rec::XAM.BAM.Record)
     end
 
     # compute full query length (including soft/hard clips and insertions)
-    qlen = sum(len for (op, len) in zip(cigar_ops, cigar_lens) if op in READ_OPS)
+    qlen = sum(len for (op, len) in zip(cigar_ops, cigar_lens) if op in QRY_OPS)
 
     # determine 1-based aligned span on query, accounting for strand
     aln_dir_flag = XAM.BAM.ispositivestrand(rec)
@@ -73,11 +83,11 @@ function get_alignment_info(rec::XAM.BAM.Record)
     end
 
     # compute reference-aligned length (M, =, X, D, N)
-    ref_len = sum(len for (op, len) in zip(cigar_ops, cigar_lens) if op in READ_OPS)
+    rlen = sum(len for (op, len) in zip(cigar_ops, cigar_lens) if op in REF_OPS)
 
     # 1-based reference start and end (inclusive)
     rstart = XAM.BAM.position(rec) + 1        # POS is 0-based in SAM
-    rend   = rstart + ref_len - 1
+    rend   = rstart + rlen - 1
 
     # strand symbol and reference name
     aln_dir = aln_dir_flag
@@ -93,12 +103,13 @@ function analyze_alignments!(read_name::String, align_infos::Vector{AlnInfo},
 
     for (qst, qnd, aln, rid, rst, rnd) in align_infos
         qlen = qnd - qst + 1
+        search_range = NCLOSE_COMPRESS_LIMIT + qlen
 
         cord_data = chr_cord_data[rid]
         cord_info_data = chr_cord_info_data[rid]
 
-        i = searchsortedfirst(cord_data, rst - qlen)
-        j = searchsortedlast(cord_data, rnd + qlen)
+        i = searchsortedfirst(cord_data, rst - search_range)
+        j = searchsortedlast(cord_data, rnd + search_range)
 
         for idx in i:j
             nidx, pairid, isfront = cord_info_data[idx] 

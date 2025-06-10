@@ -258,7 +258,7 @@ for k in run_k_set:
                 if over_check(v, wa_v):
                     line = total_dir_data[k][d]
 
-                    nclose_nodes[line[0]].append((int(line[1]), int(line[2])))
+                    nclose_nodes[line[0]].append(tuple(sorted((int(line[1]), int(line[2])))))
 
                     task_dict[k] = 1
                     task_cnt[task_dict[k]] += 1

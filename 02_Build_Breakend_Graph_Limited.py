@@ -2127,8 +2127,9 @@ def extract_nclose_node(contig_data : list, bnd_contig : set, repeat_contig_name
                             dummy_list = [0,0,0,0,0,0,0,]
                             if distance_checker(contig_data[st], dummy_list+i[1]) < compress_limit \
                             and distance_checker(contig_data[ed], dummy_list + i[2]) < compress_limit:
-                                nclose_coverage[(i[3], i[4])] += asm2cov[cov_count_name]
-                                nclose_compress_track[(i[3], i[4])].append((st, ed))
+                                sorted_tar_tuple = tuple(sorted((i[3], i[4])))
+                                nclose_coverage[sorted_tar_tuple] += asm2cov[cov_count_name]
+                                nclose_compress_track[sorted_tar_tuple].append((st, ed))
                                 flag = False
                                 break
                         # passed first filtering
@@ -2201,8 +2202,9 @@ def extract_nclose_node(contig_data : list, bnd_contig : set, repeat_contig_name
                             dummy_list = [0,0,0,0,0,0,0,]
                             if distance_checker(contig_data[st], dummy_list+i[2]) < compress_limit \
                             and distance_checker(contig_data[ed], dummy_list + i[1]) < compress_limit:
-                                nclose_coverage[(i[3], i[4])] += asm2cov[cov_count_name]
-                                nclose_compress_track[(i[3], i[4])].append((st, ed))
+                                sorted_tar_tuple = tuple(sorted((i[3], i[4])))
+                                nclose_coverage[sorted_tar_tuple] += asm2cov[cov_count_name]
+                                nclose_compress_track[sorted_tar_tuple].append((st, ed))
                                 flag = False
                                 break
                         if flag:
@@ -2272,8 +2274,9 @@ def extract_nclose_node(contig_data : list, bnd_contig : set, repeat_contig_name
                                 dummy_list = [0,0,0,0,0,0,0,]
                                 if distance_checker(contig_data[st], dummy_list+i[1]) < compress_limit \
                                 and distance_checker(contig_data[ed], dummy_list + i[2]) < compress_limit:
-                                    nclose_coverage[(i[3], i[4])] += asm2cov[cov_count_name]
-                                    nclose_compress_track[(i[3], i[4])].append((st, ed))
+                                    sorted_tar_tuple = tuple(sorted((i[3], i[4])))
+                                    nclose_coverage[sorted_tar_tuple] += asm2cov[cov_count_name]
+                                    nclose_compress_track[sorted_tar_tuple].append((st, ed))
                                     flag = False
                                     break
                             if flag:
@@ -2362,8 +2365,9 @@ def extract_nclose_node(contig_data : list, bnd_contig : set, repeat_contig_name
                                 dummy_list = [0,0,0,0,0,0,0,]
                                 if distance_checker(contig_data[st], dummy_list+i[2]) < compress_limit \
                                 and distance_checker(contig_data[ed], dummy_list + i[1]) < compress_limit:
-                                    nclose_coverage[(i[3], i[4])] += asm2cov[cov_count_name]
-                                    nclose_compress_track[(i[3], i[4])].append((st, ed))
+                                    sorted_tar_tuple = tuple(sorted((i[3], i[4])))
+                                    nclose_coverage[sorted_tar_tuple] += asm2cov[cov_count_name]
+                                    nclose_compress_track[sorted_tar_tuple].append((st, ed))
                                     flag = False
                                     break
                             if flag:
@@ -3301,7 +3305,8 @@ def nclose_calc():
                 nclose_cord_list_contig_name.append(curr_nclose_cord_list[-1]+[contig_data[s][CTG_NAM]])
 
                 for compressed_contig in nclose_compress_track[tuple(i)]:
-
+                    compressed_contig = sorted(compressed_contig)
+                    
                     is_forward = None
                     if contig_data[compressed_contig[0]][CHR_NAM] == start_chr and contig_data[compressed_contig[1]][CHR_NAM] == end_chr:
                         compress_s = compressed_contig[0]
@@ -3315,7 +3320,7 @@ def nclose_calc():
                         assert(False)
 
                     nclose_corr_dir = (get_corr_dir(is_forward, contig_data[compress_s][CTG_DIR]),
-                                    get_corr_dir(is_forward, contig_data[compress_e][CTG_DIR]))
+                                       get_corr_dir(is_forward, contig_data[compress_e][CTG_DIR]))
                     
                     nclose_maxcover_s = contig_data[compress_s][CHR_END] if nclose_corr_dir[0] == '+' else contig_data[compress_s][CHR_STR]
                     nclose_maxcover_e = contig_data[compress_e][CHR_STR] if nclose_corr_dir[1] == '+' else contig_data[compress_e][CHR_END]
@@ -3331,8 +3336,7 @@ def nclose_calc():
                         dir_data[trusted_nclose_count][reference_dir] = (contig_data[compress_s][CTG_NAM], compress_s, compress_e, contig_data[compress_s][CTG_TYP])
                     
                     tf_set.add(reference_dir)
-                    curr_nclose_cord_list.append(temp_list)
-                    nclose_cord_list_contig_name.append(curr_nclose_cord_list[-1]+[contig_data[compress_e][CTG_NAM]])
+                    nclose_cord_list_contig_name.append(temp_list + [contig_data[compress_e][CTG_NAM]])
                 
                 if len(tf_set) >= 1:
                     if tf_set == {(True, False), (False, True)} and template_dir[0] == template_dir[1]:
@@ -3431,7 +3435,7 @@ parser.add_argument("--skip_bam_analysis",
 
 args = parser.parse_args()
 
-# t = "02_Build_Breakend_Graph_Limited.py /home/hyunwoo/ACCtools-pipeline/90_skype_run/PC-3/20_alignasm/PC-3.ctg.aln.paf public_data/chm13v2.0.fa.fai public_data/chm13v2.0_telomere.bed public_data/chm13v2.0_repeat.m.bed public_data/chm13v2.0_censat_v2.1.m.bed /home/hyunwoo/ACCtools-pipeline/90_skype_run/PC-3/01_depth/PC-3.win.stat.gz 30_skype_pipe/PC-3_13_21_51 /home/hyunwoo/ACCtools-pipeline/90_skype_run/PC-3/01_depth/PC-3.bam --alt /home/hyunwoo/ACCtools-pipeline/90_skype_run/PC-3/20_alignasm/PC-3.utg.aln.paf --orignal_paf_loc /home/hyunwoo/ACCtools-pipeline/90_skype_run/PC-3/20_alignasm/PC-3.ctg.paf /home/hyunwoo/ACCtools-pipeline/90_skype_run/PC-3/20_alignasm/PC-3.utg.paf -t 128"
+# t = "02_Build_Breakend_Graph_Limited.py /home/hyunwoo/ACCtools-pipeline/90_skype_run/HCC1937/20_alignasm/HCC1937.ctg.aln.paf public_data/chm13v2.0.fa.fai public_data/chm13v2.0_telomere.bed public_data/chm13v2.0_repeat.m.bed public_data/chm13v2.0_censat_v2.1.m.bed /home/hyunwoo/ACCtools-pipeline/90_skype_run/HCC1937/01_depth/HCC1937.win.stat.gz 30_skype_pipe/HCC1937_15_39_47 /home/hyunwoo/ACCtools-pipeline/90_skype_run/HCC1937/01_depth/HCC1937.bam --alt /home/hyunwoo/ACCtools-pipeline/90_skype_run/HCC1937/20_alignasm/HCC1937.utg.aln.paf --orignal_paf_loc /home/hyunwoo/ACCtools-pipeline/90_skype_run/HCC1937/20_alignasm/HCC1937.ctg.paf /home/hyunwoo/ACCtools-pipeline/90_skype_run/HCC1937/20_alignasm/HCC1937.utg.paf -t 128"
 # args = parser.parse_args(t.split()[1:])
 
 PREFIX = args.prefix
