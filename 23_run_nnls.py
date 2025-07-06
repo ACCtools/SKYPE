@@ -50,7 +50,6 @@ with open(f"{PREFIX}/23_input.pkl", "rb") as f:
 
 n = len(dep_list)
 x0 = np.zeros(n, dtype=np.float32)
-
 x0[init_cols] = w_pri
 
 max_order = dep_list[0]
@@ -84,9 +83,7 @@ error = np.linalg.norm(predict_suc_B - B)
 b_norm = np.linalg.norm(B)
 
 predict_B = np.concatenate([predict_suc_B, A_fail.dot(weights)])[b_start_ind:]
-
 logging.info(f'Error : {error:.4f}')
 logging.info(f'Relative error : {error/b_norm:.4f}')
-
 np.save(f'{PREFIX}/weight.npy', weights)
 np.save(f'{PREFIX}/predict_B.npy', predict_B)

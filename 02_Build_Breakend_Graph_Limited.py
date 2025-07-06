@@ -1681,7 +1681,7 @@ def find_breakend_centromere(repeat_censat_data : dict, chr_len : dict, df : pd.
                     right_weighted = None
 
                 # 양쪽 flanking 영역 중 하나라도 존재하지 않으면 해당 repeat를 건너뜁니다.
-                if left_flank_start is None or right_flank_start is None:
+                if left_flank_start is None or right_flank_start is None or left_weighted == 0 or right_weighted == 0:
                     continue
                 
                 if left_weighted >= right_weighted:

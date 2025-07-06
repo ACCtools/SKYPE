@@ -31,7 +31,7 @@ const DIR2INT = Dict(
     (false, false) => 4
 )
 
-NCLOSE_COMPRESS_LIMIT = 100 * 1e3
+const NCLOSE_COMPRESS_LIMIT::Int = 100 * 1e3
 
 function get_chr2int(fai_loc::String)
     chr2int = Dict{String, Int}()
