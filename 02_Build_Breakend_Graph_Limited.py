@@ -68,6 +68,8 @@ K = 1000
 M = 1000 * K
 CHUKJI_LIMIT = -1
 BND_CONTIG_BOUND = 0.1
+TYPE2_CONTIG_MINIMUM_LENGTH = 200*K
+SUBTELOMERE_REPEAT_LENGTH = 0 # 100*K
 
 TOT_PATH_LIMIT = 3*M
 PAT_PATH_LIMIT = 10*K
@@ -660,7 +662,7 @@ def label_subtelo_node(contig_data : list, telo_data) -> list :
             label.append(('0', '0'))
     return label
 
-def label_repeat_node(contig_data: list, repeat_data) -> list:
+def label_repeat_node(contig_data: list, repeat_data : dict, chr_len : dict) -> list:
     labels = []
     ends_map = {
         chrom: [iv[1] for iv in intervals]
@@ -670,19 +672,32 @@ def label_repeat_node(contig_data: list, repeat_data) -> list:
     for contig in contig_data:
         chrom = contig[CHR_NAM]
         intervals = repeat_data.get(chrom, [])
+        curr_chr_len = chr_len.get(chrom, 0)
         ends = ends_map.get(chrom, [])
         if not intervals:
             labels.append(('0','0'))
             continue
         c_start, c_end = contig[7], contig[8]
         idx = bisect.bisect_left(ends, c_start)
+        interval_list = []
+        if SUBTELOMERE_REPEAT_LENGTH > 0:
+            interval_list.append((0, SUBTELOMERE_REPEAT_LENGTH))
+            interval_list.append((curr_chr_len - SUBTELOMERE_REPEAT_LENGTH, curr_chr_len))
         if idx < len(intervals):
-            iv_start, iv_end = intervals[idx]
+            interval_list.append(intervals[idx])
+        r_chk = False
+        rin_chk = False
+        for iv in interval_list:
+            iv_start, iv_end = iv[0], iv[1]
             if distance_checker(contig, (0,0,0,0,0,0,0, iv_start, iv_end)) == 0:
-                suffix = "in" if inclusive_checker_node(contig, (0,0,0,0,0,0,0, iv_start, iv_end)) else ""
-                labels.append((chrom, "r" + suffix))
-                continue
-        labels.append(('0','0'))
+                r_chk = True
+                rin_chk = True if inclusive_checker_node(contig, (0,0,0,0,0,0,0, iv_start, iv_end)) else False
+        if rin_chk:
+            labels.append((chrom, "rin"))
+        elif r_chk:
+            labels.append((chrom, "r"))
+        else:
+            labels.append(('0','0'))
 
     return labels
 
@@ -1378,7 +1393,7 @@ def preprocess_contig(contig_data : list, telo_label : list, ref_qry_ratio : dic
     contig_type = {}
     is_telo = False
     is_front_back_repeat = False
-    chrM_flag = True
+    chrM_flag = False
     idx = 0
     cnt = 0
     len_count = Counter()
@@ -1387,8 +1402,8 @@ def preprocess_contig(contig_data : list, telo_label : list, ref_qry_ratio : dic
         cnt+=1
         if (i-1) in telo_connect_info:
             is_telo = True
-        if contig_data[i-1][CHR_NAM]!='chrM':
-            chrM_flag = False
+        if contig_data[i-1][CHR_NAM]=='chrM':
+            chrM_flag = True
         # contig 넘어갈 때:
         if contig_data[i][CTG_NAM] != contig_data[i-1][CTG_NAM]:
             curr_contig_name = contig_data[i-1][CTG_NAM]
@@ -1424,7 +1439,7 @@ def preprocess_contig(contig_data : list, telo_label : list, ref_qry_ratio : dic
             checker = 0
             is_telo = False
             is_front_back_repeat = False
-            chrM_flag = True
+            chrM_flag = False
             if i < contig_data_size and repeat_label[i][0]!='0':
                 is_front_back_repeat = True
     contig_data = contig_data[:-1]
@@ -1439,11 +1454,12 @@ def alt_preprocess_contig(contig_data : list, telo_label : list, ref_qry_ratio :
     contig_type = {}
     is_telo = False
     is_front_back_repeat = False
-    chrM_flag = True
+    chrM_flag = False
     len_count = Counter()
     idx = 0
     cnt = 0
     telo_node_count = 0
+    all_mapq_0 = True
     
     telo_inside_dict = dict()
     for chr_name, data in telo_dict.items():
@@ -1462,8 +1478,10 @@ def alt_preprocess_contig(contig_data : list, telo_label : list, ref_qry_ratio :
         if (i-1) in telo_connect_info:
             telo_node_count += 1
             is_telo = True
-        if contig_data[i-1][CHR_NAM] != 'chrM':
-            chrM_flag = False
+        if contig_data[i-1][CHR_NAM] == 'chrM':
+            chrM_flag = True
+        if contig_data[i-1][CTG_MAPQ] != 0:
+            all_mapq_0 = False
         # contig 넘어갈 때:
         if contig_data[i][CTG_NAM] != contig_data[i-1][CTG_NAM]:
             if repeat_label[i-1][0]!='0':
@@ -1488,9 +1506,20 @@ def alt_preprocess_contig(contig_data : list, telo_label : list, ref_qry_ratio :
                     else:
                         checker = 3
 
-            if chrM_flag:
-                checker = 0   
-            if (checker>0 and checker != 3 and checker != 5):
+            if chrM_flag or all_mapq_0:
+                checker = 0
+            if checker == 2:
+                chukji = 0
+                if curr_contig_first_fragment[CTG_DIR] == '+':
+                    chukji = curr_contig_end_fragment[CHR_END] - curr_contig_first_fragment[CHR_STR]
+                else:
+                    chukji = curr_contig_first_fragment[CHR_END] - curr_contig_end_fragment[CHR_STR]
+                if chukji > TYPE2_CONTIG_MINIMUM_LENGTH:
+                    using_contig_list.append(curr_contig_name)
+                    contig_type[curr_contig_name] = checker
+                    contig_terminal_node[curr_contig_name] = (idx, idx+cnt-1)
+                    idx+=cnt
+            elif (checker>0 and checker != 3 and checker != 5):
                 using_contig_list.append(curr_contig_name)
                 contig_type[curr_contig_name] = checker
                 contig_terminal_node[curr_contig_name] = (idx, idx+cnt-1)
@@ -1516,12 +1545,13 @@ def alt_preprocess_contig(contig_data : list, telo_label : list, ref_qry_ratio :
 
 
             curr_contig_first_fragment = contig_data[i]
+            all_mapq_0 = True
             cnt = 0
             checker = 0
             telo_node_count = 0
             is_telo = False
             is_front_back_repeat = False
-            chrM_flag = True
+            chrM_flag = False
             if i < contig_data_size and repeat_label[i][0]!='0':
                 is_front_back_repeat = True
     contig_data = contig_data[:-1]
@@ -1823,7 +1853,7 @@ def break_double_telomere_contig(contig_data : list, telo_connected_set : set):
     return vtg_list
 
 
-def pass_pipeline(pre_contig_data, telo_dict, telo_bound_dict, repeat_data, repeat_censat_data, telo_ppc_passed):
+def pass_pipeline(pre_contig_data, telo_dict, telo_bound_dict, repeat_data, repeat_censat_data, telo_ppc_passed, chr_len):
     if not telo_ppc_passed:
         if len(pre_contig_data)==0:
             return []
@@ -1834,7 +1864,7 @@ def pass_pipeline(pre_contig_data, telo_dict, telo_bound_dict, repeat_data, repe
 
         node_label = label_node(contig_data, telo_dict)
 
-        repeat_label = label_repeat_node(contig_data, repeat_data)
+        repeat_label = label_repeat_node(contig_data, repeat_data, chr_len)
 
         telo_preprocessed_contig, report_case, telo_connect_info = preprocess_telo(contig_data, node_label)
 
@@ -1852,8 +1882,8 @@ def pass_pipeline(pre_contig_data, telo_dict, telo_bound_dict, repeat_data, repe
             idxcnt+=1
 
         
-        new_node_repeat_label = label_repeat_node(new_contig_data, repeat_data)
-        new_node_repeat_censat_label = label_repeat_node(new_contig_data, repeat_censat_data)
+        new_node_repeat_label = label_repeat_node(new_contig_data, repeat_data, chr_len)
+        new_node_repeat_censat_label = label_repeat_node(new_contig_data, repeat_censat_data, chr_len)
         new_node_telo_label = label_node(new_contig_data, telo_dict)
 
         ref_qry_ratio = calc_ratio(new_contig_data)
@@ -1906,7 +1936,7 @@ def pass_pipeline(pre_contig_data, telo_dict, telo_bound_dict, repeat_data, repe
 
     final_contig = preprocess_repeat(telo_ppc_contig)
 
-    final_contig_repeat_label = label_repeat_node(final_contig, repeat_data)
+    final_contig_repeat_label = label_repeat_node(final_contig, repeat_data, chr_len)
 
     final_telo_node_label = label_node(final_contig, telo_dict)
 
@@ -2687,7 +2717,7 @@ def contig_preprocessing_00(PAF_FILE_PATH_ : list):
 
     node_label = label_node(contig_data, telo_dict)
 
-    repeat_label = label_repeat_node(contig_data, repeat_data)
+    repeat_label = label_repeat_node(contig_data, repeat_data, chr_len)
 
     telo_preprocessed_contig, report_case, telo_connect_info = preprocess_telo(contig_data, node_label)
 
@@ -2710,8 +2740,8 @@ def contig_preprocessing_00(PAF_FILE_PATH_ : list):
     #             print(j, end="\t", file=f)
     #         print("", file=f)
     
-    new_node_repeat_label = label_repeat_node(new_contig_data, repeat_data)
-    new_node_repeat_censat_label = label_repeat_node(new_contig_data, repeat_censat_data)
+    new_node_repeat_label = label_repeat_node(new_contig_data, repeat_data, chr_len)
+    new_node_repeat_censat_label = label_repeat_node(new_contig_data, repeat_censat_data, chr_len)
     new_node_telo_label = label_node(new_contig_data, telo_dict)
 
     ref_qry_ratio = calc_ratio(new_contig_data)
@@ -2750,7 +2780,7 @@ def contig_preprocessing_00(PAF_FILE_PATH_ : list):
 
     final_contig = preprocess_repeat(telo_ppc_contig)
 
-    final_contig_repeat_label = label_repeat_node(final_contig, repeat_data)
+    final_contig_repeat_label = label_repeat_node(final_contig, repeat_data, chr_len)
 
     final_telo_node_label = label_node(final_contig, telo_dict)
 
@@ -2801,8 +2831,8 @@ def contig_preprocessing_00(PAF_FILE_PATH_ : list):
             idxcnt+=1
         alt_telo_ppc_contig = []
         new_node_telo_label = label_node(new_contig_data, telo_dict)
-        new_node_repeat_label = label_repeat_node(new_contig_data, repeat_data)
-        new_node_repeat_censat_label = label_repeat_node(new_contig_data, repeat_censat_data)
+        new_node_repeat_label = label_repeat_node(new_contig_data, repeat_data, chr_len)
+        new_node_repeat_censat_label = label_repeat_node(new_contig_data, repeat_censat_data, chr_len)
 
         ref_qry_ratio = calc_ratio(new_contig_data)
         preprocess_result, \
@@ -2856,7 +2886,7 @@ def contig_preprocessing_00(PAF_FILE_PATH_ : list):
         
         alt_final_contig = preprocess_repeat(alt_telo_ppc_contig)
 
-        alt_final_repeat_node_label = label_repeat_node(alt_final_contig, repeat_data)
+        alt_final_repeat_node_label = label_repeat_node(alt_final_contig, repeat_data, chr_len)
 
         alt_final_telo_node_label = label_node(alt_final_contig, telo_dict)
 
@@ -2937,17 +2967,17 @@ def contig_preprocessing_00(PAF_FILE_PATH_ : list):
     break_contig = break_double_telomere_contig(real_final_contig, telo_connected_node)
 
     if len(break_contig) > 0:
-        final_break_contig = pass_pipeline(break_contig, telo_dict, telo_bound_dict, repeat_data, repeat_censat_data, False)
+        final_break_contig = pass_pipeline(break_contig, telo_dict, telo_bound_dict, repeat_data, repeat_censat_data, False, chr_len)
     else:
         final_break_contig = []
 
     if len(cen_vtg_contig) > 0:
-        final_cen_vtg_contig = pass_pipeline(cen_vtg_contig, telo_dict, telo_bound_dict, repeat_data, repeat_censat_data, False)
+        final_cen_vtg_contig = pass_pipeline(cen_vtg_contig, telo_dict, telo_bound_dict, repeat_data, repeat_censat_data, False, chr_len)
     else:
         final_cen_vtg_contig = []
 
     if len(subtelo_ppc_node) > 0:
-        final_subtelo_ppc_node = pass_pipeline(subtelo_ppc_node, telo_dict, telo_bound_dict, repeat_data, repeat_censat_data, True)
+        final_subtelo_ppc_node = pass_pipeline(subtelo_ppc_node, telo_dict, telo_bound_dict, repeat_data, repeat_censat_data, True, chr_len)
     else:
         final_subtelo_ppc_node = []
 
@@ -3034,7 +3064,7 @@ def contig_preprocessing_00(PAF_FILE_PATH_ : list):
             s = e+1
 
     if len(overlap_low_split_contig) > 0:
-        final_low_split_contig = pass_pipeline(overlap_low_split_contig, telo_dict, telo_bound_dict, repeat_data, repeat_censat_data, False)
+        final_low_split_contig = pass_pipeline(overlap_low_split_contig, telo_dict, telo_bound_dict, repeat_data, repeat_censat_data, False, chr_len)
     else:
         final_low_split_contig = []
 
