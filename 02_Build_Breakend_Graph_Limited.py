@@ -1331,7 +1331,7 @@ def pipeline_preprocess_contig(contig_data : list, telo_label : list, ref_qry_ra
     contig_type = {}
     is_telo = False
     is_front_back_repeat = False
-    chrM_flag = True
+    chrM_flag = False
     idx = 0
     cnt = 0
     len_count = Counter()
@@ -1340,8 +1340,8 @@ def pipeline_preprocess_contig(contig_data : list, telo_label : list, ref_qry_ra
         cnt+=1
         if (i-1) in telo_connect_info:
             is_telo = True
-        if contig_data[i-1][CHR_NAM]!='chrM':
-            chrM_flag = False
+        if contig_data[i-1][CHR_NAM]=='chrM':
+            chrM_flag = True
         # contig 넘어갈 때:
         if contig_data[i][CTG_NAM] != contig_data[i-1][CTG_NAM]:
             curr_contig_name = contig_data[i-1][CTG_NAM]
@@ -1377,7 +1377,7 @@ def pipeline_preprocess_contig(contig_data : list, telo_label : list, ref_qry_ra
             checker = 0
             is_telo = False
             is_front_back_repeat = False
-            chrM_flag = True
+            chrM_flag = False
             if i < contig_data_size and repeat_label[i][0]!='0':
                 is_front_back_repeat = True
     contig_data = contig_data[:-1]
@@ -1508,7 +1508,7 @@ def alt_preprocess_contig(contig_data : list, telo_label : list, ref_qry_ratio :
 
             if chrM_flag or all_mapq_0:
                 checker = 0
-            if checker == 2:
+            elif checker == 2:
                 chukji = 0
                 if curr_contig_first_fragment[CTG_DIR] == '+':
                     chukji = curr_contig_end_fragment[CHR_END] - curr_contig_first_fragment[CHR_STR]
@@ -2875,7 +2875,11 @@ def contig_preprocessing_00(PAF_FILE_PATH_ : list):
                         temp_list.append(new_node_repeat_censat_label[i][1])
                         temp_list.append('1.'+str(new_contig_data[i][10]))
                         alt_telo_ppc_contig.append(temp_list)
-
+        with open("alt_telo_ppc_contig.txt", "wt") as f:
+            for i in alt_telo_ppc_contig:
+                for j in i:
+                    print(j, end="\t", file=f)
+                print("", file=f)
         alt_mainflow_dict = find_mainflow(alt_telo_ppc_contig)
         alt_telo_ppc_size = len(alt_telo_ppc_contig)
         for i in range(alt_telo_ppc_size):
