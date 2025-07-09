@@ -2875,11 +2875,11 @@ def contig_preprocessing_00(PAF_FILE_PATH_ : list):
                         temp_list.append(new_node_repeat_censat_label[i][1])
                         temp_list.append('1.'+str(new_contig_data[i][10]))
                         alt_telo_ppc_contig.append(temp_list)
-        with open("alt_telo_ppc_contig.txt", "wt") as f:
-            for i in alt_telo_ppc_contig:
-                for j in i:
-                    print(j, end="\t", file=f)
-                print("", file=f)
+        # with open("alt_telo_ppc_contig.txt", "wt") as f:
+        #     for i in alt_telo_ppc_contig:
+        #         for j in i:
+        #             print(j, end="\t", file=f)
+        #         print("", file=f)
         alt_mainflow_dict = find_mainflow(alt_telo_ppc_contig)
         alt_telo_ppc_size = len(alt_telo_ppc_contig)
         for i in range(alt_telo_ppc_size):
