@@ -1,3 +1,4 @@
+from re import split
 import sys
 import argparse
 import subprocess
@@ -1388,12 +1389,15 @@ def preprocess_contig(contig_data : list, telo_label : list, ref_qry_ratio : dic
     checker = 0
     contig_data_size = len(contig_data)-1
     curr_contig_first_fragment = contig_data[0]
+    type3_type4_list = []
     using_contig_list = []
     contig_terminal_node = {}
     contig_type = {}
     is_telo = False
     is_front_back_repeat = False
     chrM_flag = False
+    is_type3_type4 = False
+    first_idx = 0
     idx = 0
     cnt = 0
     len_count = Counter()
@@ -1406,7 +1410,10 @@ def preprocess_contig(contig_data : list, telo_label : list, ref_qry_ratio : dic
             chrM_flag = True
         # contig 넘어갈 때:
         if contig_data[i][CTG_NAM] != contig_data[i-1][CTG_NAM]:
+            splited_type4 = False
             curr_contig_name = contig_data[i-1][CTG_NAM]
+            if "type34split" in curr_contig_name:
+                splited_type4 = True
             if repeat_label[i-1][0]!='0':
                 is_front_back_repeat = True
             curr_contig_end_fragment = contig_data[i-1]
@@ -1428,22 +1435,31 @@ def preprocess_contig(contig_data : list, telo_label : list, ref_qry_ratio : dic
                     checker = 4
             if chrM_flag:
                 checker = 0
-            if checker==3:
-                using_contig_list.append(curr_contig_name)
-                contig_type[curr_contig_name] = checker
-                contig_terminal_node[curr_contig_name] = (idx, idx+cnt-1)
-                idx+=cnt
+            if checker==3 or splited_type4:
+                for j in range(first_idx, i-1):
+                    if contig_data[j][CHR_NAM] == contig_data[j+1][CHR_NAM] and abs(calculate_single_contig_ref_ratio(contig_data[j:j+2])[0]-1) >= BND_CONTIG_BOUND:
+                        is_type3_type4 = True
+                        break
+                if is_type3_type4 and (not is_telo) and (not splited_type4):
+                    type3_type4_list.append((first_idx, i-1))
+                else:
+                    using_contig_list.append(curr_contig_name)
+                    contig_type[curr_contig_name] = checker
+                    contig_terminal_node[curr_contig_name] = (idx, idx+cnt-1)
+                    idx+=cnt
             # initialize
             curr_contig_first_fragment = contig_data[i]
+            first_idx = i
             cnt = 0
             checker = 0
             is_telo = False
             is_front_back_repeat = False
             chrM_flag = False
+            is_type3_type4 = False
             if i < contig_data_size and repeat_label[i][0]!='0':
                 is_front_back_repeat = True
     contig_data = contig_data[:-1]
-    return [using_contig_list, contig_type, contig_terminal_node, len_count]
+    return [using_contig_list, contig_type, contig_terminal_node, len_count, type3_type4_list]
 
 def alt_preprocess_contig(contig_data : list, telo_label : list, ref_qry_ratio : dict, repeat_label : list, telo_connect_info : set, telo_dict : dict) -> list :
     checker = 0
@@ -1506,7 +1522,7 @@ def alt_preprocess_contig(contig_data : list, telo_label : list, ref_qry_ratio :
                     else:
                         checker = 3
 
-            if chrM_flag or all_mapq_0:
+            if chrM_flag:
                 checker = 0
             elif checker == 2:
                 chukji = 0
@@ -2748,12 +2764,12 @@ def contig_preprocessing_00(PAF_FILE_PATH_ : list):
     preprocess_result, \
     preprocess_contig_type, \
     preprocess_terminal_nodes, \
-    len_counter = preprocess_contig(new_contig_data, new_node_telo_label, ref_qry_ratio, new_node_repeat_label, telcon_set)
+    len_counter, \
+    type3_type4_list  = preprocess_contig(new_contig_data, new_node_telo_label, ref_qry_ratio, new_node_repeat_label, telcon_set)
     preprocess_result = set(preprocess_result)
     new_contig_data = new_contig_data[0:-1]
     contig_data_size = len(new_contig_data)
     telo_ppc_contig = []
-    cnt = 0
     for i in range(contig_data_size):
         if new_contig_data[i][CTG_NAM] in preprocess_result:
             temp_list = new_contig_data[i][:10]
@@ -2768,8 +2784,61 @@ def contig_preprocessing_00(PAF_FILE_PATH_ : list):
             temp_list.append(new_node_repeat_censat_label[i][1])
             temp_list.append('0.'+str(new_contig_data[i][10]))
             telo_ppc_contig.append(temp_list)
-            cnt+=1
-    
+    type34_add_idx = len(telo_ppc_contig)
+    for ranges in type3_type4_list:
+        type3_piece_start = ranges[0]
+        split_count = 0
+        for j in range(ranges[0], ranges[1]):
+            if new_contig_data[j][CHR_NAM] == new_contig_data[j+1][CHR_NAM] and abs(calculate_single_contig_ref_ratio(new_contig_data[j:j+2])[0] -1) > 0.1:
+                split_count += 1
+                for i in range(type3_piece_start, j+1):
+                    temp_list = new_contig_data[i][:10]
+                    temp_list[CTG_NAM] = temp_list[CTG_NAM] + "_type34split_" + str(split_count)
+                    temp_list.append(3)
+                    temp_list.append(type34_add_idx)
+                    temp_list.append(type34_add_idx + j - type3_piece_start)
+                    temp_list.append(new_node_telo_label[i][0])
+                    temp_list.append(new_node_telo_label[i][1])
+                    temp_list.append(new_contig_data[i][11])
+                    temp_list.append(new_node_repeat_label[i][0])
+                    temp_list.append(new_node_repeat_label[i][1])
+                    temp_list.append(new_node_repeat_censat_label[i][1])
+                    temp_list.append('0.'+str(new_contig_data[i][10]))
+                    telo_ppc_contig.append(temp_list)
+                type34_add_idx += j - type3_piece_start + 1
+                split_count += 1
+                for i in range(j, j+2):
+                    temp_list = new_contig_data[i][:10]
+                    temp_list[CTG_NAM] = temp_list[CTG_NAM] + "_type34split_" + str(split_count)
+                    temp_list.append(4)
+                    temp_list.append(type34_add_idx)
+                    temp_list.append(type34_add_idx + 1)
+                    temp_list.append(new_node_telo_label[i][0])
+                    temp_list.append(new_node_telo_label[i][1])
+                    temp_list.append(new_contig_data[i][11])
+                    temp_list.append(new_node_repeat_label[i][0])
+                    temp_list.append(new_node_repeat_label[i][1])
+                    temp_list.append(new_node_repeat_censat_label[i][1])
+                    temp_list.append('0.'+str(new_contig_data[i][10]))
+                    telo_ppc_contig.append(temp_list)
+                type3_piece_start = j+1
+                type34_add_idx += 2
+        split_count += 1
+        for i in range(type3_piece_start, ranges[1]+1):
+            temp_list = new_contig_data[i][:10]
+            temp_list[CTG_NAM] = temp_list[CTG_NAM] + "_type34split_" + str(split_count)
+            temp_list.append(3)
+            temp_list.append(type34_add_idx)
+            temp_list.append(type34_add_idx + ranges[1] - type3_piece_start)
+            temp_list.append(new_node_telo_label[i][0])
+            temp_list.append(new_node_telo_label[i][1])
+            temp_list.append(new_contig_data[i][11])
+            temp_list.append(new_node_repeat_label[i][0])
+            temp_list.append(new_node_repeat_label[i][1])
+            temp_list.append(new_node_repeat_censat_label[i][1])
+            temp_list.append('0.'+str(new_contig_data[i][10]))
+            telo_ppc_contig.append(temp_list)
+        type34_add_idx += ranges[1] - type3_piece_start + 1
     mainflow_dict = find_mainflow(telo_ppc_contig)
     telo_ppc_size = len(telo_ppc_contig)
     for i in range(telo_ppc_size):
@@ -2796,7 +2865,7 @@ def contig_preprocessing_00(PAF_FILE_PATH_ : list):
             pass
 
 
-    final_using_contig, final_ctg_typ, final_preprocess_terminal_nodes, _ = preprocess_contig(final_contig, final_telo_node_label, final_ref_qry_ratio, final_contig_repeat_label, final_telo_connect)
+    final_using_contig, final_ctg_typ, final_preprocess_terminal_nodes, _, _ = preprocess_contig(final_contig, final_telo_node_label, final_ref_qry_ratio, final_contig_repeat_label, final_telo_connect)
 
     final_contig = final_contig[:-1]
 
@@ -2842,7 +2911,6 @@ def contig_preprocessing_00(PAF_FILE_PATH_ : list):
         alt_len_counter = alt_preprocess_contig(new_contig_data, new_node_telo_label, ref_qry_ratio, new_node_repeat_label, telcon_set, telo_dict)
         new_contig_data = new_contig_data[0:-1]
         contig_data_size = len(new_contig_data)
-        bias = cnt
         for contig_name_list in [set(preprocess_result), set(preprocess_type3_result)]:
             for i in range(contig_data_size):
                 if new_contig_data[i][CTG_NAM] in contig_name_list:
