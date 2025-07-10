@@ -782,6 +782,13 @@ for i, ctr in enumerate(path_nclose_usage):
     for j, v in ctr.items():
         nclose_cn[j] += v*weights[i]
 
+with open(f"{PREFIX}/nclose_cn.txt", "wt") as f:
+    for k, v in nclose_cn.items():
+        if v > BREAKEND_REMARKABLE_CN:
+            curr_nclose = reverse_nclose_dict[k]
+            print(contig_data[curr_nclose[0]], "\n", contig_data[curr_nclose[1]], "\n", v, "\n", file=f)
+        
+
 telo_cn = defaultdict(float)
 for i, ctr in enumerate(path_telo_usage):
     for j, v in ctr.items():
@@ -803,7 +810,7 @@ for k, v in nclose_cn.items():
         inv_val_list.append(v / meandepth * 2)
 
     virtual_flag = False
-    if contig_data[idx1][CTG_NAM][0] == 'v':
+    if contig_data[idx1][CTG_NAM].startswith('v'):
         virtual_flag = True
     
     if v > BREAKEND_REMARKABLE_CN:

@@ -1,4 +1,3 @@
-from re import split
 import sys
 import argparse
 import subprocess
@@ -71,6 +70,8 @@ CHUKJI_LIMIT = -1
 BND_CONTIG_BOUND = 0.1
 TYPE2_CONTIG_MINIMUM_LENGTH = 200*K
 SUBTELOMERE_REPEAT_LENGTH = 0 # 100*K
+TYPE2_FLANKING_LENGTH = 500 * K
+TYPE2_SIM_COMPARE_RAITO = 1.5
 
 TOT_PATH_LIMIT = 3*M
 PAT_PATH_LIMIT = 10*K
@@ -1461,7 +1462,36 @@ def preprocess_contig(contig_data : list, telo_label : list, ref_qry_ratio : dic
     contig_data = contig_data[:-1]
     return [using_contig_list, contig_type, contig_terminal_node, len_count, type3_type4_list]
 
-def alt_preprocess_contig(contig_data : list, telo_label : list, ref_qry_ratio : dict, repeat_label : list, telo_connect_info : set, telo_dict : dict) -> list :
+def similar_check(v1, v2, ratio=TYPE2_SIM_COMPARE_RAITO):
+    assert(v1 >= 0 and v2 >= 0)
+    mi, ma = sorted([v1, v2])
+    return False if mi == 0 else (ma / mi <= ratio)
+
+def check_near_bnd(chrom, inside_st, inside_nd):
+    # subset of df for the given chromosome
+    df_chr = df[df['chr'] == chrom]
+
+    def mean_depth(start, end):
+        """Return mean meandepth over windows overlapping [start, end)."""
+        mask = (df_chr['nd'] > start) & (df_chr['st'] < end)
+        return df_chr.loc[mask, 'meandepth'].mean()
+
+    # for inside_st
+    st_depth = mean_depth(inside_st - TYPE2_FLANKING_LENGTH, inside_st)
+    nd_depth = mean_depth(inside_nd, inside_nd + TYPE2_FLANKING_LENGTH)
+
+    # print(chrom, inside_st, inside_nd, not similar_check(st_depth, nd_depth))
+    return not similar_check(st_depth, nd_depth)
+
+def censat_overlap_check(censat_dict, chrom, inside_st, inside_nd):
+    if chrom not in censat_dict.keys():
+        return False
+    for st, nd in censat_dict[chrom]:
+        if not (nd < inside_st or inside_nd < st):
+            return True
+    return False
+
+def alt_preprocess_contig(contig_data : list, telo_label : list, ref_qry_ratio : dict, repeat_label : list, telo_connect_info : set, telo_dict : dict, censat_dict : dict) -> list :
     checker = 0
     contig_data_size = len(contig_data)-1
     curr_contig_first_fragment = contig_data[0]
@@ -1525,16 +1555,19 @@ def alt_preprocess_contig(contig_data : list, telo_label : list, ref_qry_ratio :
             if chrM_flag:
                 checker = 0
             elif checker == 2:
-                chukji = 0
                 if curr_contig_first_fragment[CTG_DIR] == '+':
-                    chukji = curr_contig_end_fragment[CHR_END] - curr_contig_first_fragment[CHR_STR]
+                    inside_st, inside_nd = sorted([curr_contig_end_fragment[CHR_END], curr_contig_first_fragment[CHR_STR]])
                 else:
-                    chukji = curr_contig_first_fragment[CHR_END] - curr_contig_end_fragment[CHR_STR]
-                if chukji > TYPE2_CONTIG_MINIMUM_LENGTH:
+                    inside_st, inside_nd = sorted([curr_contig_first_fragment[CHR_END], curr_contig_end_fragment[CHR_STR]])
+                chukji = inside_nd - inside_st
+                chukji_chrom = curr_contig_first_fragment[CHR_NAM]
+
+                if chukji > TYPE2_CONTIG_MINIMUM_LENGTH or check_near_bnd(chukji_chrom, inside_st, inside_nd) and (not censat_overlap_check(censat_dict, chukji_chrom, inside_st, inside_nd)):
                     using_contig_list.append(curr_contig_name)
                     contig_type[curr_contig_name] = checker
                     contig_terminal_node[curr_contig_name] = (idx, idx+cnt-1)
                     idx+=cnt
+                
             elif (checker>0 and checker != 3 and checker != 5):
                 using_contig_list.append(curr_contig_name)
                 contig_type[curr_contig_name] = checker
@@ -2715,7 +2748,7 @@ def contig_preprocessing_00(PAF_FILE_PATH_ : list):
     repeat_data = import_repeat_data_00(REPEAT_INFO_FILE_PATH)
     repeat_censat_data = import_censat_repeat_data(CENSAT_PATH)
 
-
+    global df
     df = pd.read_csv(main_stat_loc, compression='gzip', comment='#', sep='\t', names=['chr', 'st', 'nd', 'length', 'covsite', 'totaldepth', 'cov', 'meandepth'])
     df = df.query('chr != "chrM"')
 
@@ -2908,7 +2941,7 @@ def contig_preprocessing_00(PAF_FILE_PATH_ : list):
         preprocess_type3_result, \
         preprocess_contig_type, \
         preprocess_terminal_nodes, \
-        alt_len_counter = alt_preprocess_contig(new_contig_data, new_node_telo_label, ref_qry_ratio, new_node_repeat_label, telcon_set, telo_dict)
+        alt_len_counter = alt_preprocess_contig(new_contig_data, new_node_telo_label, ref_qry_ratio, new_node_repeat_label, telcon_set, telo_dict, repeat_censat_data)
         new_contig_data = new_contig_data[0:-1]
         contig_data_size = len(new_contig_data)
         for contig_name_list in [set(preprocess_result), set(preprocess_type3_result)]:
@@ -2974,7 +3007,7 @@ def contig_preprocessing_00(PAF_FILE_PATH_ : list):
         alt_final_ref_qry_ratio = calc_ratio(alt_final_contig)
 
         alt_final_using_contig, alt_final_using_type3_contig, \
-        alt_final_ctg_typ, alt_final_preprocess_terminal_nodes, _ = alt_preprocess_contig(alt_final_contig, alt_final_telo_node_label, alt_final_ref_qry_ratio, alt_final_repeat_node_label, alt_final_telo_connect, telo_dict)
+        alt_final_ctg_typ, alt_final_preprocess_terminal_nodes, _ = alt_preprocess_contig(alt_final_contig, alt_final_telo_node_label, alt_final_ref_qry_ratio, alt_final_repeat_node_label, alt_final_telo_connect, telo_dict, repeat_censat_data)
         
         alt_final_contig = alt_final_contig[:-1]
         
