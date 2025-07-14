@@ -72,6 +72,10 @@ TYPE2_CONTIG_MINIMUM_LENGTH = 200*K
 SUBTELOMERE_REPEAT_LENGTH = 0 # 100*K
 TYPE2_FLANKING_LENGTH = 500 * K
 TYPE2_SIM_COMPARE_RAITO = 1.5
+TYPE34_BREAK_CHUKJI_LIMIT = 1*M
+
+NCLOSE_SIM_COMPARE_RAITO = 1.2
+NCLOSE_SIM_DIFF_THRESHOLD = 5
 
 TOT_PATH_LIMIT = 3*M
 PAT_PATH_LIMIT = 10*K
@@ -1390,14 +1394,12 @@ def preprocess_contig(contig_data : list, telo_label : list, ref_qry_ratio : dic
     checker = 0
     contig_data_size = len(contig_data)-1
     curr_contig_first_fragment = contig_data[0]
-    type3_type4_list = []
     using_contig_list = []
     contig_terminal_node = {}
     contig_type = {}
     is_telo = False
     is_front_back_repeat = False
     chrM_flag = False
-    is_type3_type4 = False
     first_idx = 0
     idx = 0
     cnt = 0
@@ -1413,8 +1415,6 @@ def preprocess_contig(contig_data : list, telo_label : list, ref_qry_ratio : dic
         if contig_data[i][CTG_NAM] != contig_data[i-1][CTG_NAM]:
             splited_type4 = False
             curr_contig_name = contig_data[i-1][CTG_NAM]
-            if "type34split" in curr_contig_name:
-                splited_type4 = True
             if repeat_label[i-1][0]!='0':
                 is_front_back_repeat = True
             curr_contig_end_fragment = contig_data[i-1]
@@ -1436,18 +1436,11 @@ def preprocess_contig(contig_data : list, telo_label : list, ref_qry_ratio : dic
                     checker = 4
             if chrM_flag:
                 checker = 0
-            if checker==3 or splited_type4:
-                for j in range(first_idx, i-1):
-                    if contig_data[j][CHR_NAM] == contig_data[j+1][CHR_NAM] and abs(calculate_single_contig_ref_ratio(contig_data[j:j+2])[0]-1) >= BND_CONTIG_BOUND:
-                        is_type3_type4 = True
-                        break
-                if is_type3_type4 and (not is_telo) and (not splited_type4):
-                    type3_type4_list.append((first_idx, i-1))
-                else:
-                    using_contig_list.append(curr_contig_name)
-                    contig_type[curr_contig_name] = checker
-                    contig_terminal_node[curr_contig_name] = (idx, idx+cnt-1)
-                    idx+=cnt
+            if checker==3:
+                using_contig_list.append(curr_contig_name)
+                contig_type[curr_contig_name] = checker
+                contig_terminal_node[curr_contig_name] = (idx, idx+cnt-1)
+                idx+=cnt
             # initialize
             curr_contig_first_fragment = contig_data[i]
             first_idx = i
@@ -1456,16 +1449,15 @@ def preprocess_contig(contig_data : list, telo_label : list, ref_qry_ratio : dic
             is_telo = False
             is_front_back_repeat = False
             chrM_flag = False
-            is_type3_type4 = False
             if i < contig_data_size and repeat_label[i][0]!='0':
                 is_front_back_repeat = True
     contig_data = contig_data[:-1]
-    return [using_contig_list, contig_type, contig_terminal_node, len_count, type3_type4_list]
+    return [using_contig_list, contig_type, contig_terminal_node, len_count]
 
 def similar_check(v1, v2, ratio=TYPE2_SIM_COMPARE_RAITO):
     assert(v1 >= 0 and v2 >= 0)
     mi, ma = sorted([v1, v2])
-    return False if mi == 0 else (ma / mi <= ratio)
+    return False if mi == 0 else (ma / mi <= ratio) or ma-mi < NCLOSE_SIM_DIFF_THRESHOLD
 
 def check_near_bnd(chrom, inside_st, inside_nd):
     # subset of df for the given chromosome
@@ -1482,6 +1474,23 @@ def check_near_bnd(chrom, inside_st, inside_nd):
 
     # print(chrom, inside_st, inside_nd, not similar_check(st_depth, nd_depth))
     return not similar_check(st_depth, nd_depth)
+
+def check_depth_near_bnd(st_data, nd_data):
+    def mean_depth(start, end):
+        """Return mean meandepth over windows overlapping [start, end)."""
+        mask = (df_chr['nd'] > start) & (df_chr['st'] < end)
+        return df_chr.loc[mask, 'meandepth'].mean()
+    depth = []
+    for data in [st_data, nd_data]:
+        chrom = data[0]
+        ref = data[1]
+        df_chr = df[df['chr'] == chrom]
+        depth.append(mean_depth(ref - TYPE2_FLANKING_LENGTH/2, ref + TYPE2_FLANKING_LENGTH/2))
+    if similar_check(*depth, ratio = NCLOSE_SIM_COMPARE_RAITO):
+        return True
+    else:
+        return False
+        
 
 def censat_overlap_check(censat_dict, chrom, inside_st, inside_nd):
     if chrom not in censat_dict.keys():
@@ -1901,6 +1910,30 @@ def break_double_telomere_contig(contig_data : list, telo_connected_set : set):
         s = e+1
     return vtg_list
 
+def break_type34_contig(contig_data : list):
+    s = 0
+    vtg_list = []
+    while s < len(contig_data):
+        e = contig_data[s][CTG_ENDND]
+        curr_contig_name = contig_data[s][CTG_NAM]
+        if contig_data[s][CTG_TYP] == 3:
+            cnt = 0
+            for i in range(s, e):
+                front_chr = (contig_data[i][CHR_NAM], contig_data[i][CTG_DIR])
+                back_chr = (contig_data[i+1][CHR_NAM], contig_data[i+1][CTG_DIR])
+                ref_ratio, chukji = calculate_single_contig_ref_ratio(contig_data[i:i+2])
+                if contig_data[i][CTG_RPTCHR] != '0' or contig_data[i+1][CTG_RPTCHR] != '0':
+                    bnd_bound = RPT_BND_CONTIG_BOUND
+                else:
+                    bnd_bound = BND_CONTIG_BOUND
+                if front_chr == back_chr and abs(1-ref_ratio) > bnd_bound and abs(chukji) > TYPE34_BREAK_CHUKJI_LIMIT:
+                    cnt += 1
+                    vtg = copy.deepcopy(contig_data[i:i+2])
+                    for j in vtg:
+                        j[CTG_NAM] = f'{curr_contig_name}_split34_{cnt}'
+                        vtg_list.append(j)
+        s = e+1
+    return vtg_list
 
 def pass_pipeline(pre_contig_data, telo_dict, telo_bound_dict, repeat_data, repeat_censat_data, telo_ppc_passed, chr_len):
     if not telo_ppc_passed:
@@ -2173,6 +2206,17 @@ def extract_nclose_node(contig_data : list, bnd_contig : set, repeat_contig_name
                 for nclose in nclose_list:
                     st = nclose[0]
                     ed = nclose[2]
+                    # Pass if 
+                    # 1. terminal node is rin
+                    # 2. AND both terminal have similar read depth
+                    """
+                    if contig_data[st][CHR_NAM] != contig_data[ed][CHR_NAM]:
+                        if contig_data[st][CTG_RPTCASE] == 'rin' or contig_data[ed][CTG_RPTCASE] == 'rin':
+                            st_data = (contig_data[st][CHR_NAM], contig_data[st][CHR_END])
+                            ed_data = (contig_data[ed][CHR_NAM], contig_data[ed][CHR_STR])
+                            if check_depth_near_bnd(st_data, ed_data):
+                                continue
+                    """
                     nclose_front_const = 0
                     nclose_back_const = 0
                     for censat_ref_range in repeat_censat_data[contig_data[st][CHR_NAM]]:
@@ -2797,8 +2841,7 @@ def contig_preprocessing_00(PAF_FILE_PATH_ : list):
     preprocess_result, \
     preprocess_contig_type, \
     preprocess_terminal_nodes, \
-    len_counter, \
-    type3_type4_list  = preprocess_contig(new_contig_data, new_node_telo_label, ref_qry_ratio, new_node_repeat_label, telcon_set)
+    len_counter = preprocess_contig(new_contig_data, new_node_telo_label, ref_qry_ratio, new_node_repeat_label, telcon_set)
     preprocess_result = set(preprocess_result)
     new_contig_data = new_contig_data[0:-1]
     contig_data_size = len(new_contig_data)
@@ -2817,61 +2860,6 @@ def contig_preprocessing_00(PAF_FILE_PATH_ : list):
             temp_list.append(new_node_repeat_censat_label[i][1])
             temp_list.append('0.'+str(new_contig_data[i][10]))
             telo_ppc_contig.append(temp_list)
-    type34_add_idx = len(telo_ppc_contig)
-    for ranges in type3_type4_list:
-        type3_piece_start = ranges[0]
-        split_count = 0
-        for j in range(ranges[0], ranges[1]):
-            if new_contig_data[j][CHR_NAM] == new_contig_data[j+1][CHR_NAM] and abs(calculate_single_contig_ref_ratio(new_contig_data[j:j+2])[0] -1) > 0.1:
-                split_count += 1
-                for i in range(type3_piece_start, j+1):
-                    temp_list = new_contig_data[i][:10]
-                    temp_list[CTG_NAM] = temp_list[CTG_NAM] + "_type34split_" + str(split_count)
-                    temp_list.append(3)
-                    temp_list.append(type34_add_idx)
-                    temp_list.append(type34_add_idx + j - type3_piece_start)
-                    temp_list.append(new_node_telo_label[i][0])
-                    temp_list.append(new_node_telo_label[i][1])
-                    temp_list.append(new_contig_data[i][11])
-                    temp_list.append(new_node_repeat_label[i][0])
-                    temp_list.append(new_node_repeat_label[i][1])
-                    temp_list.append(new_node_repeat_censat_label[i][1])
-                    temp_list.append('0.'+str(new_contig_data[i][10]))
-                    telo_ppc_contig.append(temp_list)
-                type34_add_idx += j - type3_piece_start + 1
-                split_count += 1
-                for i in range(j, j+2):
-                    temp_list = new_contig_data[i][:10]
-                    temp_list[CTG_NAM] = temp_list[CTG_NAM] + "_type34split_" + str(split_count)
-                    temp_list.append(4)
-                    temp_list.append(type34_add_idx)
-                    temp_list.append(type34_add_idx + 1)
-                    temp_list.append(new_node_telo_label[i][0])
-                    temp_list.append(new_node_telo_label[i][1])
-                    temp_list.append(new_contig_data[i][11])
-                    temp_list.append(new_node_repeat_label[i][0])
-                    temp_list.append(new_node_repeat_label[i][1])
-                    temp_list.append(new_node_repeat_censat_label[i][1])
-                    temp_list.append('0.'+str(new_contig_data[i][10]))
-                    telo_ppc_contig.append(temp_list)
-                type3_piece_start = j+1
-                type34_add_idx += 2
-        split_count += 1
-        for i in range(type3_piece_start, ranges[1]+1):
-            temp_list = new_contig_data[i][:10]
-            temp_list[CTG_NAM] = temp_list[CTG_NAM] + "_type34split_" + str(split_count)
-            temp_list.append(3)
-            temp_list.append(type34_add_idx)
-            temp_list.append(type34_add_idx + ranges[1] - type3_piece_start)
-            temp_list.append(new_node_telo_label[i][0])
-            temp_list.append(new_node_telo_label[i][1])
-            temp_list.append(new_contig_data[i][11])
-            temp_list.append(new_node_repeat_label[i][0])
-            temp_list.append(new_node_repeat_label[i][1])
-            temp_list.append(new_node_repeat_censat_label[i][1])
-            temp_list.append('0.'+str(new_contig_data[i][10]))
-            telo_ppc_contig.append(temp_list)
-        type34_add_idx += ranges[1] - type3_piece_start + 1
     mainflow_dict = find_mainflow(telo_ppc_contig)
     telo_ppc_size = len(telo_ppc_contig)
     for i in range(telo_ppc_size):
@@ -2898,7 +2886,7 @@ def contig_preprocessing_00(PAF_FILE_PATH_ : list):
             pass
 
 
-    final_using_contig, final_ctg_typ, final_preprocess_terminal_nodes, _, _ = preprocess_contig(final_contig, final_telo_node_label, final_ref_qry_ratio, final_contig_repeat_label, final_telo_connect)
+    final_using_contig, final_ctg_typ, final_preprocess_terminal_nodes, _ = preprocess_contig(final_contig, final_telo_node_label, final_ref_qry_ratio, final_contig_repeat_label, final_telo_connect)
 
     final_contig = final_contig[:-1]
 
@@ -3071,6 +3059,8 @@ def contig_preprocessing_00(PAF_FILE_PATH_ : list):
     
     break_contig = break_double_telomere_contig(real_final_contig, telo_connected_node)
 
+    type34_split_contig = break_type34_contig(real_final_contig)
+
     if len(break_contig) > 0:
         final_break_contig = pass_pipeline(break_contig, telo_dict, telo_bound_dict, repeat_data, repeat_censat_data, False, chr_len)
     else:
@@ -3085,6 +3075,11 @@ def contig_preprocessing_00(PAF_FILE_PATH_ : list):
         final_subtelo_ppc_node = pass_pipeline(subtelo_ppc_node, telo_dict, telo_bound_dict, repeat_data, repeat_censat_data, True, chr_len)
     else:
         final_subtelo_ppc_node = []
+
+    if len(type34_split_contig) > 0:
+        final_type34_split_contig = pass_pipeline(type34_split_contig, telo_dict, telo_bound_dict, repeat_data, repeat_censat_data, False, chr_len)
+    else:
+        final_type34_split_contig = []
 
     for i in final_break_contig:
         temp_list = i
@@ -3109,6 +3104,14 @@ def contig_preprocessing_00(PAF_FILE_PATH_ : list):
         real_final_contig.append(temp_list)
     
     total_len += len(final_subtelo_ppc_node)
+
+    for i in final_type34_split_contig:
+        temp_list = i
+        temp_list[CTG_STRND] += total_len
+        temp_list[CTG_ENDND] += total_len
+        real_final_contig.append(temp_list)
+
+    total_len += len(final_type34_split_contig)
 
     overlap_low_split_contig = []
     if is_unitig_reduced == False:
@@ -3570,7 +3573,7 @@ parser.add_argument("--skip_bam_analysis",
 
 args = parser.parse_args()
 
-# t = "02_Build_Breakend_Graph_Limited.py /home/hyunwoo/ACCtools-pipeline/90_skype_run/HCC1937/20_alignasm/HCC1937.ctg.aln.paf public_data/chm13v2.0.fa.fai public_data/chm13v2.0_telomere.bed public_data/chm13v2.0_repeat.m.bed public_data/chm13v2.0_censat_v2.1.m.bed /home/hyunwoo/ACCtools-pipeline/90_skype_run/HCC1937/01_depth/HCC1937.win.stat.gz 30_skype_pipe/HCC1937_15_39_47 /home/hyunwoo/ACCtools-pipeline/90_skype_run/HCC1937/01_depth/HCC1937.bam --alt /home/hyunwoo/ACCtools-pipeline/90_skype_run/HCC1937/20_alignasm/HCC1937.utg.aln.paf --orignal_paf_loc /home/hyunwoo/ACCtools-pipeline/90_skype_run/HCC1937/20_alignasm/HCC1937.ctg.paf /home/hyunwoo/ACCtools-pipeline/90_skype_run/HCC1937/20_alignasm/HCC1937.utg.paf -t 128"
+# t = "02_Build_Breakend_Graph_Limited.py /home/hyunwoo/ACCtools-pipeline/90_skype_run/HG00438/20_alignasm/HG00438.ctg.aln.paf public_data/chm13v2.0.fa.fai public_data/chm13v2.0_telomere.bed public_data/chm13v2.0_repeat.m.bed public_data/chm13v2.0_censat_v2.1.m.bed /home/hyunwoo/ACCtools-pipeline/90_skype_run/HG00438/01_depth/HG00438_normalized.win.stat.gz 30_skype_pipe/HG00438_15_02_16 /home/hyunwoo/ACCtools-pipeline/90_skype_run/HG00438/01_depth/HG00438.bam --alt /home/hyunwoo/ACCtools-pipeline/90_skype_run/HG00438/20_alignasm/HG00438.utg.aln.paf --orignal_paf_loc /home/hyunwoo/ACCtools-pipeline/90_skype_run/HG00438/20_alignasm/HG00438.ctg.paf /home/hyunwoo/ACCtools-pipeline/90_skype_run/HG00438/20_alignasm/HG00438.utg.paf -t 128"
 # args = parser.parse_args(t.split()[1:])
 
 PREFIX = args.prefix
