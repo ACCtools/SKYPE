@@ -6,11 +6,94 @@ import argparse
 import numpy as np
 import pickle as pkl
 
+from scipy.sparse import issparse
+
 from skglm import GeneralizedLinearEstimator
-from skglm.datafits import Quadratic
-from skglm.penalties import PositiveConstraint
+from skglm.datafits import Quadratic, Logistic, QuadraticSVC
+from skglm.penalties import PositiveConstraint, WeightedL1
 from skglm.solvers import AndersonCD
+from skglm.utils.jit_compilation import compiled_clone
+
+from sklearn.utils.validation import check_array
+
 from threadpoolctl import threadpool_limits
+
+def _glm_fit_custom(X, y, model):
+    solver, datafit, penalty = model.solver, model.datafit, model.penalty
+
+    is_classif = False
+    fit_intercept = solver.fit_intercept
+
+    check_X_params = dict(
+        dtype=[np.float64, np.float32], order='F',
+        accept_sparse='csc', copy=fit_intercept)
+    check_y_params = dict(ensure_2d=False, order='F')
+
+    X, y = model._validate_data(
+        X, y, validate_separately=(check_X_params, check_y_params))
+    X = check_array(X, 'csc', dtype=[np.float64, np.float32],
+                    order='F', copy=False, accept_large_sparse=False)
+    y = check_array(y, 'csc', dtype=X.dtype.type, order='F', copy=False,
+                    ensure_2d=False)
+
+    if y.ndim == 2 and y.shape[1] == 1:
+        warnings.warn("DataConversionWarning('A column-vector y"
+                      " was passed when a 1d array was expected")
+        y = y[:, 0]
+
+    if not hasattr(model, "n_features_in_"):
+        model.n_features_in_ = X.shape[1]
+
+    n_samples = X.shape[0]
+    if n_samples != y.shape[0]:
+        raise ValueError("X and y have inconsistent dimensions (%d != %d)"
+                         % (n_samples, y.shape[0]))
+
+    # if not model.warm_start or not hasattr(model, "coef_"):
+    if not solver.warm_start or not hasattr(model, "coef_"):
+        model.coef_ = None
+
+    X_ = X
+    n_samples, n_features = X_.shape
+
+    penalty_jit = compiled_clone(penalty)
+    datafit_jit = compiled_clone(datafit, to_float32=X.dtype == np.float32)
+    if issparse(X):
+        datafit_jit.initialize_sparse(X_.data, X_.indptr, X_.indices, y)
+    else:
+        datafit_jit.initialize(X_, y)
+
+    # if model.warm_start and hasattr(model, 'coef_') and model.coef_ is not None:
+    if solver.warm_start and hasattr(model, 'coef_') and model.coef_ is not None:
+        if isinstance(datafit, QuadraticSVC):
+            w = model.dual_coef_[0, :].copy()
+        elif is_classif:
+            w = model.coef_[0, :].copy()
+        else:
+            w = model.coef_.copy()
+        if fit_intercept:
+            w = np.hstack([w, model.intercept_])
+        Xw = X_ @ w[:w.shape[0] - fit_intercept] + fit_intercept * w[-1]
+    else:
+        # TODO this should be solver.get_init() do delegate the work
+        if y.ndim == 1:
+            w = np.zeros(n_features + fit_intercept, dtype=X_.dtype)
+            Xw = np.zeros(n_samples, dtype=X_.dtype)
+        else:  # multitask
+            w = np.zeros((n_features + fit_intercept, y.shape[1]), dtype=X_.dtype)
+            Xw = np.zeros(y.shape, dtype=X_.dtype)
+
+    coefs, p_obj, kkt = solver.solve(X_, y, datafit_jit, penalty_jit, w, Xw, run_checks=False)
+    model.coef_, model.stop_crit_ = coefs[:n_features], kkt
+    if y.ndim == 1:
+        model.intercept_ = coefs[-1] if fit_intercept else 0.
+    else:
+        model.intercept_ = coefs[-1, :] if fit_intercept else np.zeros(
+            y.shape[1])
+
+    model.n_iter_ = len(p_obj)
+
+    return model
 
 warnings.simplefilter(action='ignore', category=FutureWarning)
 
@@ -69,14 +152,14 @@ for order in range(0, max_order + 1):
         solver=AndersonCD(fit_intercept=False, warm_start=True)
     )
 
-    nnls.coef_ = x0[tar_ind:]
+    nnls.coef_ = x0[tar_ind:].copy()
     with threadpool_limits(limits=THREAD):
-        nnls.fit(A[:, tar_ind:], B)
+        _glm_fit_custom(A[:, tar_ind:], B, nnls)
 
     if max_order == order:
-        weights = nnls.coef_
+        weights = nnls.coef_.copy()
     else:
-        x0[tar_ind:] = nnls.coef_
+        x0[tar_ind:] = nnls.coef_.copy()
 
 predict_suc_B = A.dot(weights)
 error = np.linalg.norm(predict_suc_B - B)
