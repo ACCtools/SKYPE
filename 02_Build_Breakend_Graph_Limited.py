@@ -529,6 +529,12 @@ def distance_checker(node_a : tuple, node_b : tuple) -> int :
         return 0   
     else:
         return min(abs(int(node_b[CHR_STR]) - int(node_a[CHR_END])), abs(int(node_b[CHR_END]) - int(node_a[CHR_STR])))
+
+def distance_checker_tuple(node_a : tuple, node_b : tuple) -> int :
+    if max(int(node_a[0]), int(node_b[0])) < min(int(node_a[1]), int(node_b[1])):
+        return 0   
+    else:
+        return min(abs(int(node_b[0]) - int(node_a[1])), abs(int(node_b[1]) - int(node_a[0])))
     
 def overlap_calculator(node_a : tuple, node_b : tuple) -> int :
     return min(abs(node_a[CHR_END] - node_b[CHR_STR]), abs(node_b[CHR_END] - node_a[CHR_STR]))
@@ -2601,6 +2607,18 @@ def extract_telomere_connect_contig(telo_info_path : str) -> dict:
             telomere_connect_contig[chr_info].append(contig_id)
     
     return telomere_connect_contig
+
+def extract_telomere_connect_contig_bytuple(telo_info_path : str) -> list:
+    telomere_connect_contig = []
+    with open(telo_info_path) as f:
+        for curr_data in f:
+            curr_data = curr_data.rstrip()
+            temp_list = curr_data.split("\t")
+            chr_info = temp_list[0]
+            contig_id = ast.literal_eval(temp_list[1])
+            telomere_connect_contig.append((chr_info, contig_id[1]))
+    
+    return telomere_connect_contig
     
 def initialize_bnd_graph(contig_data : list, nclose_nodes : dict, telo_contig : dict) -> dict:
     bnd_adjacency = defaultdict(list)
@@ -3264,6 +3282,34 @@ def nclose_calc():
     chr_rev_corr[contig_data_size + 2*CHROMOSOME_COUNT - 1] = 'chrXb'
 
     telo_contig = extract_telomere_connect_contig(TELO_CONNECT_NODES_INFO_PATH)
+    telo_connected_node_tuple = extract_telomere_connect_contig_bytuple(TELO_CONNECT_NODES_INFO_PATH)
+    chr_fb_len_dict = defaultdict(list)
+
+    telo_data = import_telo_data(TELOMERE_INFO_FILE_PATH, chr_len)
+    telo_dict = defaultdict(list)
+    for _ in telo_data:
+        telo_dict[_[0]].append(_[1:])
+
+    telo_fb_dict = defaultdict(list)
+    for k, v in telo_dict.items():
+        for i in v:
+            telo_fb_dict[k+i[-1]].append([i[0], i[1]])
+
+    for chr_dir, node_id in telo_connected_node_tuple:
+        telo_len = 1e9
+        for telo_bed in telo_fb_dict[chr_dir]:
+            telo_len = min(telo_len, distance_checker_tuple(tuple(telo_bed), (contig_data[node_id][CHR_STR], contig_data[node_id][CHR_END])))
+        chr_fb_len_dict[chr_dir].append((node_id, telo_len, chr_dir))
+
+    telo_len_data = []
+    nonzero_telo_set = set()
+    for chr_dir, telo_len_list in chr_fb_len_dict.items():
+        s_telo_len_list = sorted(telo_len_list, key=lambda t: t[1])
+        telo_len_data.extend(filter(lambda t: t[1] > 0, s_telo_len_list[1:]))
+    
+    for idx, len_value, chr in telo_len_data:
+        if len_value > 0:
+            nonzero_telo_set.add(idx)
 
     telo_node_count = 0
     telo_set = set()
@@ -4007,9 +4053,17 @@ def run_graph(data, CHR_CHANGE_LIMIT, DIR_CHANGE_LIMIT):
                                         g.write("\t".join(map(str, nodes)) + "\n")
                                 print(ack, file=f)
                                 print(ack, file=g)
-                        
+                        neotelochk_1 = 0
+                        neotelochk_2 = 0
+                        double_neotelo = 0
+                        if path[1][1] in nonzero_telo_set:
+                            neotelochk_1 = 1
+                        if path[-2][1] in nonzero_telo_set:
+                            neotelochk_2 = 1
+                        if neotelochk_1>0 and neotelochk_2>0:
+                            double_neotelo = 1
                         path_list.append((path, ack))
-                        path_di_list.append(ii)
+                        path_di_list.append(ii+jj+neotelochk_1+neotelochk_2+double_neotelo) # Score edit
 
                         if cnt >= PAT_PATH_LIMIT:
                             return ((src[0], tar), cnt, path_list, path_di_list)
