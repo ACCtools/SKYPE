@@ -9,8 +9,8 @@ import pickle as pkl
 from scipy.sparse import issparse
 
 from skglm import GeneralizedLinearEstimator
-from skglm.datafits import Quadratic, Logistic, QuadraticSVC
-from skglm.penalties import PositiveConstraint, WeightedL1
+from skglm.datafits import Quadratic, QuadraticSVC
+from skglm.penalties import PositiveConstraint
 from skglm.solvers import AndersonCD
 from skglm.utils.jit_compilation import compiled_clone
 
@@ -18,6 +18,7 @@ from sklearn.utils.validation import check_array
 
 from threadpoolctl import threadpool_limits
 
+# skglm estimators.py _glm_fit function custom for init weight
 def _glm_fit_custom(X, y, model):
     solver, datafit, penalty = model.solver, model.datafit, model.penalty
 
