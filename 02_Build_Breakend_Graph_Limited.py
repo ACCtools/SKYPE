@@ -1823,13 +1823,13 @@ def find_breakend_centromere(repeat_censat_data : dict, chr_len : dict, df : pd.
         mid_row1_censat = int(row1.repeat_start_0 + row1.repeat_end_0)//2
         mid_row2_censat = int(row2.repeat_start_0 + row2.repeat_end_0)//2
 
-        temp_node1 = [f'{prefix}_{cnt}', N, 0, N//2, '+', row1.chr, 
+        temp_node1 = [f'{prefix}_{cnt}', N, 0, N//2, '-', row1.chr, 
                      chr_len[row1.chr], mid_row1_censat - N//2, mid_row1_censat, 
-                     60, 1, (cnt-1)*2, (cnt-1)*2+1, 0, 0, 0, 0, 0, 0, '+', row1.chr, f"2.{(cnt-1)*2}"]
+                     60, 1, (cnt-1)*2, (cnt-1)*2+1, 0, 0, 0, 0, 0, 0, '-', row1.chr, f"2.{(cnt-1)*2}"]
         
         temp_node2 = [f'{prefix}_{cnt}', N, N//2, N, '+', row2.chr,
                      chr_len[row2.chr], mid_row2_censat, mid_row2_censat + N//2, 
-                     60, 1, (cnt-1)*2, (cnt-1)*2+1, 0, 0, 0, 0, 0, 0, '+', row1.chr, f"2.{(cnt-1)*2+1}"]
+                     60, 1, (cnt-1)*2, (cnt-1)*2+1, 0, 0, 0, 0, 0, 0, '-', row1.chr, f"2.{(cnt-1)*2+1}"]
         
         vtg_list.append(temp_node1)
         vtg_list.append(temp_node2)
@@ -1845,7 +1845,7 @@ def find_breakend_centromere(repeat_censat_data : dict, chr_len : dict, df : pd.
                      chr_len[row1.chr], mid_row1_censat - N//2, mid_row1_censat, 
                      60, 1, (cnt-1)*2, (cnt-1)*2+1, 0, 0, 0, 0, 0, 0, '+', row1.chr, f"2.{(cnt-1)*2}"]
         
-        temp_node2 = [f'{prefix}_{cnt}', N, N//2, N, '+', row2.chr,
+        temp_node2 = [f'{prefix}_{cnt}', N, N//2, N, '-', row2.chr,
                      chr_len[row2.chr], mid_row2_censat, mid_row2_censat + N//2, 
                      60, 1, (cnt-1)*2, (cnt-1)*2+1, 0, 0, 0, 0, 0, 0, '+', row1.chr, f"2.{(cnt-1)*2+1}"]
         
@@ -1865,7 +1865,7 @@ def find_breakend_centromere(repeat_censat_data : dict, chr_len : dict, df : pd.
         
             temp_node2 = [f'{prefix}_{cnt}', N, N//2, N, '+', row2.chr,
                      chr_len[row2.chr], mid_row2_censat, mid_row2_censat + N//2, 
-                     60, 1, (cnt-1)*2, (cnt-1)*2+1, 0, 0, 0, 0, 0, 0, '-', row1.chr, f"2.{(cnt-1)*2+1}"]
+                     60, 1, (cnt-1)*2, (cnt-1)*2+1, 0, 0, 0, 0, 0, 0, '+', row1.chr, f"2.{(cnt-1)*2+1}"]
             
             vtg_list.append(temp_node1)
             vtg_list.append(temp_node2)
@@ -3282,34 +3282,6 @@ def nclose_calc():
     chr_rev_corr[contig_data_size + 2*CHROMOSOME_COUNT - 1] = 'chrXb'
 
     telo_contig = extract_telomere_connect_contig(TELO_CONNECT_NODES_INFO_PATH)
-    telo_connected_node_tuple = extract_telomere_connect_contig_bytuple(TELO_CONNECT_NODES_INFO_PATH)
-    chr_fb_len_dict = defaultdict(list)
-
-    telo_data = import_telo_data(TELOMERE_INFO_FILE_PATH, chr_len)
-    telo_dict = defaultdict(list)
-    for _ in telo_data:
-        telo_dict[_[0]].append(_[1:])
-
-    telo_fb_dict = defaultdict(list)
-    for k, v in telo_dict.items():
-        for i in v:
-            telo_fb_dict[k+i[-1]].append([i[0], i[1]])
-
-    for chr_dir, node_id in telo_connected_node_tuple:
-        telo_len = 1e9
-        for telo_bed in telo_fb_dict[chr_dir]:
-            telo_len = min(telo_len, distance_checker_tuple(tuple(telo_bed), (contig_data[node_id][CHR_STR], contig_data[node_id][CHR_END])))
-        chr_fb_len_dict[chr_dir].append((node_id, telo_len, chr_dir))
-
-    telo_len_data = []
-    nonzero_telo_set = set()
-    for chr_dir, telo_len_list in chr_fb_len_dict.items():
-        s_telo_len_list = sorted(telo_len_list, key=lambda t: t[1])
-        telo_len_data.extend(filter(lambda t: t[1] > 0, s_telo_len_list[1:]))
-    
-    for idx, len_value, chr in telo_len_data:
-        if len_value > 0:
-            nonzero_telo_set.add(idx)
 
     telo_node_count = 0
     telo_set = set()
@@ -3660,6 +3632,36 @@ is_unitig_reduced = False
 telo_coverage = contig_preprocessing_00(PAF_FILE_PATH)
 globals().update(nclose_calc())
 
+
+telo_connected_node_tuple = extract_telomere_connect_contig_bytuple(PREFIX+"/telomere_connected_list.txt")
+chr_fb_len_dict = defaultdict(list)
+
+telo_data = import_telo_data(TELOMERE_INFO_FILE_PATH, chr_len)
+telo_dict = defaultdict(list)
+for _ in telo_data:
+    telo_dict[_[0]].append(_[1:])
+
+telo_fb_dict = defaultdict(list)
+for k, v in telo_dict.items():
+    for i in v:
+        telo_fb_dict[k+i[-1]].append([i[0], i[1]])
+
+for chr_dir, node_id in telo_connected_node_tuple:
+    telo_len = 1e9
+    for telo_bed in telo_fb_dict[chr_dir]:
+        telo_len = min(telo_len, distance_checker_tuple(tuple(telo_bed), (contig_data[node_id][CHR_STR], contig_data[node_id][CHR_END])))
+    chr_fb_len_dict[chr_dir].append((node_id, telo_len, chr_dir))
+
+telo_len_data = []
+nonzero_telo_set = set()
+for chr_dir, telo_len_list in chr_fb_len_dict.items():
+    s_telo_len_list = sorted(telo_len_list, key=lambda t: t[1])
+    telo_len_data.extend(filter(lambda t: t[1] > 0, s_telo_len_list[1:]))
+
+for idx, len_value, chr in telo_len_data:
+    if len_value > 0:
+        nonzero_telo_set.add(idx)
+
 if nclose_node_count > FAIL_NCLOSE_COUNT:
     logging.info("NClose node count is too high.")
     if len(PAF_FILE_PATH) == 1:
@@ -3871,7 +3873,7 @@ def find_vertex_by_id(gtG, node_id):
             return v
     return None
 
-def run_graph(data, CHR_CHANGE_LIMIT, DIR_CHANGE_LIMIT):
+def run_graph(data, nonzero_telo_set, CHR_CHANGE_LIMIT, DIR_CHANGE_LIMIT):
     path_list = []
     path_di_list = []
 
@@ -4113,6 +4115,7 @@ def run_graph_pipeline():
             result_iterator = pool.imap_unordered(
                 partial(
                     run_graph,
+                    nonzero_telo_set=nonzero_telo_set,
                     CHR_CHANGE_LIMIT=CHR_CHANGE_LIMIT_PREFIX,
                     DIR_CHANGE_LIMIT=DIR_CHANGE_LIMIT_PREFIX
                 ),
