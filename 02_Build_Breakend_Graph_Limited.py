@@ -73,6 +73,7 @@ SUBTELOMERE_REPEAT_LENGTH = 0 # 100*K
 TYPE2_FLANKING_LENGTH = 500 * K
 TYPE2_SIM_COMPARE_RAITO = 1.5
 TYPE34_BREAK_CHUKJI_LIMIT = 1*M
+CHUKJI_FAIL_TYPE2_RESCUE_THRESHOLD = 2*K
 
 NCLOSE_SIM_COMPARE_RAITO = 1.2
 NCLOSE_SIM_DIFF_THRESHOLD = 5
@@ -1570,18 +1571,10 @@ def alt_preprocess_contig(contig_data : list, telo_label : list, ref_qry_ratio :
             if chrM_flag:
                 checker = 0
             elif checker == 2:
-                if curr_contig_first_fragment[CTG_DIR] == '+':
-                    inside_st, inside_nd = sorted([curr_contig_end_fragment[CHR_END], curr_contig_first_fragment[CHR_STR]])
-                else:
-                    inside_st, inside_nd = sorted([curr_contig_first_fragment[CHR_END], curr_contig_end_fragment[CHR_STR]])
-                chukji = inside_nd - inside_st
-                chukji_chrom = curr_contig_first_fragment[CHR_NAM]
-
-                if chukji > TYPE2_CONTIG_MINIMUM_LENGTH or check_near_bnd(chukji_chrom, inside_st, inside_nd) and (not censat_overlap_check(censat_dict, chukji_chrom, inside_st, inside_nd)):
-                    using_contig_list.append(curr_contig_name)
-                    contig_type[curr_contig_name] = checker
-                    contig_terminal_node[curr_contig_name] = (idx, idx+cnt-1)
-                    idx+=cnt
+                using_contig_list.append(curr_contig_name)
+                contig_type[curr_contig_name] = checker
+                contig_terminal_node[curr_contig_name] = (idx, idx+cnt-1)
+                idx+=cnt
                 
             elif (checker>0 and checker != 3 and checker != 5):
                 using_contig_list.append(curr_contig_name)
@@ -3257,6 +3250,7 @@ def get_corr_dir(is_for : bool, dir_str : str) -> str:
             return '+'
 
 def nclose_calc():
+    repeat_censat_data = import_censat_repeat_data(CENSAT_PATH)
     chr_len = find_chr_len(CHROMOSOME_INFO_FILE_PATH)
     contig_data = import_data2(PREPROCESSED_PAF_FILE_PATH)
 
@@ -3303,6 +3297,55 @@ def nclose_calc():
     # Type 1, 2, 4에 대해서 
     nclose_nodes, nclose_start_compress, nclose_end_compress, vctg_dict, all_nclose_comp, nclose_coverage, nclose_compress_track = \
         extract_nclose_node(contig_data, bnd_contig, rpt_con, rpt_censat_con, repeat_censat_data, PAF_FILE_PATH, ORIGNAL_PAF_LOC_LIST, telo_set, chr_len, asm2cov)
+
+    not_using_nclose_node = set()
+    type1_nclose_node = []
+    for j in nclose_nodes:
+        for s, e in nclose_nodes[j]:
+            curr_contig_first_fragment = contig_data[s]
+            curr_contig_end_fragment = contig_data[e]
+            if curr_contig_first_fragment[CHR_NAM] == curr_contig_end_fragment[CHR_NAM]:
+                if curr_contig_first_fragment[CTG_DIR] == '+':
+                    inside_st, inside_nd = sorted([curr_contig_end_fragment[CHR_END], curr_contig_first_fragment[CHR_STR]])
+                else:
+                    inside_st, inside_nd = sorted([curr_contig_first_fragment[CHR_END], curr_contig_end_fragment[CHR_STR]])
+                chukji = inside_nd - inside_st
+                chukji_chrom = curr_contig_first_fragment[CHR_NAM]
+
+                if chukji > TYPE2_CONTIG_MINIMUM_LENGTH or check_near_bnd(chukji_chrom, inside_st, inside_nd) and (not censat_overlap_check(repeat_censat_data, chukji_chrom, inside_st, inside_nd)): # sub-200k inversion delete
+                    not_using_nclose_node.add((s, e))
+            else:
+                type1_nclose_node.append((s, e))
+
+    saved_not_using_nclose_node = set()
+
+    for nunclose in not_using_nclose_node:
+        chrom = contig_data[nunclose[0]][CHR_NAM]
+        for t1nn in type1_nclose_node:
+            if contig_data[t1nn[0]][CHR_NAM] != chrom and contig_data[t1nn[1]][CHR_NAM] != chrom:
+                continue
+            type2_contig_front = contig_data[nunclose[0]]
+            type2_contig_back = contig_data[nunclose[1]]
+            if contig_data[t1nn[0]][CHR_NAM] == chrom:
+                template_contig = contig_data[t1nn[0]]
+                if template_contig[CTG_DIR] == '+':
+                    dist = distance_checker(type2_contig_back, template_contig)
+                    if (type2_contig_back[CHR_END] < template_contig[CHR_STR] and dist < TYPE2_CONTIG_MINIMUM_LENGTH) or dist == 0:
+                        saved_not_using_nclose_node.add(nunclose)
+                else:
+                    dist = distance_checker(type2_contig_front, template_contig)
+                    if (type2_contig_front[CHR_END] > template_contig[CHR_STR] and dist < TYPE2_CONTIG_MINIMUM_LENGTH) or dist == 0:
+                        saved_not_using_nclose_node.add(nunclose)
+            elif contig_data[t1nn[1]][CHR_NAM] == chrom:
+                template_contig = contig_data[t1nn[1]]  
+                if template_contig[CTG_DIR] == '+':
+                    dist = distance_checker(type2_contig_front, template_contig)
+                    if (type2_contig_front[CHR_STR] > template_contig[CHR_END] and dist < TYPE2_CONTIG_MINIMUM_LENGTH) or dist == 0:
+                        saved_not_using_nclose_node.add(nunclose)
+                else:
+                    dist = distance_checker(type2_contig_back, template_contig)
+                    if (type2_contig_back[CHR_STR] < template_contig[CHR_END] and dist < TYPE2_CONTIG_MINIMUM_LENGTH) or dist == 0:
+                        saved_not_using_nclose_node.add(nunclose)
 
     virtual_ordinary_contig = make_virtual_ord_ctg(contig_data, vctg_dict)
     with open(f"{PREFIX}/virtual_ordinary_contig.txt", "wt") as f:
@@ -3395,12 +3438,20 @@ def nclose_calc():
                         ed_compress[pair[1]] = ctg1_idx
                     else:
                         ed_compress[pair[0]] = ctg1_idx
-
-    transloc_nclose_pair_count = 0
+      
+    final_nclose_nodes = defaultdict(list)
+    for i in nclose_nodes:
+        for j in nclose_nodes[i]:
+            if j not in not_using_nclose_node or j in saved_not_using_nclose_node:
+                final_nclose_nodes[i].append(j)
+    
+    nclose_nodes = final_nclose_nodes
+    
+    transloc_nclose_pair_count = 0  
     with open(f"{PREFIX}/compressed_nclose_nodes_list.txt", "wt") as f:
         for i in nclose_type:
             print(f"{i[0]}, {i[1]}, {len(nclose_type[i])}", file=f)
-            if i[0] != i[1]:
+            if i[0] != i[1]: 
                 transloc_nclose_pair_count += len(nclose_type[i])
 
             st_flag = False
@@ -3420,10 +3471,12 @@ def nclose_calc():
                 is_for = pair[0] < pair[1]
                 list_a = [contig_a[CTG_NAM], get_corr_dir(is_for, contig_a[CTG_DIR]), contig_a[CHR_STR], contig_a[CHR_END]]
                 list_b = [contig_b[CTG_NAM], get_corr_dir(is_for, contig_b[CTG_DIR]), contig_b[CHR_STR], contig_b[CHR_END]]
-                if contig_a[CTG_NAM] in rpt_con:
-                    print(list_a, list_b, "all_repeat", file=f)
-                else:
-                    print(list_a, list_b, file=f)
+                original_nclose = tuple(sorted(pair))
+                if original_nclose not in not_using_nclose_node or original_nclose in saved_not_using_nclose_node:
+                    if contig_a[CTG_NAM] in rpt_con:
+                        print(list_a, list_b, "all_repeat", file=f)
+                    else:
+                        print(list_a, list_b, file=f)
             print("", file=f)
 
     nclose_cord_list = []
