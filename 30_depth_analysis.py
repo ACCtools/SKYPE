@@ -248,24 +248,6 @@ def line_track_circos_color(
             line.set_clip_path(clip_patch)
     line_track._plot_funcs.append(plot_fill_between)
 
-def highpass_filter(data, cutoff, fs, order=3):
-    """
-    Butterworth high-pass filter를 이용하여 저주파 성분을 제거합니다.
-    
-    Parameters:
-    - data: 1D array, 입력 신호 (CN 값)
-    - cutoff: float, 컷오프 주파수
-    - fs: float, 샘플링 주파수 (데이터 포인트 간 간격)
-    - order: int, 필터 차수
-    
-    Returns:
-    - 필터링된 신호 (노이즈 성분 추출)
-    """
-    nyq = 0.5 * fs  # Nyquist 주파수
-    normal_cutoff = cutoff / nyq
-    b, a = butter(order, normal_cutoff, btype='high', analog=False)
-    return filtfilt(b, a, data)
-
 def find_chr_len(file_path : str) -> dict:
     chr_data_file = open(file_path, "r")
     chr_len = {}
@@ -339,6 +321,24 @@ def extract_telomere_connect_contig(telo_info_path : str) -> list:
             telomere_connect_contig.append((chr_info, contig_id[1]))
     
     return telomere_connect_contig
+
+def highpass_filter(data, cutoff, fs, order=3):
+    """
+    Butterworth high-pass filter를 이용하여 저주파 성분을 제거합니다.
+    
+    Parameters:
+    - data: 1D array, 입력 신호 (CN 값)
+    - cutoff: float, 컷오프 주파수
+    - fs: float, 샘플링 주파수 (데이터 포인트 간 간격)
+    - order: int, 필터 차수
+    
+    Returns:
+    - 필터링된 신호 (노이즈 성분 추출)
+    """
+    nyq = 0.5 * fs  # Nyquist 주파수
+    normal_cutoff = cutoff / nyq
+    b, a = butter(order, normal_cutoff, btype='high', analog=False)
+    return filtfilt(b, a, data)
 
 def rebin_dataframe(df: pd.DataFrame, n: int) -> pd.DataFrame:
     """
@@ -626,8 +626,6 @@ logging.info("Forming result images...")
 
 with open(f'{PREFIX}/depth_weight.pkl', 'wb') as f:
     pkl.dump((tot_loc_list, weights), f)
-
-# Calculate noise
 
 grouped_data = defaultdict(lambda: {"positions": [], "values": []})
 for i, (chrom, pos) in enumerate(chr_filt_st_list + chr_no_filt_st_list):

@@ -74,6 +74,7 @@ TYPE2_FLANKING_LENGTH = 500 * K
 TYPE2_SIM_COMPARE_RAITO = 1.5
 TYPE34_BREAK_CHUKJI_LIMIT = 1*M
 CHUKJI_FAIL_TYPE2_RESCUE_THRESHOLD = 2*K
+CIRCUIT_ECDNA_LENGTH_LIMIT = 40*M
 
 NCLOSE_SIM_COMPARE_RAITO = 1.2
 NCLOSE_SIM_DIFF_THRESHOLD = 5
@@ -2794,6 +2795,147 @@ def initialize_bnd_graph(contig_data : list, nclose_nodes : dict, telo_contig : 
 
     return bnd_adjacency
 
+def initialize_inversion_only_graph(contig_data : list, nclose_nodes_original : dict) -> dict:
+    contig_data_size = len(contig_data)
+    chr_corr = {}
+    chr_rev_corr = {}
+    contig_data_size = len(contig_data)
+    for i in range(1, CHROMOSOME_COUNT):
+        chr_corr['chr'+str(i)+'f'] = contig_data_size + i - 1
+        chr_rev_corr[contig_data_size + i - 1] = 'chr'+str(i)+'f'
+    chr_corr['chrXf'] = contig_data_size + CHROMOSOME_COUNT - 1
+    chr_corr['chrYf'] = contig_data_size + CHROMOSOME_COUNT - 1
+    chr_rev_corr[contig_data_size + CHROMOSOME_COUNT - 1] = 'chrXf'
+    for i in range(1, CHROMOSOME_COUNT):
+        chr_corr['chr'+str(i)+'b'] = contig_data_size + CHROMOSOME_COUNT + i - 1
+        chr_rev_corr[contig_data_size + CHROMOSOME_COUNT + i - 1] = 'chr'+str(i)+'b'
+    chr_corr['chrXb'] = contig_data_size + 2*CHROMOSOME_COUNT - 1
+    chr_corr['chrYb'] = contig_data_size + 2*CHROMOSOME_COUNT - 1
+    chr_rev_corr[contig_data_size + 2*CHROMOSOME_COUNT - 1] = 'chrXb'
+    bnd_adjacency = defaultdict(list)
+
+    nclose_nodes = defaultdict(list)
+
+    for j in nclose_nodes_original:
+        for i in nclose_nodes_original[j]:
+            if contig_data[i[0]][CHR_NAM] == contig_data[i[1]][CHR_NAM]:
+                nclose_nodes[j].append(i)
+
+    for j in nclose_nodes:
+        for i in nclose_nodes[j]:
+            bnd_adjacency[(DIR_FOR, i[0])].append([DIR_FOR, i[1]])
+            bnd_adjacency[(DIR_BAK, i[1])].append([DIR_BAK, i[0]])
+            if len(i)==4:
+                bnd_adjacency[(DIR_FOR, i[2])].append([DIR_FOR, i[3]])
+                bnd_adjacency[(DIR_BAK, i[3])].append([DIR_BAK, i[2]])
+    nclose_nodes_key = list(nclose_nodes.keys())
+    key_len = len(nclose_nodes)
+    # nclose nodes connection.
+    for i1 in range(key_len):
+        for i2 in range(i1+1, key_len):
+            for n1 in nclose_nodes[nclose_nodes_key[i1]]:
+                for n2 in nclose_nodes[nclose_nodes_key[i2]]:
+                    n1_len = len(n1)
+                    assert(n1_len==2)
+                    n2_len = len(n2)
+                    assert(n2_len==2)
+                    for i in range(n1_len):
+                        for j in range(n2_len):
+                            if contig_data[n1[i]][CHR_NAM]==contig_data[n2[j]][CHR_NAM]:
+                                contig_i = contig_data[n1[i]]
+                                contig_j = contig_data[n2[j]]
+                                i_ind = 'b' if i%2 else 'f'
+                                j_ind = 'b' if j%2 else 'f'
+                                i_ind += contig_i[CTG_DIR]
+                                j_ind += contig_j[CTG_DIR]
+                                i_str = contig_i[CHR_STR]
+                                j_str = contig_j[CHR_STR]
+                                i_end = contig_i[CHR_END]
+                                j_end = contig_j[CHR_END]
+                                is_overlap = distance_checker(contig_i, contig_j)==0
+                                if i_ind == 'f+':
+                                    if j_ind == 'f-':
+                                        if i_str > j_str or is_overlap:
+                                            bnd_adjacency[(DIR_BAK, n1[i])].append([DIR_FOR, n2[j]])
+                                            bnd_adjacency[(DIR_BAK, n2[j])].append([DIR_FOR, n1[i]])
+                                    elif j_ind == 'b+':
+                                        if i_str > j_end or is_overlap:
+                                            bnd_adjacency[(DIR_FOR, n2[j])].append([DIR_FOR, n1[i]])
+                                            bnd_adjacency[(DIR_BAK, n1[i])].append([DIR_BAK, n2[j]])
+                                elif i_ind == 'b+':
+                                    if j_ind == 'b-':
+                                        if j_end > i_end or is_overlap:
+                                            bnd_adjacency[(DIR_FOR, n1[i])].append([DIR_BAK, n2[j]])
+                                            bnd_adjacency[(DIR_FOR, n2[j])].append([DIR_BAK, n1[i]])
+                                    elif j_ind == 'f+':
+                                        if j_str > i_end or is_overlap:
+                                            bnd_adjacency[(DIR_BAK, n2[j])].append([DIR_BAK, n1[i]])
+                                            bnd_adjacency[(DIR_FOR, n1[i])].append([DIR_FOR, n2[j]])
+                                elif i_ind == 'f-':
+                                    if j_ind == 'f+':
+                                        if j_str > i_str or is_overlap:
+                                            bnd_adjacency[(DIR_BAK, n1[i])].append([DIR_FOR, n2[j]])
+                                            bnd_adjacency[(DIR_BAK, n2[j])].append([DIR_FOR, n1[i]])
+                                    elif j_ind == 'b-':
+                                        if j_end > i_str or is_overlap:
+                                            bnd_adjacency[(DIR_FOR, n2[j])].append([DIR_FOR, n1[i]])
+                                            bnd_adjacency[(DIR_BAK, n1[i])].append([DIR_BAK, n2[j]])
+                                elif i_ind == 'b-':
+                                    if j_ind == 'b+':
+                                        if i_end > j_end or is_overlap:
+                                            bnd_adjacency[(DIR_FOR, n1[i])].append([DIR_BAK, n2[j]])
+                                            bnd_adjacency[(DIR_FOR, n2[j])].append([DIR_BAK, n1[i]])
+                                    elif j_ind == 'f-':
+                                        if i_end > j_str or is_overlap:
+                                            bnd_adjacency[(DIR_BAK, n2[j])].append([DIR_BAK, n1[i]])
+                                            bnd_adjacency[(DIR_FOR, n1[i])].append([DIR_FOR, n2[j]])
+
+    return bnd_adjacency
+
+
+def make_inversion_nx_graph(bnd_graph_adjacency):
+    G = nx.DiGraph()
+    for i in bnd_graph_adjacency:
+        G.add_node(i)
+    for node in bnd_graph_adjacency:
+        for edge in bnd_graph_adjacency[node]:
+            if type(edge)==str:
+                G.add_weighted_edges_from([(tuple(node), edge, 0)])
+            elif type(node)==str:
+                G.add_weighted_edges_from([(node, tuple(edge), 0)])
+            else:
+                d = 0
+                contig_s = contig_data[node[1]]
+                contig_e = contig_data[edge[1]]
+                if contig_s[CTG_NAM] == contig_e[CTG_NAM]:
+                    if node[1] < edge[1]:
+                        d = 0
+                        for i in range(node[1]+1, edge[1]):
+                            d += contig_data[i][CHR_END] - contig_data[i][CHR_STR]
+                    else:
+                        d = 0
+                        for i in range(edge[1]+1, node[1]):
+                            d += contig_data[i][CHR_END] - contig_data[i][CHR_STR]
+                            
+                else:
+                    ds = contig_s[CHR_END] - contig_s[CHR_STR]
+                    de = contig_e[CHR_END] - contig_e[CHR_STR]
+                    if distance_checker(contig_s, contig_e)==0:
+                        d = ds + de - overlap_calculator(contig_s, contig_e)
+                    else:  
+                        d = distance_checker(contig_s, contig_e) + ds + de 
+                G.add_weighted_edges_from([(tuple(node), tuple(edge), d)])
+    return G
+
+def circuit_length_calculator(circuit):
+    circuit_len = 0
+    for i in range(len(circuit)):
+        curr_node = circuit[i]
+        next_node = circuit[i+1] if i+1 < len(circuit) else circuit[0]
+        circuit_len += abs(contig_data[curr_node][CHR_END] - contig_data[curr_node][CHR_STR])
+        circuit_len += abs(contig_data[curr_node][CHR_END] - contig_data[next_node][CHR_STR])
+    return circuit_len
+
 def contig_preprocessing_00(PAF_FILE_PATH_ : list):
 
     original_node_count = 0
@@ -3318,6 +3460,7 @@ def nclose_calc():
                 type1_nclose_node.append((s, e))
 
     saved_not_using_nclose_node = set()
+    conjoined_nclose_node_set = set()
 
     for nunclose in not_using_nclose_node:
         chrom = contig_data[nunclose[0]][CHR_NAM]
@@ -3332,20 +3475,28 @@ def nclose_calc():
                     dist = distance_checker(type2_contig_back, template_contig)
                     if (type2_contig_back[CHR_END] < template_contig[CHR_STR] and dist < TYPE2_CONTIG_MINIMUM_LENGTH) or dist == 0:
                         saved_not_using_nclose_node.add(nunclose)
+                        conjoined_nclose_node_set.add((t1nn[0], nunclose[1]))
                 else:
                     dist = distance_checker(type2_contig_front, template_contig)
                     if (type2_contig_front[CHR_END] > template_contig[CHR_STR] and dist < TYPE2_CONTIG_MINIMUM_LENGTH) or dist == 0:
                         saved_not_using_nclose_node.add(nunclose)
+                        conjoined_nclose_node_set.add((t1nn[0], nunclose[0]))
             elif contig_data[t1nn[1]][CHR_NAM] == chrom:
                 template_contig = contig_data[t1nn[1]]  
                 if template_contig[CTG_DIR] == '+':
                     dist = distance_checker(type2_contig_front, template_contig)
                     if (type2_contig_front[CHR_STR] > template_contig[CHR_END] and dist < TYPE2_CONTIG_MINIMUM_LENGTH) or dist == 0:
                         saved_not_using_nclose_node.add(nunclose)
+                        conjoined_nclose_node_set.add((t1nn[1], nunclose[0]))
                 else:
                     dist = distance_checker(type2_contig_back, template_contig)
                     if (type2_contig_back[CHR_STR] < template_contig[CHR_END] and dist < TYPE2_CONTIG_MINIMUM_LENGTH) or dist == 0:
                         saved_not_using_nclose_node.add(nunclose)
+                        conjoined_nclose_node_set.add((t1nn[1], nunclose[1]))
+
+    for conjoined_nclose in conjoined_nclose_node_set:
+        pass
+        # do something
 
     virtual_ordinary_contig = make_virtual_ord_ctg(contig_data, vctg_dict)
     with open(f"{PREFIX}/virtual_ordinary_contig.txt", "wt") as f:
@@ -3494,7 +3645,7 @@ def nclose_calc():
             e = i[1]
 
             # Ignore inversion
-            if contig_data[s][CTG_TYP] != 2:
+            if contig_data[s][CHR_NAM] != contig_data[e][CHR_NAM]:
                 curr_nclose_cord_list = []
                 dir_data = defaultdict(dict)
                 nclose_cord_list_contig_name = []
@@ -3736,11 +3887,6 @@ if nclose_node_count > FAIL_NCLOSE_COUNT:
             sys.exit(1)
 
 bnd_graph_adjacency = initialize_bnd_graph(contig_data, nclose_nodes, telo_contig)
-
-with open(f"{PREFIX}/bnd_only_graph.txt", "wt") as f: 
-    for i in bnd_graph_adjacency:
-        print(i, bnd_graph_adjacency[i], file=f)
-
 
 save_loc = PREFIX + '/00_raw'
 logging.info("Now saving results in folder : " + PREFIX)
@@ -4219,6 +4365,31 @@ def run_graph_pipeline():
 
             idx += 1
     return last_success
+
+
+inversion_adjacency = initialize_inversion_only_graph(contig_data, nclose_nodes)
+
+inversion_graph = nx2gt(make_inversion_nx_graph(inversion_adjacency))\
+
+ecdna_circuit_candidate_set = set()
+
+for circuit in gt.all_circuits(inversion_graph):
+    if len(circuit) == 4:
+        circuit_node_list = []
+        for idx in circuit:
+            v = inversion_graph.vertex(idx)
+            node = int(inversion_graph.vp['id'][v][1:-1].split(", ")[-1])
+            circuit_node_list.append(node)
+        ecdna_circuit_candidate_set.add(tuple(sorted(circuit_node_list)))
+
+ecdna_circuit_set = set()
+
+for circuit in ecdna_circuit_candidate_set:
+    if circuit_length_calculator(circuit) < CIRCUIT_ECDNA_LENGTH_LIMIT:
+        ecdna_circuit_set.add(circuit)
+
+# Todo : transform into vcf format
+ecdna_circuit_set
 
 last_success = run_graph_pipeline()
 if not last_success:

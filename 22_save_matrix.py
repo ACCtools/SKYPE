@@ -12,8 +12,11 @@ import itertools
 import collections
 import glob
 
+from collections import defaultdict
+
 from tqdm import tqdm
 from scipy.optimize import nnls
+from scipy.signal import butter, filtfilt
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
 logging.basicConfig(
@@ -42,8 +45,10 @@ CTG_TELDIR = 14
 CTG_TELCON = 15
 CTG_RPTCHR = 16
 CTG_RPTCASE = 17
-CTG_MAINFLOWDIR = 18
-CTG_MAINFLOWCHR = 19
+CTG_CENSAT = 18
+CTG_MAINFLOWDIR = 19
+CTG_MAINFLOWCHR = 20
+CTG_GLOBALIDX = 21
 
 DEFAULT_NCLOSE_WEIGHT = 0.1
 
@@ -55,6 +60,24 @@ MAX_PATH_CNT = 100
 CHROMOSOME_COUNT = 23
 DIR_FOR = 1
 TELOMERE_EXPANSION = 5 * K
+
+def highpass_filter(data, cutoff, fs, order=3):
+    """
+    Butterworth high-pass filter를 이용하여 저주파 성분을 제거합니다.
+    
+    Parameters:
+    - data: 1D array, 입력 신호 (CN 값)
+    - cutoff: float, 컷오프 주파수
+    - fs: float, 샘플링 주파수 (데이터 포인트 간 간격)
+    - order: int, 필터 차수
+    
+    Returns:
+    - 필터링된 신호 (노이즈 성분 추출)
+    """
+    nyq = 0.5 * fs  # Nyquist 주파수
+    normal_cutoff = cutoff / nyq
+    b, a = butter(order, normal_cutoff, btype='high', analog=False)
+    return filtfilt(b, a, data)
 
 def import_index_path(file_path : str) -> list:
     file_path_list = file_path.split('/')
@@ -69,6 +92,14 @@ def import_index_cnt(file_path : str) -> list:
     cnt = int(file_path_list[-1].split('.')[0]) - 1
 
     return path_list_dict[key][cnt][1]
+
+def extract_nclose_node(nclose_path: str) -> list:
+    nclose_list = []
+    with open(nclose_path, "r") as f:
+        for line in f:
+            line = line.split()
+            nclose_list.append((int(line[1]), int(line[2])))
+    return nclose_list
 
 def extract_groups(lst):
     if not lst:
@@ -345,7 +376,7 @@ parser.add_argument("--progress",
 
 args = parser.parse_args()
 
-# t = "22_save_matrix.py public_data/chm13v2.0_censat_v2.1.m.bed /Data/hyunwoo/00_skype_run_data/Caki-1/20_alignasm/Caki-1.ctg.aln.paf.ppc.paf /Data/hyunwoo/00_skype_run_data/Caki-1/01_depth/Caki-1.win.stat.gz public_data/chm13v2.0_telomere.bed public_data/chm13v2.0.fa.fai public_data/chm13v2.0_cytobands_allchrs.bed 30_skype_pipe/Caki-1_01_17_11 -t 64"
+# t = "22_save_matrix.py public_data/chm13v2.0_censat_v2.1.m.bed /Data/hyunwoo/00_skype_run_data/Caki-1/20_alignasm/Caki-1.ctg.aln.paf.ppc.paf /Data/hyunwoo/00_skype_run_data/Caki-1/01_depth/Caki-1.win.stat.gz public_data/chm13v2.0_telomere.bed public_data/chm13v2.0.fa.fai public_data/chm13v2.0_cytobands_allchrs.bed 30_skype_pipe/Caki-1_00_08_07 -t 64"
 # args = parser.parse_args(t.split()[1:])
 
 bed_data = import_bed(args.censat_bed_path)
@@ -361,21 +392,37 @@ RATIO_OUTLIER_FOLDER = f"{PREFIX}/11_ref_ratio_outliers/"
 front_contig_path = RATIO_OUTLIER_FOLDER + "front_jump/"
 back_contig_path = RATIO_OUTLIER_FOLDER + "back_jump/"
 TELO_CONNECT_NODES_INFO_PATH = PREFIX + "/telomere_connected_list.txt"
+NCLOSE_FILE_PATH = f"{PREFIX}/nclose_nodes_index.txt"
 
 NCLOSE_WEIGHT = args.nclose_weight
 NCLOSE_WEIGHT_USE = args.not_use_nclose_weight
 
+df = pd.read_csv(main_stat_loc, compression='gzip', comment='#', sep='\t',
+                 names=['chr', 'st', 'nd', 'length', 'covsite', 'totaldepth', 'cov', 'meandepth'])
+df = df.query('chr != "chrM"')
+
 contig_data = import_data2(PREPROCESSED_PAF_FILE_PATH)
 telo_connected_node = extract_telomere_connect_contig(TELO_CONNECT_NODES_INFO_PATH)
+nclose_nodes = extract_nclose_node(NCLOSE_FILE_PATH)
 
 with open(f'{PREFIX}/path_data.pkl', 'rb') as f:
     path_list_dict = pkl.load(f)
 
-with open(f'{PREFIX}/nclose2cov.pkl', 'rb') as f:
-    nclose2cov = pkl.load(f)
 
-if len(nclose2cov) == 0:
-    NCLOSE_WEIGHT_USE = False
+if NCLOSE_WEIGHT_USE:
+    try:
+        with open(f'{PREFIX}/nclose2cov.pkl', 'rb') as f:
+            nclose2cov = pkl.load(f)
+    except:
+        nclose2cov = {}
+
+    if len(nclose2cov) == 0:
+        NCLOSE_WEIGHT_USE = False
+else:
+    nclose2cov = {}
+
+nclose_path = f"{PREFIX}/nclose_nodes_index.txt"
+nclose_set = extract_nclose_node(nclose_path)
 
 ncm = 0
 nclose2int = dict()
@@ -477,10 +524,6 @@ for (chrf, chrfid), (chrb, chrbid) in default_path_list:
     tar_def_path_list.append(tar_final_path_loc)
 
 tar_def_path_set = set(tar_def_path_list)
-
-df = pd.read_csv(main_stat_loc, compression='gzip', comment='#', sep='\t',
-                 names=['chr', 'st', 'nd', 'length', 'covsite', 'totaldepth', 'cov', 'meandepth'])
-df = df.query('chr != "chrM"')
 
 ydf = df.query('chr == "chrY"')
 chry_nz_len = len(ydf.query('meandepth != 0'))
@@ -609,6 +652,37 @@ if NCLOSE_WEIGHT_USE:
     B_nclose *= norm_nclose_weight
     logging.info(f"Nclose norm weight : {norm_nclose_weight}")
 
+grouped_data = defaultdict(lambda: {"positions": [], "values": []})
+for i, (chrom, pos) in enumerate(chr_filt_st_list + chr_no_filt_st_list):
+    grouped_data[chrom]["positions"].append(pos)
+    grouped_data[chrom]["values"].append(B[i])
+
+# 필터링 파라미터 (데이터 특성에 따라 조정)
+cutoff_frequency = 0.1  # 컷오프 주파수 (예시 값)
+fs = 1.0                 # 샘플링 주파수 (데이터 포인트 간 간격이 1이라고 가정)
+order = 3                # 필터 차수
+
+# 각 염색체별로 필터링 수행
+filtered_values_list = []
+for chrom, data in grouped_data.items():
+    positions = np.array(data["positions"])
+    values = np.array(data["values"])
+    
+    # 만약 위치가 정렬되어 있지 않다면 정렬 (예시에서는 이미 정렬된 상태)
+    sort_idx = np.argsort(positions)
+    positions = positions[sort_idx]
+    values = values[sort_idx]
+    
+    # 고주파 필터 적용: 기본 CN 트렌드를 제거하여 노이즈 성분 추출
+    filtered_values = highpass_filter(values, cutoff=cutoff_frequency, fs=fs, order=order)
+
+    filtered_values_list.append(filtered_values)
+
+noise_array = np.hstack(filtered_values_list)
+amplitude = np.std(noise_array)
+
+print(amplitude/meandepth)
+
 with open(f'{PREFIX}/contig_pat_vec_data.pkl', 'rb') as f:
     paf_ans_list, key_list, int2key, dep_list = pkl.load(f)
 
@@ -642,14 +716,22 @@ tmp_v = np.zeros(m, dtype=np.float32)
 
 tar_def_path_ind_dict = {}
 ncnt = 0
+path_nclose_dict_set = defaultdict(set)
 for path, key_int_list in tqdm(paf_ans_list, desc='Recover depth from separated paths',
                               disable=not sys.stdout.isatty() and not args.progress):
     ki = key_int_list[0]
     np.copyto(tmp_v, vec_dict[ki])
     for ki in key_int_list[1:]:
         tmp_v += vec_dict[ki]
-
-    # Handle nclose weights if used
+    idx_path = import_index_path(path)
+    s = 1
+    while s < len(idx_path)-2:
+        nclose_cand = tuple(sorted([idx_path[s][1], idx_path[s+1][1]]))
+        if nclose_cand in nclose_set:
+            path_nclose_dict_set[ncnt].add(nclose_cand)
+            s+=2
+        else:
+            s+=1
     if NCLOSE_WEIGHT_USE:
         tmp_n.fill(0)
         idx_edge_nclose_list = [pair[1] for pair in import_index_path(path)[1:-1]]
@@ -691,6 +773,7 @@ for i in tqdm(range(1, fclen // 4 + 1), desc='Parse coverage from forward-direct
         A[:ncm, ncnt] = tmp_n
 
     A[ncm:, ncnt] = ov - bv
+    path_nclose_dict_set[ncnt] = set()
     ncnt += 1
 
 init_cols = [tar_def_path_ind_dict[i] for i in tar_chr_data.values()]
@@ -712,6 +795,7 @@ for i in tqdm(range(1, bclen // 4 + 1), desc='Parse coverage from backward-direc
         A[:ncm, ncnt] = tmp_n
 
     A[ncm:, ncnt] = ov + bv
+    path_nclose_dict_set[ncnt] = set()
     ncnt += 1
 
 B = np.hstack((B_nclose, B))
@@ -738,4 +822,4 @@ with h5py.File(f'{PREFIX}/matrix.h5', 'w') as hf:
     hf.create_dataset('B_depth_start', data=ncm)
 
 with open(f"{PREFIX}/23_input.pkl", "wb") as f:
-    pkl.dump((dep_list, init_cols, w_pri), f)
+    pkl.dump((path_nclose_dict_set, amplitude), f)
