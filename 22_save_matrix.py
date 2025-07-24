@@ -681,8 +681,6 @@ for chrom, data in grouped_data.items():
 noise_array = np.hstack(filtered_values_list)
 amplitude = np.std(noise_array)
 
-print(amplitude/meandepth)
-
 with open(f'{PREFIX}/contig_pat_vec_data.pkl', 'rb') as f:
     paf_ans_list, key_list, int2key, dep_list = pkl.load(f)
 
@@ -823,4 +821,4 @@ with h5py.File(f'{PREFIX}/matrix.h5', 'w') as hf:
     hf.create_dataset('B_depth_start', data=ncm)
 
 with open(f"{PREFIX}/23_input.pkl", "wb") as f:
-    pkl.dump((path_nclose_dict_set, amplitude), f)
+    pkl.dump((chr_filt_st_list, path_nclose_dict_set, amplitude), f)

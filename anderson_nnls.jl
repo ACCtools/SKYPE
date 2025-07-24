@@ -55,7 +55,7 @@ end
 """
 Compute the gradient for a single coordinate j.
 """
-function gradient_scalar(
+@inline function gradient_scalar(
     df::QuadraticDatafit{T},
     X::AbstractMatrix{T},
     Xw::AbstractVector{T},
@@ -63,7 +63,7 @@ function gradient_scalar(
 ) where T <: AbstractFloat
     n_samples = size(X, 1)
     # Use view to avoid allocating a new vector for X[:, j]
-    return (dot(view(X, :, j), Xw) - df.Xty[j]) / n_samples
+    return (dot(view(X, :, j), Xw) .- df.Xty[j]) ./ n_samples
 end
 
 
@@ -218,7 +218,7 @@ function extrapolate(
     # Solve linear system to find extrapolation coefficients
     try
         # U'U \ ones(K) is equivalent to solving (U'U)c = ones(K)
-        inv_UTU_ones = U' * U \ ones(T, accel.K)
+        inv_UTU_ones = matmul(U', U) \ ones(T, accel.K)
         C = inv_UTU_ones / sum(inv_UTU_ones)
 
         # Extrapolate and reset for next time
@@ -273,11 +273,9 @@ function construct_grad(
     datafit::AbstractDatafit,
     ws::AbstractVector{Int}
 ) where T <: AbstractFloat
-    grad = zeros(T, length(ws))
-    for (idx, j) in enumerate(ws)
-        grad[idx] = gradient_scalar(datafit, X, Xw, j)
-    end
-    return grad
+    n_samples = size(X, 1)
+    
+    return (matmul(view(X, :, ws)', Xw) .- datafit.Xty[ws]) ./ n_samples
 end
 
 """
@@ -470,8 +468,8 @@ function nnls_solve_partial(X::AbstractMatrix{T}, y::AbstractVector{T},
         verbose=verbose
     )
 
-    w_sol, _, stop_crit = solve(view(X, :, idx), y, datafit, penalty, options)
-    predict_suc_B = view(X, :, idx) * w_sol
+    w_sol, _, stop_crit = solve(view(X, :, idx .+ 1), y, datafit, penalty, options)
+    predict_suc_B = view(X, :, idx .+ 1) * w_sol
     
     return w_sol, predict_suc_B
 end

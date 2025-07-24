@@ -14,6 +14,7 @@ import collections
 import scipy.stats
 import glob
 
+
 from scipy.signal import butter, filtfilt
 from pycirclize import Circos
 from matplotlib.lines import Line2D
@@ -64,6 +65,47 @@ MAX_PATH_CNT = 100
 CHROMOSOME_COUNT = 23
 DIR_FOR = 1
 TELOMERE_EXPANSION = 5 * K
+
+CONJOINED_CONTIG_MINIMUM_LENGTH = 200*K
+SIMILAR_DEPTH_NCLOSE_RATIO = 0.2
+
+TYPE2_FLANKING_LENGTH = 5*M
+TYPE2_SIM_COMPARE_RAITO = 1.5
+TYPE34_BREAK_CHUKJI_LIMIT = 1*M
+
+NCLOSE_SIM_COMPARE_RAITO = 1.2
+NCLOSE_SIM_DIFF_THRESHOLD = 5
+
+def similar_check(v1, v2, ratio=TYPE2_SIM_COMPARE_RAITO):
+    try:
+        assert(v1 >= 0 and v2 >= 0)
+    except:
+        logging.error(f"Invalid values for similarity check: v1={v1}, v2={v2}")
+        assert(False)
+    mi, ma = sorted([v1, v2])
+    return False if mi == 0 else (ma / mi <= ratio) or ma-mi < NCLOSE_SIM_DIFF_THRESHOLD
+
+def check_near_bnd(chrom, inside_st, inside_nd):
+    # subset of df for the given chromosome
+    df_chr = df[df['chr'] == chrom]
+
+    def mean_depth(start, end):
+        """Return mean meandepth over windows overlapping [start, end)."""
+        mask = (df_chr['nd'] > start) & (df_chr['st'] < end)
+        return df_chr.loc[mask, 'meandepth'].mean()
+
+    # for inside_st
+    st_depth = mean_depth(inside_st - TYPE2_FLANKING_LENGTH, inside_st)
+    nd_depth = mean_depth(inside_nd, inside_nd + TYPE2_FLANKING_LENGTH)
+    if (chrom, inside_st, inside_nd) == ('chr1', 145173190, 145173190):
+        print(st_depth, nd_depth)
+        print(not similar_check(st_depth, nd_depth))
+    if np.isnan(st_depth) or np.isnan(nd_depth):
+        return True
+
+    # print(chrom, inside_st, inside_nd, not similar_check(st_depth, nd_depth))
+    return not similar_check(st_depth, nd_depth, NCLOSE_SIM_COMPARE_RAITO)
+
 
 def import_index_path(file_path : str) -> list:
     file_path_list = file_path.split('/')
@@ -298,6 +340,12 @@ def import_telo_data(file_path : str, chr_len : dict) -> dict :
     return telo_data[1:]
 
 def distance_checker(node_a : tuple, node_b : tuple) -> int :
+    if max(int(node_a[CHR_STR]), int(node_b[CHR_STR])) < min(int(node_a[CHR_END]), int(node_b[CHR_END])):
+        return 0   
+    else:
+        return min(abs(int(node_b[CHR_STR]) - int(node_a[CHR_END])), abs(int(node_b[CHR_END]) - int(node_a[CHR_STR])))
+
+def distance_checker_tuple(node_a : tuple, node_b : tuple) -> int :
     if max(int(node_a[0]), int(node_b[0])) < min(int(node_a[1]), int(node_b[1])):
         return 0   
     else:
@@ -445,6 +493,81 @@ def inclusive_checker(tuple_a : tuple, tuple_b : tuple) -> bool :
         return True
     else:
         return False
+    
+def write_vcf_header(fh, contig_lengths):
+    fh.write("##fileformat=VCFv4.3\n")
+    fh.write('##ALT=<ID=BND,Description="Breakend">\n')
+    fh.write('##ALT=<ID=INV,Description="Inversion">\n')
+    fh.write('##INFO=<ID=SVTYPE,Number=1,Type=String,Description="Type of structural variant">\n')
+    fh.write('##INFO=<ID=END,Number=1,Type=Integer,Description="End position of SV">\n')
+    fh.write('##INFO=<ID=MATEID,Number=1,Type=String,Description="ID of mate breakend">\n')
+    for chrom, length in contig_lengths.items():
+        fh.write(f"##contig=<ID={chrom},length={length}>\n")
+    fh.write("#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n")
+
+def pairs_to_vcf(pairs, contig_data, contig_lengths, display_indel, out_vcf_path):
+    tr_counter = 1
+    inv_counter = 1
+
+    with open(out_vcf_path, 'w') as fo:
+        # 1) 헤더 쓰기
+        write_vcf_header(fo, contig_lengths)
+
+        # 2) Translocation, Inversion 처리
+        for a_idx, b_idx in pairs:
+            a = contig_data[a_idx]
+            b = contig_data[b_idx]
+
+            chr_a, chr_b = a[5], b[5]
+            pos_a = a[8]   # 첫 세그먼트의 reference end
+            pos_b = b[7]   # 두 번째의 reference start
+
+            if chr_a != chr_b:
+                sv_id = f"tr{tr_counter}"
+                tr_counter += 1
+
+                fo.write(
+                    f"{chr_a}\t{pos_a}\t{sv_id}\tN\t"
+                    f"N[{chr_b}:{pos_b}[\t.\t.\t"
+                    f"SVTYPE=BND;MATEID={sv_id}\n"
+                )
+                fo.write(
+                    f"{chr_b}\t{pos_b}\t{sv_id}\tN\t"
+                    f"]{chr_a}:{pos_a}]N\t.\t.\t"
+                    f"SVTYPE=BND;MATEID={sv_id}\n"
+                )
+
+            else:
+                sv_id = f"inv{inv_counter}"
+                inv_counter += 1
+
+                fo.write(
+                    f"{chr_a}\t{pos_a}\t{sv_id}\tN\t<INV>\t.\t.\t"
+                    f"SVTYPE=INV;END={pos_b}\n"
+                )
+
+        # 3) indel 처리
+        indel_counter = 1
+        for chrom, indel_list in display_indel.items():
+            for indel in indel_list:
+                indel_type, start, end, _, _ = indel
+                if indel_type == 'd':
+                    sv_id = f"del{indel_counter}"
+                    svlen = -(end - start)
+                    alt = "<DEL>"
+                elif indel_type == 'i':
+                    sv_id = f"ins{indel_counter}"
+                    svlen = end - start
+                    alt = "<INS>"
+                else:
+                    continue
+
+                indel_counter += 1
+
+                fo.write(
+                    f"{chrom}\t{start}\t{sv_id}\tN\t{alt}\t.\t.\t"
+                    f"SVTYPE={alt[1:-1]};END={end};SVLEN={svlen}\n"
+                )
 
 parser = argparse.ArgumentParser(description="SKYPE depth analysis")
 
@@ -477,7 +600,7 @@ parser.add_argument("--progress",
 
 args = parser.parse_args()
 
-# t = "22_depth_analysis.py public_data/chm13v2.0_censat_v2.1.m.bed 20_acc_pipe/U2OS_telo.p/U2OS_telo.p.aln.paf.ppc.paf 20_acc_pipe/U2OS_telo.p/U2OS_telo.p.aln.paf.ppc.paf.op.graph.txt /home/hyunwoo/51g_cancer_denovo/51_depth_data/U2OS_telo.win.stat.gz public_data/chm13v2.0_telomere.bed public_data/chm13v2.0.fa.fai public_data/chm13v2.0_cytobands_allchrs.bed 30_skype_pipe/U2OS_telo_16_47_00 -t 30 --progress"
+# t = "30_depth_analysis.py public_data/chm13v2.0_censat_v2.1.m.bed /home/hyunwoo/ACCtools-pipeline/90_skype_run/Caki-1/20_alignasm/Caki-1.ctg.aln.paf.ppc.paf /home/hyunwoo/ACCtools-pipeline/90_skype_run/Caki-1/01_depth/Caki-1_normalized.win.stat.gz public_data/chm13v2.0_telomere.bed public_data/chm13v2.0.fa.fai public_data/chm13v2.0_cytobands_allchrs.bed 30_skype_pipe/Caki-1_21_14_23 -t 128"
 
 # args = parser.parse_args(t.split()[1:])
 
@@ -494,6 +617,7 @@ RATIO_OUTLIER_FOLDER = f"{PREFIX}/11_ref_ratio_outliers/"
 front_contig_path = RATIO_OUTLIER_FOLDER+"front_jump/"
 back_contig_path = RATIO_OUTLIER_FOLDER+"back_jump/"
 TELO_CONNECT_NODES_INFO_PATH = PREFIX+"/telomere_connected_list.txt"
+vcf_path = f"{PREFIX}/SV_call_result.vcf"
 
 contig_data = import_data2(PREPROCESSED_PAF_FILE_PATH)
 telo_connected_node = extract_telomere_connect_contig(TELO_CONNECT_NODES_INFO_PATH)
@@ -589,7 +713,7 @@ def get_vec_from_ki(ki):
 with h5py.File(f'{PREFIX}/matrix.h5', 'r') as hf:
     ncm = hf['B_depth_start'][()]
     B = np.hstack([hf['B'][ncm:], hf['B_fail'][:]])
-os.remove(f'{PREFIX}/matrix.h5')
+#os.remove(f'{PREFIX}/matrix.h5')
 
 with open(f'{PREFIX}/contig_pat_vec_data.pkl', 'rb') as f:
     paf_ans_list, key_list, int2key, _ = pkl.load(f)
@@ -780,6 +904,92 @@ for i, ctr in enumerate(path_nclose_usage):
     for j, v in ctr.items():
         nclose_cn[j] += v*weights[i]
 
+conjoined_nclose_node_set = set()
+
+type1_nclose_node =set()
+type2_nclose_node = set()
+
+for nclose in nclose_set:
+    s, e = nclose
+    if contig_data[s][CHR_NAM] != contig_data[e][CHR_NAM]:
+        type1_nclose_node.add(nclose)
+    else:
+        type2_nclose_node.add(nclose)
+
+for i, nclose_a in enumerate(nclose_list):
+    for nclose_b in nclose_list[i+1:]: 
+        if abs(1 - nclose_cn[nclose_dict[nclose_a]]/(nclose_cn[nclose_dict[nclose_b]]+1e-9)) < SIMILAR_DEPTH_NCLOSE_RATIO: # Conjoin only if depth is similar # Todo 03 Similar로 바꾸기
+            flag = True # To check if nclose_a and nclose_b can be conjoined
+            connecting_nclosea_node = -1
+            chrom = None
+            for idx in (0, 1):
+                curr_chrom = contig_data[nclose_a[idx]][CHR_NAM]
+                if contig_data[nclose_b[0]][CHR_NAM] == curr_chrom or contig_data[nclose_b[1]][CHR_NAM] == curr_chrom:
+                    flag = False
+                    if connecting_nclosea_node < 0:
+                        connecting_nclosea_node = idx
+                        chrom = curr_chrom  # chrom : sharing chromosome type
+                    else:
+                        flag = True # Pass if same chromosome component
+            if flag:
+                continue
+            # Only two cases:
+            # 1. nclose_a is type2, nclose_b is type1
+            # 2. nclose_a is type1, nclose_b is type1
+            nclosea_contig_front = contig_data[nclose_a[0]]
+            nclosea_contig_back = contig_data[nclose_a[1]]
+            front_is_connectable = nclosea_contig_front[CHR_NAM] == chrom
+            back_is_connectable = nclosea_contig_back[CHR_NAM] == chrom
+            if contig_data[nclose_b[0]][CHR_NAM] == chrom:
+                template_contig = contig_data[nclose_b[0]]
+                if template_contig[CTG_DIR] == '+':
+                    if nclosea_contig_back[CTG_DIR] == '+' and back_is_connectable:
+                        dist = distance_checker(nclosea_contig_back, template_contig)
+                        if (nclosea_contig_back[CHR_END] < template_contig[CHR_STR] and dist < CONJOINED_CONTIG_MINIMUM_LENGTH) or dist == 0:
+                            conjoined_nclose_node_set.add((nclose_b[1], nclose_a[0]))
+                    elif nclosea_contig_front[CTG_DIR] == '-' and front_is_connectable:
+                        dist = distance_checker(nclosea_contig_front, template_contig)
+                        if (nclosea_contig_front[CHR_END] < template_contig[CHR_STR] and dist < CONJOINED_CONTIG_MINIMUM_LENGTH) or dist == 0:
+                            conjoined_nclose_node_set.add((nclose_b[1], nclose_a[1]))
+                else:
+                    if nclosea_contig_back[CTG_DIR] == '-' and back_is_connectable:
+                        dist = distance_checker(nclosea_contig_back, template_contig)
+                        if (nclosea_contig_back[CHR_STR] > template_contig[CHR_END] and dist < CONJOINED_CONTIG_MINIMUM_LENGTH) or dist == 0:
+                            conjoined_nclose_node_set.add((nclose_b[1], nclose_a[0]))
+                    elif nclosea_contig_front[CTG_DIR] == '+' and front_is_connectable:
+                        dist = distance_checker(nclosea_contig_front, template_contig)
+                        if (nclosea_contig_front[CHR_STR] > template_contig[CHR_END] and dist < CONJOINED_CONTIG_MINIMUM_LENGTH) or dist == 0:
+                            conjoined_nclose_node_set.add((nclose_b[1], nclose_a[1]))
+            elif contig_data[nclose_b[1]][CHR_NAM] == chrom:
+                template_contig = contig_data[nclose_b[1]]  
+                if template_contig[CTG_DIR] == '+':
+                    if nclosea_contig_back[CTG_DIR] == '-' and back_is_connectable:
+                        dist = distance_checker(nclosea_contig_back, template_contig)
+                        if (nclosea_contig_back[CHR_STR] > template_contig[CHR_END] and dist < CONJOINED_CONTIG_MINIMUM_LENGTH) or dist == 0:
+                            conjoined_nclose_node_set.add((nclose_b[0], nclose_a[0]))
+                    elif nclosea_contig_front[CTG_DIR] == '+' and front_is_connectable:
+                        dist = distance_checker(nclosea_contig_front, template_contig)
+                        if (nclosea_contig_front[CHR_STR] > template_contig[CHR_END] and dist < CONJOINED_CONTIG_MINIMUM_LENGTH) or dist == 0:
+                            conjoined_nclose_node_set.add((nclose_b[0], nclose_a[1]))
+                else:
+                    if nclosea_contig_back[CTG_DIR] == '+' and back_is_connectable:
+                        dist = distance_checker(nclosea_contig_back, template_contig)
+                        if (nclosea_contig_back[CHR_END] < template_contig[CHR_STR] and dist < CONJOINED_CONTIG_MINIMUM_LENGTH) or dist == 0:
+                            conjoined_nclose_node_set.add((nclose_b[0], nclose_a[0]))
+                    elif nclosea_contig_front[CTG_DIR] == '-' and front_is_connectable:
+                        dist = distance_checker(nclosea_contig_front, template_contig)
+                        if (nclosea_contig_front[CHR_END] < template_contig[CHR_STR] and dist < CONJOINED_CONTIG_MINIMUM_LENGTH) or dist == 0:
+                            conjoined_nclose_node_set.add((nclose_b[0], nclose_a[1]))
+
+significant_nclose = []
+for nclose in (nclose_set | conjoined_nclose_node_set):
+    st, ed = nclose
+    if check_near_bnd(contig_data[st][CHR_NAM], contig_data[st][CHR_STR], contig_data[st][CHR_END]) or \
+       check_near_bnd(contig_data[ed][CHR_NAM], contig_data[ed][CHR_STR], contig_data[ed][CHR_END]):
+        significant_nclose.append(nclose)
+
+significant_nclose = set(significant_nclose)
+
 with open(f"{PREFIX}/nclose_cn.txt", "wt") as f:
     for k, v in nclose_cn.items():
         if v > BREAKEND_REMARKABLE_CN:
@@ -814,10 +1024,14 @@ for k, v in nclose_cn.items():
     if v > BREAKEND_REMARKABLE_CN:
         bnd_cn_data.append([(chr_nam1, pos1), (chr_nam2, pos2), v, virtual_flag])
 
+display_indel = defaultdict(list)
+
 indel_val_list = []
 non_type4_cnt = len(bnd_cn_data)
 rpll = len(raw_path_list)
 for i in range(rpll, len(weights)):
+    paf_loc = tot_loc_list[i]
+    indel_ind = paf_loc.split('/')[-2]
     with open(tot_loc_list[i], "r") as f:
         l = f.readline()
         l = l.rstrip()
@@ -827,9 +1041,20 @@ for i in range(rpll, len(weights)):
         pos1 = int(l[CHR_STR])
         pos2 = int(l[CHR_END])
     v = weights[i]
+    chrom = chr_nam1
+    if abs(pos1-pos2) > TYPE2_FLANKING_LENGTH and v > NCLOSE_SIM_DIFF_THRESHOLD:
+        if check_near_bnd(chrom, pos1, pos1) or \
+           check_near_bnd(chrom, pos2, pos2):
+            if indel_ind == 'front_jump':
+                display_indel[chrom].append(("d", pos1, pos2, v/meandepth * 2, chrom))
+            if indel_ind == 'back_jump':
+                display_indel[chrom].append(("i", pos1, pos2, v/meandepth * 2, chrom))
     indel_val_list.append(v / meandepth * 2)
     bnd_cn_data.append([(chr_nam1, pos1), (chr_nam2, pos2), v, False])
 
+logging.info(f"Total called breakends (INS, DEL, BND, INV) : {len(significant_nclose) + len(display_indel)}")
+
+pairs_to_vcf(significant_nclose, contig_data, chr_len, display_indel, vcf_path)
 
 a = sorted(list(telo_cn.items()), key = lambda t:t[1])
 telo_zorder_dict = {}
@@ -879,7 +1104,7 @@ chr_fb_len_dict = defaultdict(list)
 for chr_dir, node_id in telo_connected_node:
     telo_len = chr_inf
     for telo_bed in telo_fb_dict[chr_dir]:
-        telo_len = min(telo_len, distance_checker(tuple(telo_bed), (contig_data[node_id][CHR_STR], contig_data[node_id][CHR_END])))
+        telo_len = min(telo_len, distance_checker_tuple(tuple(telo_bed), (contig_data[node_id][CHR_STR], contig_data[node_id][CHR_END])))
     chr_fb_len_dict[chr_dir].append((node_id, telo_len, chr_dir))
 
 telo_len_data = []

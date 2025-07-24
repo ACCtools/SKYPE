@@ -40,7 +40,7 @@ M = 1000 * K
 DEPTH_VECTOR_WINDOW = 100 * K
 DEPTH_ERROR_ALLOW_LEN = 500 * K
 
-ACC_SUM_ERROR_THRESHOLD = 0.2
+BASE_ACCSUMABSMAX_RATIO = 0.1
 
 VCF_FLANKING_LENGTH = 1*M
 NCLOSE_SIM_COMPARE_RAITO = 1.2
@@ -115,23 +115,44 @@ df = pd.read_csv(main_stat_loc, compression='gzip', comment='#', sep='\t',
 df = df.query('chr != "chrM"')
 meandepth = df['meandepth'].median()
 
+ydf = df.query('chr == "chrY"')
+chry_nz_len = len(ydf.query('meandepth != 0'))
+no_chrY = (chry_nz_len / len(ydf)) < 0.5
 
 with open(f'{PREFIX}/23_input.pkl', 'rb') as f:
 #     dep_list, init_cols, w_pri, using_ncnt_array, \
 #     div_nclose_set, each_nclose_notusing_path_dict, \
-    path_nclose_set_dict, amplitude = pkl.load(f)
+    chr_filt_st_list, path_nclose_set_dict, amplitude = pkl.load(f)
 
-jl.seval("using HDF5, LinearAlgebra")
 jl.include(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'anderson_nnls.jl'))
+jl.seval("using HDF5, LinearAlgebra")
 
 A_jl, B_jl, b_start_ind = jl.load_nnls_array(f'{PREFIX}/matrix.h5')
 A_fail_jl = jl.load_fail_array(f'{PREFIX}/matrix.h5')
 
+B = np.asarray(B_jl)
+
 weight_base_jl = jl.nnls_solve(A_jl, B_jl, THREAD, False)
 weight_base = np.asarray(weight_base_jl)
 
-final_weights_base = np.zeros(len(weight_base))
+final_weights_fullsize = np.zeros(len(weight_base))
 predict_suc_B_base = np.asarray(A_jl * weight_base_jl)
+
+chrom_acc_sum_dict_base = defaultdict(int)
+chrom_acc_sum_dict_max_base = defaultdict(int)
+for i, (chrom, st) in enumerate(chr_filt_st_list):
+    chrom_acc_sum_dict_base[chrom] += predict_suc_B_base[i] - B[i]
+    if abs(chrom_acc_sum_dict_base[chrom]) > chrom_acc_sum_dict_max_base[chrom]:
+        chrom_acc_sum_dict_max_base[chrom] = abs(chrom_acc_sum_dict_base[chrom])
+
+# print("="*50)
+# print(f"Base acc sum max")
+# for chrom, acc_sum_max in chrom_acc_sum_dict_max_base.items():
+#     if chrom == 'chrY' and no_chrY:
+#         continue
+#     acc_sum_max_base = chrom_acc_sum_dict_max_base[chrom]
+#     print(f"{chrom} : {acc_sum_max:.4f}")
+# print("="*50)
 
 nclose_total_weight_dict = defaultdict(float)
 for i, v in enumerate(weight_base):
@@ -160,7 +181,7 @@ nclose_notusing_idx_dict = defaultdict(list)
 for nclose_pair in div_nclose_set:
     for k, path_nclose_usage in path_nclose_set_dict.items():
         if (nclose_pair not in path_nclose_usage):
-            nclose_notusing_idx_dict[nclose_pair].append(k + 1) # julia 1-index
+            nclose_notusing_idx_dict[nclose_pair].append(k)
 
 tar_nclose_list = []
 thread_data_jl = jl.Vector[jl.Vector[jl.Int]]()
@@ -172,9 +193,31 @@ weight_list = jl.run_nnls_map(A_jl, B_jl, thread_data_jl)
 
 not_essential_nclose = set()
 
+print(f"Testing nclose pairs count : {len(tar_nclose_list)}")
+
 for nclose_pair, (weight_jl, predict_suc_B_jl) in zip(tar_nclose_list, weight_list):
     predict_suc_B = np.asarray(predict_suc_B_jl)
     predict_diff = predict_suc_B - predict_suc_B_base
+
+    chrom_acc_sum_dict = defaultdict(int)
+    chrom_acc_sum_dict_max = defaultdict(int)
+    for i, (chrom, st) in enumerate(chr_filt_st_list):
+        chrom_acc_sum_dict[chrom] += predict_suc_B[i] - B[i]
+        if abs(chrom_acc_sum_dict[chrom]) > chrom_acc_sum_dict_max[chrom]:
+            chrom_acc_sum_dict_max[chrom] = abs(chrom_acc_sum_dict[chrom])
+
+    # print("***********************************")
+    # print(nclose_pair)
+
+    max_error_rate = 0
+    for chrom, acc_sum_max in chrom_acc_sum_dict_max.items():
+        if chrom == 'chrY' and no_chrY:
+            continue
+        acc_sum_max_base = chrom_acc_sum_dict_max_base[chrom]
+        # print(f"{chrom} : {acc_sum_max:.4f} (error rate: {abs(acc_sum_max - acc_sum_max_base) / acc_sum_max_base:.4f})")
+        max_error_rate = max(max_error_rate, abs(acc_sum_max - acc_sum_max_base) / acc_sum_max_base)
+    
+    # print(f"Max base ratio : {max_error_rate:.4f}")
     
     # print("***********************************")
     # print(np.max(np.abs(predict_diff)))
@@ -182,7 +225,11 @@ for nclose_pair, (weight_jl, predict_suc_B_jl) in zip(tar_nclose_list, weight_li
     #     i = i + 1
     #     print(f"{round(i / 20, 3)}", np.sum(np.abs(predict_diff) > i / 20 * meandepth))
 
-    if np.sum(np.abs(predict_diff) > ACC_SUM_ERROR_THRESHOLD * meandepth) < DEPTH_ERROR_ALLOW_LEN / DEPTH_VECTOR_WINDOW:
+    # if np.sum(np.abs(predict_diff) > WINDOW_DEPTH_ERROR_THRESHOLD * meandepth) < DEPTH_ERROR_ALLOW_LEN / DEPTH_VECTOR_WINDOW:
+    #     print("Difference : This nclose pair is not essential.")
+
+    if max_error_rate < BASE_ACCSUMABSMAX_RATIO:
+        logging.debug(f"{nclose_pair} : Nclose removed")
         not_essential_nclose.add(nclose_pair)
 
 logging.info(f'Filtered nclose count by depth : {len(not_essential_nclose)}')
@@ -193,7 +240,7 @@ for nclose_pair in not_essential_nclose:
     using_idx_set &= set(nclose_notusing_idx_dict[nclose_pair])
 
 final_idx_list = sorted(list(using_idx_set))
-final_idx_array_jl = jl.Vector[jl.Int](final_idx_list)
+final_idx_array_jl = jl.Vector[jl.Int]([i + 1 for i in final_idx_list]) # 1-index
 
 A_final_jl = jl.view(A_jl, jl.Colon(), final_idx_array_jl)
 A_fail_final_jl = jl.view(A_fail_jl, jl.Colon(), final_idx_array_jl)
@@ -202,12 +249,11 @@ final_weight_jl = jl.nnls_solve(A_final_jl, B_jl, THREAD, False)
 final_weight = np.asarray(final_weight_jl)
 
 for i, v in enumerate(final_idx_list):
-    final_weights_base[int(v)] = final_weight[i]
+    final_weights_fullsize[int(v)] = final_weight[i]
 
 predict_B_succ = np.asarray(A_final_jl * final_weight_jl)
 predict_B_fail = np.asarray(A_fail_final_jl * final_weight_jl)
 
-B = np.asarray(B_jl)
 b_norm = np.linalg.norm(B)
 
 error = np.linalg.norm(predict_B_succ - B)
@@ -216,5 +262,5 @@ predict_B = np.concatenate((predict_B_succ, predict_B_fail))[b_start_ind:]
 logging.info(f'Error : {error:.4f}')
 logging.info(f'Relative error : {error/b_norm:.4f}')
 
-np.save(f'{PREFIX}/weight.npy', final_weights_base)
+np.save(f'{PREFIX}/weight.npy', final_weights_fullsize)
 np.save(f'{PREFIX}/predict_B.npy', predict_B)
