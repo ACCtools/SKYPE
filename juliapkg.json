@@ -12,6 +12,9 @@
         },
         "ProgressMeter": {
             "uuid": "92933f4c-e287-5a05-a399-4b506db050ca"
+        },
+        "Octavian": {
+            "uuid": "6fd5a793-0b7e-452c-907f-f8bfe9c57db4"
         }
     }
 }

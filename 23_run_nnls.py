@@ -1,21 +1,15 @@
-import h5py
+import os
 import logging
 import warnings
 import argparse
+
+
 import pickle as pkl
-
-from collections import defaultdict
-
-from networkx import add_path, edge_betweenness_centrality_subset
 import numpy as np
 import pandas as pd
 
-from skglm import GeneralizedLinearEstimator
-from skglm.datafits import Quadratic
-from skglm.penalties import PositiveConstraint
-from skglm.solvers import AndersonCD
-from threadpoolctl import threadpool_limits
-
+from collections import defaultdict
+from juliacall import Main as jl
 
 CTG_NAM = 0
 CTG_LEN = 1
@@ -44,9 +38,9 @@ K = 1000
 M = 1000 * K
 
 DEPTH_VECTOR_WINDOW = 100 * K
-DEPTH_ERROR_ALLOW_LEN = 1*M
+DEPTH_ERROR_ALLOW_LEN = 500 * K
 
-ACC_SUM_ERROR_THRESHOLD = 0.5
+ACC_SUM_ERROR_THRESHOLD = 0.2
 
 VCF_FLANKING_LENGTH = 1*M
 NCLOSE_SIM_COMPARE_RAITO = 1.2
@@ -119,57 +113,32 @@ ppc_contig_data = import_ppc_contig_data(PREPROCESSED_PAF_FILE_PATH)
 df = pd.read_csv(main_stat_loc, compression='gzip', comment='#', sep='\t',
                  names=['chr', 'st', 'nd', 'length', 'covsite', 'totaldepth', 'cov', 'meandepth'])
 df = df.query('chr != "chrM"')
-
 meandepth = df['meandepth'].median()
 
-path_count = 0
 
 with open(f'{PREFIX}/23_input.pkl', 'rb') as f:
 #     dep_list, init_cols, w_pri, using_ncnt_array, \
 #     div_nclose_set, each_nclose_notusing_path_dict, \
     path_nclose_set_dict, amplitude = pkl.load(f)
 
-with h5py.File(f"{PREFIX}/matrix.h5", "r") as f:
-    dA = f["A"]
-    A = np.empty(dA.shape, dtype=dA.dtype)
-    At = np.empty(dA.shape, dtype=dA.dtype)
-    path_count = dA.shape[1]
-    dA.read_direct(A)
+jl.seval("using HDF5, LinearAlgebra")
+jl.include(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'anderson_nnls.jl'))
 
-    dB = f["B"]
-    B = np.empty(dB.shape, dtype=dB.dtype)
-    dB.read_direct(B)
+A_jl, B_jl, b_start_ind = jl.load_nnls_array(f'{PREFIX}/matrix.h5')
+A_fail_jl = jl.load_fail_array(f'{PREFIX}/matrix.h5')
 
-    dAf = f["A_fail"]
-    A_fail = np.empty(dAf.shape, dtype=dAf.dtype)
-    A_failt = np.empty(dAf.shape, dtype=dAf.dtype)
-    dAf.read_direct(A_fail)
+weight_base_jl = jl.nnls_solve(A_jl, B_jl, THREAD, False)
+weight_base = np.asarray(weight_base_jl)
 
-    b_start_ind = int(f["B_depth_start"][()])
-
-nnls = GeneralizedLinearEstimator(
-    datafit=Quadratic(),
-    penalty=PositiveConstraint(),
-    solver=AndersonCD(fit_intercept=False)
-)
-
-with threadpool_limits(limits=THREAD):
-    nnls.fit(A, B)
-
-weights_base = nnls.coef_.copy()
-
-final_weights_base = np.zeros(len(weights_base))
-
-predict_suc_B_base = A.dot(weights_base)
+final_weights_base = np.zeros(len(weight_base))
+predict_suc_B_base = np.asarray(A_jl * weight_base_jl)
 
 nclose_total_weight_dict = defaultdict(float)
-
-for i, v in enumerate(weights_base):
+for i, v in enumerate(weight_base):
     for j in path_nclose_set_dict[i]:
         nclose_total_weight_dict[j] += v
 
 div_nclose_set = set()
-
 for k, v in nclose_total_weight_dict.items():
     st, ed = k
     # depth check, type 1 only
@@ -184,110 +153,68 @@ for k, v in nclose_total_weight_dict.items():
         if (ppc_contig_data[st][CTG_CENSAT] != '0' or ppc_contig_data[ed][CTG_CENSAT] != '0') and not ppc_contig_data[st][CTG_NAM].startswith('virtual_censat_contig'):
             div_nclose_set.add(k)
 
-using_ncnt_array = []
 
-for i, path_nclose_usage in path_nclose_set_dict.items():
-    using_path = True
-    for nclose_pair in path_nclose_usage:
-        if nclose_pair in div_nclose_set:
-            using_path = False
-            break
-    if using_path:
-        using_ncnt_array.append(i)
+int2nclose = dict()
 
-using_ncnt_set = set(using_ncnt_array)
-
-each_nclose_notusing_path_dict = defaultdict(list)
+nclose_notusing_idx_dict = defaultdict(list)
 for nclose_pair in div_nclose_set:
-    for i, path_nclose_usage in path_nclose_set_dict.items():
-        if (nclose_pair not in path_nclose_usage) and (i not in using_ncnt_set):
-            each_nclose_notusing_path_dict[nclose_pair].append(i)
+    for k, path_nclose_usage in path_nclose_set_dict.items():
+        if (nclose_pair not in path_nclose_usage):
+            nclose_notusing_idx_dict[nclose_pair].append(k + 1) # julia 1-index
 
-using_ncnt_array = np.array(sorted(using_ncnt_array))
+tar_nclose_list = []
+thread_data_jl = jl.Vector[jl.Vector[jl.Int]]()
+for k, v in nclose_notusing_idx_dict.items():
+    jl.push_b(thread_data_jl, jl.Vector[jl.Int](v))
+    tar_nclose_list.append(k)
 
-print(f"Div nclose set length : {len(div_nclose_set)}")
-print(amplitude)
-
-cn = len(using_ncnt_array)
-At[:, :cn] = A[:, using_ncnt_array]
-Atl = At[:, :cn]    
-A_failt[:, :cn] = A_fail[:, using_ncnt_array]
-A_failtl = A_failt[:, :cn]
-
-print(Atl.shape, A_failtl.shape)
+weight_list = jl.run_nnls_map(A_jl, B_jl, thread_data_jl)
 
 not_essential_nclose = set()
 
-for nclose in list(div_nclose_set)[::-1]:
-
-    print(f"Current nclose : {nclose}")
-    var_ncnt_nclose_array = each_nclose_notusing_path_dict[nclose]
-    vn = len(var_ncnt_nclose_array)
-
-    assert(len(set(var_ncnt_nclose_array) & set(using_ncnt_array)) == 0)
-    At[:, cn:cn+vn] = A[:, var_ncnt_nclose_array]
-    Atl = At[:, :cn+vn]
-
-    with threadpool_limits(limits=THREAD):
-        nnls.fit(Atl, B)
-
-    weights = nnls.coef_.copy()
-
-    predict_suc_B = Atl.dot(weights)
-
+for nclose_pair, (weight_jl, predict_suc_B_jl) in zip(tar_nclose_list, weight_list):
+    predict_suc_B = np.asarray(predict_suc_B_jl)
     predict_diff = predict_suc_B - predict_suc_B_base
-
-    print(np.max(np.abs(predict_diff)))
-    for i in [1, 2, 3, 4, 5, 6, 7, 8, 9]:
-        print(f"0.{i}", np.sum(np.abs(predict_diff) > i / 10 * amplitude))
+    
+    # print("***********************************")
+    # print(np.max(np.abs(predict_diff)))
+    # for i in range(10):
+    #     i = i + 1
+    #     print(f"{round(i / 20, 3)}", np.sum(np.abs(predict_diff) > i / 20 * meandepth))
 
     if np.sum(np.abs(predict_diff) > ACC_SUM_ERROR_THRESHOLD * meandepth) < DEPTH_ERROR_ALLOW_LEN / DEPTH_VECTOR_WINDOW:
-        not_essential_nclose.add(nclose)
+        not_essential_nclose.add(nclose_pair)
 
+logging.info(f'Filtered nclose count by depth : {len(not_essential_nclose)}')
+# logging.info(f'{not_essential_nclose}')
 
-logging.info(f'Filtered nclose count : {len(not_essential_nclose)}')
-logging.info(f'{not_essential_nclose}')
+using_idx_set = set(range(len(weight_base)))
+for nclose_pair in not_essential_nclose:
+    using_idx_set &= set(nclose_notusing_idx_dict[nclose_pair])
 
-At[:, :cn] = A[:, using_ncnt_array]
-Atl = At[:, :cn]    
+final_idx_list = sorted(list(using_idx_set))
+final_idx_array_jl = jl.Vector[jl.Int](final_idx_list)
 
-add_path_set = set()
-for k, s in each_nclose_notusing_path_dict.items():
-    add_path_set |= set(s)
-# For every non-essential nclose, we will add the paths that are not using the nclose
-# -> Add intersection of all paths that not using non-essential nclose
-for i in not_essential_nclose:
-    add_path_set &= set(each_nclose_notusing_path_dict[i])
+A_final_jl = jl.view(A_jl, jl.Colon(), final_idx_array_jl)
+A_fail_final_jl = jl.view(A_fail_jl, jl.Colon(), final_idx_array_jl)
 
-add_path_array = np.array(sorted(list(add_path_set)))
-avn = len(add_path_array)
+final_weight_jl = jl.nnls_solve(A_final_jl, B_jl, THREAD, False)
+final_weight = np.asarray(final_weight_jl)
 
+for i, v in enumerate(final_idx_list):
+    final_weights_base[int(v)] = final_weight[i]
 
-if avn > 0:
-    At[:, cn:cn+avn] = A[:, add_path_array]
-    A_failt[:, cn:cn+avn] = A_fail[:, add_path_array]
+predict_B_succ = np.asarray(A_final_jl * final_weight_jl)
+predict_B_fail = np.asarray(A_fail_final_jl * final_weight_jl)
 
-    Atl = At[:, :cn+avn]
-    A_failtl = A_failt[:, :cn+avn]
-
-
-with threadpool_limits(limits=THREAD):
-    nnls.fit(Atl, B)
-
-final_weights = nnls.coef_.copy()
-
-final_index = np.concatenate((using_ncnt_array, add_path_array))
-for i, v in enumerate(final_index):
-    final_weights_base[int(v)] = final_weights[i]
-
-predict_B_succ = Atl.dot(final_weights)
-predict_B_fail = A_failtl.dot(final_weights)
+B = np.asarray(B_jl)
 b_norm = np.linalg.norm(B)
+
 error = np.linalg.norm(predict_B_succ - B)
 predict_B = np.concatenate((predict_B_succ, predict_B_fail))[b_start_ind:]
 
 logging.info(f'Error : {error:.4f}')
 logging.info(f'Relative error : {error/b_norm:.4f}')
 
-np.save(f'{PREFIX}/weight.npy',  final_weights_base)
+np.save(f'{PREFIX}/weight.npy', final_weights_base)
 np.save(f'{PREFIX}/predict_B.npy', predict_B)

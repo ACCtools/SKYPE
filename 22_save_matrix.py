@@ -704,7 +704,7 @@ m = np.shape(B)[0]
 n = len(paf_ans_list) + fclen // 4 + bclen // 4
 ncnt = 0
 
-A = np.empty((ncm + m, n), dtype=np.float32, order='C')
+AT = np.empty((n, ncm + m), dtype=np.float32, order='C')
 fm = ncm + filter_len
 
 filter_vec_list = []
@@ -746,10 +746,10 @@ for path, key_int_list in tqdm(paf_ans_list, desc='Recover depth from separated 
                 tmp_n[nclose2int[rev]] += norm_nclose_weight
 
         # Place nclose part into A
-        A[:ncm, ncnt] = tmp_n
+        AT[ncnt, :ncm] = tmp_n
 
     # Place coverage vector into A
-    A[ncm:, ncnt] = tmp_v
+    AT[ncnt, ncm:] = tmp_v
 
     path_rel = get_relative_path(path)
     if path_rel in tar_def_path_set:
@@ -770,14 +770,15 @@ for i in tqdm(range(1, fclen // 4 + 1), desc='Parse coverage from forward-direct
     bv = get_vec_from_stat_loc(bv_loc)
 
     if NCLOSE_WEIGHT_USE:
-        A[:ncm, ncnt] = tmp_n
+        AT[ncnt, :ncm] = tmp_n
 
-    A[ncm:, ncnt] = ov - bv
+    AT[ncnt, ncm:] = ov - bv
     path_nclose_dict_set[ncnt] = set()
     ncnt += 1
 
 init_cols = [tar_def_path_ind_dict[i] for i in tar_chr_data.values()]
-A_pri = A[ncm:fm, init_cols]
+AT_pri = AT[init_cols, ncm:fm]
+A_pri = AT_pri.T
 w_pri = nnls(A_pri, B[:filter_len])[0]
 
 # Process backward-directed outlier contigs
@@ -792,9 +793,9 @@ for i in tqdm(range(1, bclen // 4 + 1), desc='Parse coverage from backward-direc
     bv = get_vec_from_stat_loc(bv_loc)
 
     if NCLOSE_WEIGHT_USE:
-        A[:ncm, ncnt] = tmp_n
+        AT[ncnt, :ncm] = tmp_n
 
-    A[ncm:, ncnt] = ov + bv
+    AT[ncnt, ncm:] = ov + bv
     path_nclose_dict_set[ncnt] = set()
     ncnt += 1
 
@@ -807,11 +808,11 @@ for (i1, i2) in itertools.pairwise(dep_list):
     assert(i1 >= i2)
 
 with h5py.File(f'{PREFIX}/matrix.h5', 'w') as hf:
-    dset_A = hf.create_dataset('A', shape=A[:fm, :].shape, dtype=A.dtype)
-    dset_A.write_direct(A, source_sel=np.s_[:fm, :])
+    dset_A = hf.create_dataset('A', shape=AT[:, :fm].shape, dtype=AT.dtype)
+    dset_A.write_direct(AT, source_sel=np.s_[:, :fm])
 
-    dset_A_fail = hf.create_dataset('A_fail', shape=A[fm:, :].shape, dtype=A.dtype)
-    dset_A_fail.write_direct(A, source_sel=np.s_[fm:, :])
+    dset_A_fail = hf.create_dataset('A_fail', shape=AT[:, fm:].shape, dtype=AT.dtype)
+    dset_A_fail.write_direct(AT, source_sel=np.s_[:, fm:])
 
     dset_B = hf.create_dataset('B', shape=B[:fm].shape, dtype=B.dtype)
     dset_B.write_direct(B, source_sel=np.s_[:fm])
