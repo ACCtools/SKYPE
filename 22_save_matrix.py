@@ -712,6 +712,8 @@ bv_loc_list = []
 tmp_n = np.zeros(ncm, dtype=np.float32)
 tmp_v = np.zeros(m, dtype=np.float32)
 
+pathrel2ncnt = dict()
+
 tar_def_path_ind_dict = {}
 ncnt = 0
 path_nclose_dict_set = defaultdict(set)
@@ -753,6 +755,8 @@ for path, key_int_list in tqdm(paf_ans_list, desc='Recover depth from separated 
     if path_rel in tar_def_path_set:
         tar_def_path_ind_dict[path_rel] = ncnt
 
+
+    pathrel2ncnt[path_rel] = ncnt
     ncnt += 1
 
 # Process forward-directed outlier contigs
@@ -772,6 +776,8 @@ for i in tqdm(range(1, fclen // 4 + 1), desc='Parse coverage from forward-direct
 
     AT[ncnt, ncm:] = ov - bv
     path_nclose_dict_set[ncnt] = set()
+
+    pathrel2ncnt[get_relative_path(bv_paf_loc)] = ncnt
     ncnt += 1
 
 init_cols = [tar_def_path_ind_dict[i] for i in tar_chr_data.values()]
@@ -795,6 +801,8 @@ for i in tqdm(range(1, bclen // 4 + 1), desc='Parse coverage from backward-direc
 
     AT[ncnt, ncm:] = ov + bv
     path_nclose_dict_set[ncnt] = set()
+
+    pathrel2ncnt[get_relative_path(bv_paf_loc)] = ncnt
     ncnt += 1
 
 B = np.hstack((B_nclose, B))
@@ -822,3 +830,6 @@ with h5py.File(f'{PREFIX}/matrix.h5', 'w') as hf:
 
 with open(f"{PREFIX}/23_input.pkl", "wb") as f:
     pkl.dump((chr_filt_st_list, path_nclose_dict_set, amplitude), f)
+
+with open(f"{PREFIX}/pathrel2ncnt.pkl", "wb") as f:
+    pkl.dump(pathrel2ncnt, f)

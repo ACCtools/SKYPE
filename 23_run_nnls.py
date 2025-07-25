@@ -1,4 +1,5 @@
 import os
+import psutil
 import logging
 import warnings
 import argparse
@@ -107,6 +108,12 @@ PREPROCESSED_PAF_FILE_PATH = args.ppc_paf_file_path
 PREFIX = args.prefix
 main_stat_loc = args.main_stat_path
 THREAD = args.thread
+
+core_num = psutil.cpu_count(logical=False)
+if core_num is None:
+    THREAD = THREAD
+else:
+    THREAD = min(int(THREAD), core_num)
 
 ppc_contig_data = import_ppc_contig_data(PREPROCESSED_PAF_FILE_PATH)
 

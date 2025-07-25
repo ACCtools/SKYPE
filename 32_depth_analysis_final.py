@@ -569,6 +569,9 @@ def pairs_to_vcf(pairs, contig_data, contig_lengths, display_indel, out_vcf_path
                     f"SVTYPE={alt[1:-1]};END={end};SVLEN={svlen}\n"
                 )
 
+def get_relative_path(p):
+    return tuple(p.split('/')[-3:])
+
 parser = argparse.ArgumentParser(description="SKYPE depth analysis")
 
 parser.add_argument("censat_bed_path", 
@@ -625,6 +628,41 @@ telo_connected_node = extract_telomere_connect_contig(TELO_CONNECT_NODES_INFO_PA
 with open(f'{PREFIX}/path_data.pkl', 'rb') as f:
     path_list_dict = pkl.load(f)
 
+with open(f'{PREFIX}/33_input.pkl', 'rb') as f:
+    final_sky_list = pkl.load(f)
+
+with open(f"{PREFIX}/pathrel2ncnt.pkl", "rb") as f:
+    pathrel2ncnt = pkl.load(f)
+
+with h5py.File(f"{PREFIX}/matrix.h5", "r") as f:
+    dA = f["A"]
+    A = np.empty(dA.shape, dtype=dA.dtype)
+    dA.read_direct(A)
+
+    dB = f["B"]
+    B = np.empty(dB.shape, dtype=dB.dtype)
+    dB.read_direct(B)
+
+    dAf = f["A_fail"]
+    A_fail = np.empty(dAf.shape, dtype=dAf.dtype)
+    dAf.read_direct(A_fail)
+
+    dBf = f["B_fail"]
+    B_fail = np.empty(dBf.shape, dtype=dBf.dtype)
+    dBf.read_direct(B_fail)
+
+    b_start_ind = int(f["B_depth_start"][()])
+os.remove(f'{PREFIX}/matrix.h5')
+
+B = np.hstack([B, B_fail])
+predicted_cluster_B_tmp = np.zeros_like(B)
+
+for (path, cn) in final_sky_list:
+    ncnt = pathrel2ncnt[get_relative_path(path)]
+    predicted_cluster_B_tmp += np.hstack([A[ncnt, :], A_fail[ncnt, :]]) * cn
+
+predicted_cluster_B = predicted_cluster_B_tmp[b_start_ind:]
+B = B[b_start_ind:]
 
 df = pd.read_csv(main_stat_loc, compression='gzip', comment='#', sep='\t', names=['chr', 'st', 'nd', 'length', 'covsite', 'totaldepth', 'cov', 'meandepth'])
 df = df.query('chr != "chrM"')
@@ -710,10 +748,6 @@ def get_vec_from_ki(ki):
             v.append(chr_st_data[cs])
     
     return ki, np.asarray(v, dtype=np.float32)
-with h5py.File(f'{PREFIX}/matrix.h5', 'r') as hf:
-    ncm = hf['B_depth_start'][()]
-    B = np.hstack([hf['B'][ncm:], hf['B_fail'][:]])
-os.remove(f'{PREFIX}/matrix.h5')
 
 with open(f'{PREFIX}/contig_pat_vec_data.pkl', 'rb') as f:
     paf_ans_list, key_list, int2key, _ = pkl.load(f)
@@ -842,6 +876,7 @@ for sector in circos.sectors:
     cn_track.line([0, max(tdf['st'])], [0.5 * meandepth] * 2, color='blue', vmax=ABS_MAX_COVERAGE_RATIO * meandepth, zorder=-1, alpha=0.5)
     cn_track.line([0, max(tdf['st'])], [2 * meandepth] * 2, color='red', vmax=ABS_MAX_COVERAGE_RATIO * meandepth, zorder=-1, alpha=0.5)
     line_track_plot(cn_track, x=tchr_st_list, y=predicted_B[tchr_idx_list], vmax=ABS_MAX_COVERAGE_RATIO * meandepth, color='green', linewidth=0.5, zorder=10)
+    line_track_plot(cn_track, x=tchr_st_list, y=predicted_cluster_B[tchr_idx_list], vmax=ABS_MAX_COVERAGE_RATIO * meandepth, color='red', linewidth=0.5, zorder=15)
     line_track_plot(cn_track, x=tdf['st'].to_list(), y=tdf['meandepth'].to_list(), vmax=ABS_MAX_COVERAGE_RATIO * meandepth, color='black', linewidth=0.2)
     line_track_circos_color(cn_track, x=tdf['st'].to_list(), y1=tdf['meandepth'].to_list(), vmax=ABS_MAX_COVERAGE_RATIO * meandepth,
                             target_color=['#6baed6', '#969696', '#fb6a4a'],
