@@ -780,9 +780,6 @@ for i in range(1, bclen//4 + 1):
 
 weights = np.load(f'{PREFIX}/weight.npy')
 
-with open(f'{PREFIX}/depth_weight.pkl', 'wb') as f:
-    pkl.dump((tot_loc_list, weights), f)
-
 grouped_data = defaultdict(lambda: {"positions": [], "values": []})
 for i, (chrom, pos) in enumerate(chr_filt_st_list + chr_no_filt_st_list):
     grouped_data[chrom]["positions"].append(pos)
@@ -1223,3 +1220,5 @@ circos.ax.add_artist(cn_line_legend)
 
 fig.savefig(f'{PREFIX}/total_cov.pdf')
 fig.savefig(f"{PREFIX}/total_cov.png")
+
+logging.info("SKYPE pipeline end")

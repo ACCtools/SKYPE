@@ -5,6 +5,7 @@ import pickle as pkl
 import matplotlib.patches as patches
 
 import ast
+import glob
 import logging
 import argparse
 from datetime import datetime
@@ -468,12 +469,30 @@ df = df.query('chr != "chrM"')
 meandepth = np.median(df['meandepth'])
 chr_len = find_chr_len(CHROMOSOME_INFO_FILE_PATH)
 
+fclen = len(glob.glob(front_contig_path+"*"))
+bclen = len(glob.glob(back_contig_path+"*"))
+
+weights = np.load(f'{PREFIX}/weight.npy')
+tot_loc_list = []
+
 with open(f'{PREFIX}/contig_pat_vec_data.pkl', 'rb') as f:
     paf_ans_list, key_list, int2key, _ = pkl.load(f)
+
+for loc, ll in paf_ans_list:
+    tot_loc_list.append(loc)
+
+for i in range(1, fclen//4 + 1):
+    bv_paf_loc = front_contig_path+f"{i}_base.paf"
+    tot_loc_list.append(bv_paf_loc)
+
+for i in range(1, bclen//4 + 1):
+    bv_paf_loc = back_contig_path+f"{i}_base.paf"
+    tot_loc_list.append(bv_paf_loc)
+
 paf_ans_dict = dict(paf_ans_list)
 
-with open(f'{PREFIX}/depth_weight.pkl', 'rb') as f:
-    tot_loc_list, weights = pkl.load(f)
+with open(f'{PREFIX}/depth_weight.pkl', 'wb') as f:
+    pkl.dump((tot_loc_list, weights), f)
 
 weights_sorted_data = sorted(enumerate(weights), key=lambda t:t[1], reverse=True)
 

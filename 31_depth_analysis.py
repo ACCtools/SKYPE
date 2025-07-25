@@ -728,44 +728,20 @@ def get_vec_from_ki(ki):
             v.append(chr_st_data[cs])
     
     return ki, np.asarray(v, dtype=np.float32)
-with h5py.File(f'{PREFIX}/matrix.h5', 'r') as hf:
-    ncm = hf['B_depth_start'][()]
-    B = np.hstack([hf['B'][ncm:], hf['B_fail'][:]])
 # os.remove(f'{PREFIX}/matrix.h5')
 
 with open(f'{PREFIX}/contig_pat_vec_data.pkl', 'rb') as f:
     paf_ans_list, key_list, int2key, _ = pkl.load(f)
 
-fclen = len(glob.glob(front_contig_path+"*"))
-bclen = len(glob.glob(back_contig_path+"*"))
-
-
-filter_vec_list = []
-tot_loc_list = []
-bv_loc_list = []
-
-for loc, ll in paf_ans_list:
-    tot_loc_list.append(loc)
-
 raw_path_list = []
-for i in tot_loc_list:
+for i, ll in paf_ans_list:
     il = i.split("/")
     cnt = il[-1].split('.')[0]
     chr2chr = il[-2]
     raw_path_list.append(f'{PREFIX}/00_raw/{chr2chr}/{cnt}.index.txt')
 
-for i in range(1, fclen//4 + 1):
-    bv_paf_loc = front_contig_path+f"{i}_base.paf"
-    tot_loc_list.append(bv_paf_loc)
-
-for i in range(1, bclen//4 + 1):
-    bv_paf_loc = back_contig_path+f"{i}_base.paf"
-    tot_loc_list.append(bv_paf_loc)
-
-weights = np.load(f'{PREFIX}/weight.npy')
-
-with open(f'{PREFIX}/depth_weight.pkl', 'wb') as f:
-    pkl.dump((tot_loc_list, weights), f)
+with open(f'{PREFIX}/depth_weight.pkl', 'rb') as f:
+    tot_loc_list, weights = pkl.load(f)
 
 grouped_data = defaultdict(lambda: {"positions": [], "values": []})
 for i, (chrom, pos) in enumerate(chr_filt_st_list + chr_no_filt_st_list):
