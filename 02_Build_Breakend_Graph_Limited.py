@@ -4373,7 +4373,7 @@ inversion_graph = nx2gt(make_inversion_nx_graph(inversion_adjacency))\
 
 ecdna_circuit_candidate_set = set()
 
-for circuit in gt.all_circuits(inversion_graph):
+for circuit in gt.all_circuits(inversion_graph, max_length=4):
     if len(circuit) == 4:
         circuit_node_list = []
         for idx in circuit:
