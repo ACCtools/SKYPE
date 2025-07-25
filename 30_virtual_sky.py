@@ -18,7 +18,7 @@ logging.basicConfig(
     level=logging.INFO,
     datefmt='%m/%d/%Y %I:%M:%S %p',
 )
-logging.info("31_virtual_sky start")
+logging.info("30_virtual_sky start")
 
 CTG_NAM = 0
 CTG_LEN = 1

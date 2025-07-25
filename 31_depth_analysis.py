@@ -31,7 +31,7 @@ logging.basicConfig(
     level=logging.INFO,
     datefmt='%m/%d/%Y %I:%M:%S %p',
 )
-logging.info("30_depth_analysis start")
+logging.info("31_depth_analysis start")
 
 BREAKEND_REMARKABLE_CN_RATIO = 0.05
 TELOMERE_REMARKABLE_CN_RATIO = 0.05
@@ -632,34 +632,17 @@ with open(f"{PREFIX}/pathrel2ncnt.pkl", "rb") as f:
     pathrel2ncnt = pkl.load(f)
 
 with h5py.File(f"{PREFIX}/matrix.h5", "r") as f:
-    dA = f["A"]
-    A = np.empty(dA.shape, dtype=dA.dtype)
-    dA.read_direct(A)
-
     dB = f["B"]
     B = np.empty(dB.shape, dtype=dB.dtype)
     dB.read_direct(B)
-
-    dAf = f["A_fail"]
-    A_fail = np.empty(dAf.shape, dtype=dAf.dtype)
-    dAf.read_direct(A_fail)
 
     dBf = f["B_fail"]
     B_fail = np.empty(dBf.shape, dtype=dBf.dtype)
     dBf.read_direct(B_fail)
 
     b_start_ind = int(f["B_depth_start"][()])
-os.remove(f'{PREFIX}/matrix.h5')
 
-B = np.hstack([B, B_fail])
-predicted_cluster_B_tmp = np.zeros_like(B)
-
-for (path, cn) in final_sky_list:
-    ncnt = pathrel2ncnt[get_relative_path(path)]
-    predicted_cluster_B_tmp += np.hstack([A[ncnt, :], A_fail[ncnt, :]]) * cn
-
-predicted_cluster_B = predicted_cluster_B_tmp[b_start_ind:]
-B = B[b_start_ind:]
+B = np.hstack([B, B_fail])[b_start_ind:]
 
 df = pd.read_csv(main_stat_loc, compression='gzip', comment='#', sep='\t', names=['chr', 'st', 'nd', 'length', 'covsite', 'totaldepth', 'cov', 'meandepth'])
 df = df.query('chr != "chrM"')
@@ -780,8 +763,6 @@ for i in range(1, bclen//4 + 1):
     tot_loc_list.append(bv_paf_loc)
 
 weights = np.load(f'{PREFIX}/weight.npy')
-
-logging.info("Forming result images...")
 
 with open(f'{PREFIX}/depth_weight.pkl', 'wb') as f:
     pkl.dump((tot_loc_list, weights), f)

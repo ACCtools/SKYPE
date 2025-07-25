@@ -31,7 +31,7 @@ logging.basicConfig(
     level=logging.INFO,
     datefmt='%m/%d/%Y %I:%M:%S %p',
 )
-logging.info("30_depth_analysis start")
+logging.info("32_depth_analysis_final start")
 
 BREAKEND_REMARKABLE_CN_RATIO = 0.05
 TELOMERE_REMARKABLE_CN_RATIO = 0.05
@@ -780,8 +780,6 @@ for i in range(1, bclen//4 + 1):
 
 weights = np.load(f'{PREFIX}/weight.npy')
 
-logging.info("Forming result images...")
-
 with open(f'{PREFIX}/depth_weight.pkl', 'wb') as f:
     pkl.dump((tot_loc_list, weights), f)
 
@@ -826,7 +824,7 @@ color_label = np.ones_like(B)
 color_label[miss_B] = 3
 color_label[over_B] = 5
 
-logging.info(f'Fail ratio : {round(sum(color_label[miss_B] == 3) / len(B) * 100, 3)}%')
+# logging.info(f'Fail ratio : {round(sum(color_label[miss_B] == 3) / len(B) * 100, 3)}%')
 
 chr_len = find_chr_len(CHROMOSOME_INFO_FILE_PATH)
 del chr_len['chrM']
@@ -1087,9 +1085,9 @@ for i in range(rpll, len(weights)):
     indel_val_list.append(v / meandepth * 2)
     bnd_cn_data.append([(chr_nam1, pos1), (chr_nam2, pos2), v, False])
 
-logging.info(f"Total called breakends (INS, DEL, BND, INV) : {len(significant_nclose) + len(display_indel)}")
+# logging.info(f"Total called breakends (INS, DEL, BND, INV) : {len(significant_nclose) + len(display_indel)}")
 
-pairs_to_vcf(significant_nclose, contig_data, chr_len, display_indel, vcf_path)
+# pairs_to_vcf(significant_nclose, contig_data, chr_len, display_indel, vcf_path)
 
 a = sorted(list(telo_cn.items()), key = lambda t:t[1])
 telo_zorder_dict = {}
