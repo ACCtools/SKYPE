@@ -713,7 +713,7 @@ def get_vec_from_ki(ki):
 with h5py.File(f'{PREFIX}/matrix.h5', 'r') as hf:
     ncm = hf['B_depth_start'][()]
     B = np.hstack([hf['B'][ncm:], hf['B_fail'][:]])
-#os.remove(f'{PREFIX}/matrix.h5')
+os.remove(f'{PREFIX}/matrix.h5')
 
 with open(f'{PREFIX}/contig_pat_vec_data.pkl', 'rb') as f:
     paf_ans_list, key_list, int2key, _ = pkl.load(f)

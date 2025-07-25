@@ -59,6 +59,12 @@ MAJOR_BASELINE = 0.6
 
 TARGET_WEIGHT = 0.1
 
+MEANDEPTH_FLANKING_LENGTH = 5*M
+TYPE34_BREAK_CHUKJI_LIMIT = 1*M
+
+NCLOSE_SIM_COMPARE_RATIO = 1.2
+NCLOSE_SIM_DIFF_THRESHOLD = 5
+
 CHR_COLORS = {
     "chr1":  "#FFC000",
     "chr2":  "#FF0000",
@@ -85,6 +91,33 @@ CHR_COLORS = {
     "chrX":  "#6495ED",
     "chrY":  "#EE82EE",
 }
+
+def similar_check(v1, v2, ratio):
+    try:
+        assert(v1 >= 0 and v2 >= 0)
+    except:
+        logging.error(f"Invalid values for similarity check: v1={v1}, v2={v2}")
+        assert(False)
+    mi, ma = sorted([v1, v2])
+    return False if mi == 0 else (ma / mi <= ratio) or ma-mi < NCLOSE_SIM_DIFF_THRESHOLD
+
+def check_near_bnd(chrom, inside_st, inside_nd):
+    # subset of df for the given chromosome
+    df_chr = df[df['chr'] == chrom]
+
+    def mean_depth(start, end):
+        """Return mean meandepth over windows overlapping [start, end)."""
+        mask = (df_chr['nd'] > start) & (df_chr['st'] < end)
+        return df_chr.loc[mask, 'meandepth'].mean()
+
+    # for inside_st
+    st_depth = mean_depth(inside_st - MEANDEPTH_FLANKING_LENGTH, inside_st)
+    nd_depth = mean_depth(inside_nd, inside_nd + MEANDEPTH_FLANKING_LENGTH)
+    if np.isnan(st_depth) or np.isnan(nd_depth):
+        return True
+
+    # print(chrom, inside_st, inside_nd, not similar_check(st_depth, nd_depth))
+    return not similar_check(st_depth, nd_depth, NCLOSE_SIM_COMPARE_RATIO)
 
 def chr2int(x):
     if x.startswith('chr'):
@@ -188,7 +221,7 @@ def telo_condition(node : list, need_label_index:dict) -> bool:
     return node in need_label_index
 
 # SKY Figure
-def plot_virtual_chromosome(ax, segments_data, cut_dict, label=None):
+def plot_virtual_chromosome(ax, segments_data, cut_dict, indel = None, label=None):
     """
     주어진 segments 리스트로 가상 염색체를 그립니다.
     """
@@ -261,8 +294,41 @@ def plot_virtual_chromosome(ax, segments_data, cut_dict, label=None):
                 text_obj = ax.text(text_x, i[1]/maxh*100, text_label, ha='left', va='center', fontsize=10, color='black')
                 text_obj_list.append(text_obj)
 
+    if indel is not None:
+        if indel[0] == 'd':
+            current_y = indel[1] / maxh * 100
+            y1 = indel[1] / maxh * 100
+            y2 = indel[2] / maxh * 100
+            midy = (y1+y2)/2
+            seg_length = (indel[2] - indel[1]) / maxh * 100
+            indel_rect = patches.Rectangle(
+                    (x_center - radius, current_y),
+                    width,
+                    seg_length,
+                    facecolor = "white",
+                    edgecolor='none'
+                )
+            indel_rect.set_clip_path(clip_patch)
+            ax.add_patch(indel_rect)
 
-    
+            x_start = x_center + radius
+            x_end   = x_center + 2 * radius
+
+            # 위쪽 선
+            ax.plot([x_start, x_end],
+                    [y1,     midy],
+                    linewidth=1,
+                    color='black')
+
+            # 아래쪽 선
+            ax.plot([x_start, x_end],
+                    [y2,     midy],
+                    linewidth=1,
+                    color='black')
+            
+            text_obj = ax.text(x_end+radius/5, midy, f"del({indel[-1][3:]})", ha='left', va='center', fontsize=10, color='black')
+            text_obj_list.append(text_obj)
+        
     mark_overlapping_texts_with_arrows(ax, text_obj_list, min_gap=5)
     outline_patch = patches.FancyBboxPatch(
         (x_center - radius, 0),
@@ -346,6 +412,14 @@ def mark_overlapping_texts_with_arrows(ax, texts, min_gap=5):
                         xytext=(5, original_y), textcoords='data',
                         arrowprops=dict(arrowstyle="-|>", color="black", lw=0.5))
 
+def extract_nclose_node(nclose_path: str) -> list:
+    nclose_list = []
+    with open(nclose_path, "r") as f:
+        for line in f:
+            line = line.split()
+            nclose_list.append((int(line[1]), int(line[2])))
+    return nclose_list
+
 parser = argparse.ArgumentParser(description="SKYPE depth analysis")
 
 parser.add_argument("ppc_paf_file_path", 
@@ -380,7 +454,9 @@ front_contig_path = RATIO_OUTLIER_FOLDER+"front_jump/"
 back_contig_path = RATIO_OUTLIER_FOLDER+"back_jump/"
 TELO_CONNECT_NODES_INFO_PATH = PREFIX+"/telomere_connected_list.txt"
 output_folder = f'{PREFIX}/21_pat_depth'
+NCLOSE_FILE_PATH = f"{args.prefix}/nclose_nodes_index.txt"
 
+nclose_nodes = set(extract_nclose_node(NCLOSE_FILE_PATH))
 ppc_data = import_ppc_data(PREPROCESSED_PAF_FILE_PATH)
 
 with open(f'{PREFIX}/path_data.pkl', 'rb') as f:
@@ -400,6 +476,65 @@ with open(f'{PREFIX}/depth_weight.pkl', 'rb') as f:
     tot_loc_list, weights = pkl.load(f)
 
 weights_sorted_data = sorted(enumerate(weights), key=lambda t:t[1], reverse=True)
+
+all_deletion_path = []
+deletion_path_dict = {}
+
+all_insertion_path = []
+insertion_path_dict = {}
+
+for ind, w in weights_sorted_data:
+    paf_loc = tot_loc_list[ind]
+    key = paf_loc.split('/')[-3]
+    indel_ind = paf_loc.split('/')[-2]
+    if key == '11_ref_ratio_outliers':
+        if indel_ind == 'front_jump' and w > NCLOSE_SIM_DIFF_THRESHOLD:
+            deletion_path_dict[paf_loc] = w
+            all_deletion_path.append(paf_loc)
+        if indel_ind == 'back_jump' and w > NCLOSE_SIM_DIFF_THRESHOLD:
+            insertion_path_dict[paf_loc] = w
+            all_insertion_path.append(paf_loc)
+
+long_deletion_path = {}
+long_insertion_path = {}
+
+for i in all_deletion_path:
+    with open(i, "r") as f:
+        l = f.readline()
+        l = l.rstrip()
+        l = l.split("\t")
+        chr_nam1 = l[CHR_NAM]
+        chr_nam2 = l[CHR_NAM]
+        pos1 = int(l[CHR_STR])
+        pos2 = int(l[CHR_END])
+        if abs(pos1-pos2) > MEANDEPTH_FLANKING_LENGTH:
+            long_deletion_path[i] = (chr_nam1, pos1, pos2)
+
+for i in all_insertion_path:
+    with open(i, "r") as f:
+        l = f.readline()
+        l = l.rstrip()
+        l = l.split("\t")
+        chr_nam1 = l[CHR_NAM]
+        chr_nam2 = l[CHR_NAM]
+        pos1 = int(l[CHR_STR])
+        pos2 = int(l[CHR_END])
+        if abs(pos1-pos2) > MEANDEPTH_FLANKING_LENGTH:
+            long_insertion_path[i] = (chr_nam1, pos1, pos2)
+
+display_indel = defaultdict(list)
+
+for path, check_arg in long_deletion_path.items():
+    chrom, pos1, pos2 = check_arg
+    if check_near_bnd(chrom, pos1, pos1) or \
+       check_near_bnd(chrom, pos2, pos2):
+        display_indel[chrom].append(("d", pos1, pos2, deletion_path_dict[path]/meandepth * 2, chrom))
+
+for path, check_arg in long_insertion_path.items():
+    chrom, pos1, pos2 = check_arg
+    if check_near_bnd(chrom, pos1, pos1) or \
+       check_near_bnd(chrom, pos2, pos2):
+        display_indel[chrom].append(("i", pos1, pos2, insertion_path_dict[path]/meandepth * 2, chrom))
 
 path_dict = {}
 non_type4_top_path = []
@@ -441,6 +576,24 @@ for node_id, telo_len, chr_dir in telo_len_data:
     need_label[chr_dir[:-1]].append((node_id, chr_dir[-1]))
     need_label_index[node_id] = (chr_dir, telo_len)
 
+significant_nclose = []
+for nclose in nclose_nodes:
+    st, ed = nclose
+    if check_near_bnd(ppc_data[st][CHR_NAM], ppc_data[st][CHR_STR], ppc_data[st][CHR_END]) or \
+       check_near_bnd(ppc_data[ed][CHR_NAM], ppc_data[ed][CHR_STR], ppc_data[ed][CHR_END]):
+        significant_nclose.append(nclose)
+significant_nclose = set(significant_nclose)
+
+for i in significant_nclose:
+    if ppc_data[i[0]][CHR_NAM] == 'chr1' or ppc_data[i[1]][CHR_NAM] == 'chr1':
+        print(i)
+        print(ppc_data[i[0]])
+        print(ppc_data[i[1]])
+        print()
+
+using_path = set()
+path_using_nclose_dict = defaultdict(set)
+path_using_significant_nclose_dict = defaultdict(set)
 cut_dict={}
 karyotypes_data = {}
 for path_path in non_type4_top_path:
@@ -449,7 +602,18 @@ for path_path in non_type4_top_path:
     curr_path_cut_list = []
     curr_path_inverse_list = []
     curr_path_telo_list = []
-
+    path = import_index_path(path_path)
+    s = 1
+    while s < len(path) - 2:
+        nclose_cand = tuple(sorted([path[s][1], path[s+1][1]]))
+        if nclose_cand in nclose_nodes:
+             if nclose_cand in significant_nclose:
+                using_path.add(path_path)
+                path_using_significant_nclose_dict[path_path].add(nclose_cand)
+             path_using_nclose_dict[path_path].add(nclose_cand)
+             s+=2
+        else:
+            s += 1
     tot_len = 0
     for idx, ki in enumerate(paf_ans_dict[path_path]):
         temp_list = import_paf_data(f'{output_folder}/{ki}.paf')
@@ -506,16 +670,38 @@ for path, i in karyotypes_data.items():
 loc2weight = dict(zip(tot_loc_list, weights))
 
 grouped_norm_data = defaultdict(list)
+chr_set_merge = defaultdict(list)
 for path, data in karyotypes_norm_data.items():
     cnt = Counter()
     for c, w in data:
         cnt[c] += w
     sorted_cnt_data = sorted(cnt.items(), key=lambda t: -t[1])
+    chr_set_merge[(sorted_cnt_data[0][0], tuple(sorted(path_using_significant_nclose_dict[path])))].append(path)
 
-    if sorted_cnt_data[0][1] / sum(cnt.values()) > MAJOR_BASELINE:
+    # Originally, it was tagged as "Mixed" if no major chromosome exists
+
+    # if sorted_cnt_data[0][1] / sum(cnt.values()) > MAJOR_BASELINE:
+    #     grouped_norm_data[sorted_cnt_data[0][0]].append((path, data))
+    # else:
+    #     grouped_norm_data['Mixed'].append((path, data)) 
+
+using_path = set()
+
+using_loc2weight = defaultdict(float)
+
+for (major_chr, sig_nclose), path_list in chr_set_merge.items():
+    simple_sorted_path = sorted(path_list, key = lambda t : len(path_using_nclose_dict[t]))
+    repr_path = simple_sorted_path[0]
+    using_path.add(repr_path)
+    for path in simple_sorted_path:
+        using_loc2weight[repr_path] += loc2weight[path]
+for path, data in karyotypes_norm_data.items():
+    cnt = Counter()
+    for c, w in data:
+        cnt[c] += w
+    sorted_cnt_data = sorted(cnt.items(), key=lambda t: -t[1])
+    if path in using_path:
         grouped_norm_data[sorted_cnt_data[0][0]].append((path, data))
-    else:
-        grouped_norm_data['Mixed'].append((path, data))
 
 cols = 10
 rows = 0
@@ -546,10 +732,22 @@ now_col = 1
 for chr_name, data_list in sorted_grouped_norm_data_items:
     bef_now_col = now_col
     plot_chr_name(ax_array[now_col][0], chr_name)
+    cnt = 0
+    pure_chr_exist = False
+    pure_data = None
     for i, data in enumerate(data_list):
-        plot_virtual_chromosome(ax_array[i // cols + now_col][i % cols + len(prefix_ratios)], data, cut_dict,
-                                label=f"{round(float(loc2weight[data[0]] / meandepth * 2), 2)}N")
-
+        bias = 0
+        if len(path_using_significant_nclose_dict[data[0]]) == 0 and len(display_indel[chr_name]) > 0 and using_loc2weight[data[0]] > display_indel[chr_name][0][3]:
+            pure_chr_exist = True
+            bias = -display_indel[chr_name][0][3]
+            pure_data = data
+        for j in range(int(using_loc2weight[data[0]] / meandepth * 2)*0+1):
+            plot_virtual_chromosome(ax_array[cnt // cols + now_col][cnt % cols + len(prefix_ratios)], data, cut_dict, 
+                                    label=f"{round(float((using_loc2weight[data[0]]) / meandepth * 2) + bias, 2)}N")
+            cnt+=1
+    if pure_chr_exist:
+        plot_virtual_chromosome(ax_array[cnt // cols + now_col][cnt % cols + len(prefix_ratios)], pure_data, cut_dict, indel = display_indel[chr_name][0],
+                                label=f"{round(display_indel[chr_name][0][3], 2)}N")
     now_col += ((len(data_list) - 1) // cols + 1) if data_list else 0
     for col in range(bef_now_col, now_col):
         plot_scale_bar(ax_array[col][len(prefix_ratios) - 1], chr_name)

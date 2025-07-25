@@ -274,7 +274,6 @@ function construct_grad(
     ws::AbstractVector{Int}
 ) where T <: AbstractFloat
     n_samples = size(X, 1)
-    
     return (matmul(view(X, :, ws)', Xw) .- datafit.Xty[ws]) ./ n_samples
 end
 
