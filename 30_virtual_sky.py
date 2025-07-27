@@ -586,7 +586,7 @@ for ind, w in weights_sorted_data:
     paf_loc = tot_loc_list[ind]
     key = paf_loc.split('/')[-3]
     if paf_loc.split('/')[-3] != '11_ref_ratio_outliers':
-        if w > meandepth * 0.01:
+        if w > 0:
             non_type4_top_path_raw.append(paf_loc)
             path_dict_raw[paf_loc] = w
             if w > meandepth * TARGET_WEIGHT:

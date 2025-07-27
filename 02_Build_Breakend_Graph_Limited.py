@@ -1750,13 +1750,8 @@ def find_breakend_centromere(repeat_censat_data : dict, chr_len : dict, df : pd.
 
             if rep_start_0 == 0 or rep_end_0 == chrom_length - 1:
                 continue
-            
-            final_weighted_ratio = -1
-            final_left_weighted = -1
-            final_right_weighted = -1
 
-            weak_cnt = 0
-            FLANK_SIZE_BP = 10 * M
+            FLANK_SIZE_BP = 1 * M
             # 좌측 flanking: repeat의 1-indexed 시작은 rep_start_0 + 1
             if rep_start_0 > 0:
                 left_flank_end = rep_start_0  # repeat 시작 전 마지막 base (1-indexed)
@@ -1795,6 +1790,7 @@ def find_breakend_centromere(repeat_censat_data : dict, chr_len : dict, df : pd.
                     depth_diff_data[chrom] = v
                     depth_dir_data[chrom] = left_weighted < right_weighted
 
+    result_df = pd.DataFrame(results)
 
     def find_min_error_partition(depth_diff_data):
         """
@@ -1873,24 +1869,7 @@ def find_breakend_centromere(repeat_censat_data : dict, chr_len : dict, df : pd.
 
     partition_dict, error = find_min_error_partition(depth_diff_data)
 
-    tar_set_set = set()
-
-    for k, v in partition_dict.items():
-        if len(v) == 1:
-            tar_set_set.add(tuple(sorted([k, v[0]])))
-        elif len(v) == 2:
-            tar_set_set.add(tuple(sorted([k, v[0]])))
-            tar_set_set.add(tuple(sorted([k, v[1]])))
-
-    # print(*partition_dict, sep='\n')
-
-    with open("censat_diff_list.txt", "a") as f:
-        print(PREFIX, file=f)
-        for k, v in sorted(depth_diff_data.items(), key=lambda t: -t[1]):
-            print(k, f"{round(v / meandepth, 2)}N", file=f)
-
     cnt = 0
-    result_df = pd.DataFrame(results)
     vtg_list = []
     prefix = "virtual_censat_contig"
 
@@ -1901,6 +1880,7 @@ def find_breakend_centromere(repeat_censat_data : dict, chr_len : dict, df : pd.
         elif len(v) == 2:
             connecting_pair.append((k, v[0]))
             connecting_pair.append((k, v[1]))
+        
         for chrom1, chrom2 in connecting_pair:
             row1 = result_df[result_df['chr'] == chrom1].iloc[0]
             row2 = result_df[result_df['chr'] == chrom2].iloc[0]
@@ -1952,7 +1932,7 @@ def find_breakend_centromere(repeat_censat_data : dict, chr_len : dict, df : pd.
                 
                 vtg_list.append(temp_node1)
                 vtg_list.append(temp_node2)
-            else: # left right
+            else: #left right
                 cnt+=1
                 N = int(CENSAT_COMPRESSABLE_THRESHOLD//2)
                 mid_row1_censat = int(row1.repeat_start_0 + row1.repeat_end_0)//2
@@ -1968,72 +1948,6 @@ def find_breakend_centromere(repeat_censat_data : dict, chr_len : dict, df : pd.
                 
                 vtg_list.append(temp_node1)
                 vtg_list.append(temp_node2)
-
-
-    """
-    result_df = result_df[result_df['weighted_ratio']>=result_df['baseline']]
-
-    censat_bnd_chr_list = sorted(set(result_df['chr']), key=lambda t : chr2int(t))
-    logging.info(f'Breakend censat chr : {" ".join(censat_bnd_chr_list)}')
-
-    right_df = result_df[result_df['right_weighted_meandepth'] > result_df['left_weighted_meandepth']]
-    left_df = result_df[result_df['left_weighted_meandepth'] > result_df['right_weighted_meandepth']]
-    vtg_list = []
-    prefix = "virtual_censat_contig"
-    cnt = 0
-    for row1, row2 in itertools.combinations(right_df.itertuples(index = False), 2):
-        cnt+=1
-        N = int(CENSAT_COMPRESSABLE_THRESHOLD//2)
-        mid_row1_censat = int(row1.repeat_start_0 + row1.repeat_end_0)//2
-        mid_row2_censat = int(row2.repeat_start_0 + row2.repeat_end_0)//2
-
-        temp_node1 = [f'{prefix}_{cnt}', N, 0, N//2, '-', row1.chr, 
-                     chr_len[row1.chr], mid_row1_censat - N//2, mid_row1_censat, 
-                     60, 1, (cnt-1)*2, (cnt-1)*2+1, 0, 0, 0, 0, 0, 0, '-', row1.chr, f"2.{(cnt-1)*2}"]
-        
-        temp_node2 = [f'{prefix}_{cnt}', N, N//2, N, '+', row2.chr,
-                     chr_len[row2.chr], mid_row2_censat, mid_row2_censat + N//2, 
-                     60, 1, (cnt-1)*2, (cnt-1)*2+1, 0, 0, 0, 0, 0, 0, '-', row1.chr, f"2.{(cnt-1)*2+1}"]
-        
-        vtg_list.append(temp_node1)
-        vtg_list.append(temp_node2)
-
-
-    for row1, row2 in itertools.combinations(left_df.itertuples(index = False), 2):
-        cnt+=1
-        N = int(CENSAT_COMPRESSABLE_THRESHOLD//2)
-        mid_row1_censat = int(row1.repeat_start_0 + row1.repeat_end_0)//2
-        mid_row2_censat = int(row2.repeat_start_0 + row2.repeat_end_0)//2
-
-        temp_node1 = [f'{prefix}_{cnt}', N, 0, N//2, '+', row1.chr, 
-                     chr_len[row1.chr], mid_row1_censat - N//2, mid_row1_censat, 
-                     60, 1, (cnt-1)*2, (cnt-1)*2+1, 0, 0, 0, 0, 0, 0, '+', row1.chr, f"2.{(cnt-1)*2}"]
-        
-        temp_node2 = [f'{prefix}_{cnt}', N, N//2, N, '-', row2.chr,
-                     chr_len[row2.chr], mid_row2_censat, mid_row2_censat + N//2, 
-                     60, 1, (cnt-1)*2, (cnt-1)*2+1, 0, 0, 0, 0, 0, 0, '+', row1.chr, f"2.{(cnt-1)*2+1}"]
-        
-        vtg_list.append(temp_node1)
-        vtg_list.append(temp_node2)
-
-    for row1 in left_df.itertuples(index = False):
-        for row2 in right_df.itertuples(index = False):
-            cnt+=1
-            N = int(CENSAT_COMPRESSABLE_THRESHOLD//2)
-            mid_row1_censat = int(row1.repeat_start_0 + row1.repeat_end_0)//2
-            mid_row2_censat = int(row2.repeat_start_0 + row2.repeat_end_0)//2
-
-            temp_node1 = [f'{prefix}_{cnt}', N, 0, N//2, '+', row1.chr, 
-                     chr_len[row1.chr], mid_row1_censat - N//2, mid_row1_censat, 
-                     60, 1, (cnt-1)*2, (cnt-1)*2+1, 0, 0, 0, 0, 0, 0, '+', row1.chr, f"2.{(cnt-1)*2}"]
-        
-            temp_node2 = [f'{prefix}_{cnt}', N, N//2, N, '+', row2.chr,
-                     chr_len[row2.chr], mid_row2_censat, mid_row2_censat + N//2, 
-                     60, 1, (cnt-1)*2, (cnt-1)*2+1, 0, 0, 0, 0, 0, 0, '+', row1.chr, f"2.{(cnt-1)*2+1}"]
-            
-            vtg_list.append(temp_node1)
-            vtg_list.append(temp_node2)
-    """
 
     return vtg_list
 
