@@ -1727,6 +1727,27 @@ def find_breakend_centromere(repeat_censat_data : dict, chr_len : dict, df : pd.
         for rep in intervals:
             rep_start_0, rep_end_0 = rep  # 0-indexed 좌표
 
+            results.append({
+                'chr': chrom,
+                'repeat_start_0': rep_start_0,
+                'repeat_end_0': rep_end_0,
+            })
+
+    meandepth = np.median(df['meandepth'])
+
+    depth_diff_data = dict()
+    depth_dir_data = dict()
+    for chrom, intervals in repeat_censat_data.items():
+        chrom_length = chr_len.get(chrom)
+        if chrom_length is None:
+            continue
+        chrom_df = df[df['chr'] == chrom]
+        if chrom_df.empty:
+            continue
+        
+        for rep in intervals:
+            rep_start_0, rep_end_0 = rep  # 0-indexed 좌표
+
             if rep_start_0 == 0 or rep_end_0 == chrom_length - 1:
                 continue
             
@@ -1735,72 +1756,221 @@ def find_breakend_centromere(repeat_censat_data : dict, chr_len : dict, df : pd.
             final_right_weighted = -1
 
             weak_cnt = 0
-            for FLANK_SIZE_BP in [5 * M, 10 * M, 20 * M]:
-                # 좌측 flanking: repeat의 1-indexed 시작은 rep_start_0 + 1
-                if rep_start_0 > 0:
-                    left_flank_end = rep_start_0  # repeat 시작 전 마지막 base (1-indexed)
-                    left_flank_start = max(1, (rep_start_0 + 1) - FLANK_SIZE_BP)
+            FLANK_SIZE_BP = 10 * M
+            # 좌측 flanking: repeat의 1-indexed 시작은 rep_start_0 + 1
+            if rep_start_0 > 0:
+                left_flank_end = rep_start_0  # repeat 시작 전 마지막 base (1-indexed)
+                left_flank_start = max(1, (rep_start_0 + 1) - FLANK_SIZE_BP)
 
-                    if left_flank_end < left_flank_start or (left_flank_end - left_flank_start + 1) < MIN_FLANK_SIZE_BP:
-                        left_flank_start = None
-                        left_flank_end = None
-                        left_weighted = None
-                    else:
-                        left_weighted = weighted_avg_meandepth(chrom_df, left_flank_start, left_flank_start + MIN_FLANK_SIZE_BP)
-                else:
+                if left_flank_end < left_flank_start or (left_flank_end - left_flank_start + 1) < FLANK_SIZE_BP:
                     left_flank_start = None
                     left_flank_end = None
                     left_weighted = None
-
-                # 우측 flanking: repeat의 끝 이후 첫 base부터
-                if rep_end_0 < chrom_length:
-                    right_flank_start = rep_end_0 + 1
-                    right_flank_end = min(chrom_length, rep_end_0 + FLANK_SIZE_BP)
-
-                    if right_flank_end < right_flank_start or (right_flank_end - right_flank_start + 1) < MIN_FLANK_SIZE_BP:
-                        right_flank_start = None
-                        right_flank_end = None
-                        right_weighted = None
-                    else:
-                        right_weighted = weighted_avg_meandepth(chrom_df, right_flank_end - MIN_FLANK_SIZE_BP, right_flank_end)
                 else:
+                    left_weighted = weighted_avg_meandepth(chrom_df, left_flank_start, left_flank_start + FLANK_SIZE_BP)
+            else:
+                left_flank_start = None
+                left_flank_end = None
+                left_weighted = None
+
+            # 우측 flanking: repeat의 끝 이후 첫 base부터
+            if rep_end_0 < chrom_length:
+                right_flank_start = rep_end_0 + 1
+                right_flank_end = min(chrom_length, rep_end_0 + FLANK_SIZE_BP)
+
+                if right_flank_end < right_flank_start or (right_flank_end - right_flank_start + 1) < FLANK_SIZE_BP:
                     right_flank_start = None
                     right_flank_end = None
                     right_weighted = None
-
-                # 양쪽 flanking 영역 중 하나라도 존재하지 않으면 해당 repeat를 건너뜁니다.
-                if left_flank_start is None or right_flank_start is None or left_weighted == 0 or right_weighted == 0:
-                    continue
-                
-                if left_weighted >= right_weighted:
-                    weighted_ratio = left_weighted / right_weighted
                 else:
-                    weighted_ratio = right_weighted / left_weighted
-                
-                if final_weighted_ratio < weighted_ratio:
-                    final_weighted_ratio = weighted_ratio
-                    final_left_weighted = left_weighted
-                    final_right_weighted = right_weighted
+                    right_weighted = weighted_avg_meandepth(chrom_df, right_flank_end - FLANK_SIZE_BP, right_flank_end)
+            else:
+                right_flank_start = None
+                right_flank_end = None
+                right_weighted = None
 
-                if WEAK_BREAKEND_CEN_RATIO_THRESHOLD < weighted_ratio:
-                    weak_cnt += 1
+            if not (right_weighted is None or left_weighted is None):
+                v = abs(right_weighted - left_weighted)
+                if 0.2 * meandepth <= v:
+                    depth_diff_data[chrom] = v
+                    depth_dir_data[chrom] = left_weighted < right_weighted
 
-            if final_weighted_ratio == -1:
-                continue
-            
-            baseline = WEAK_BREAKEND_CEN_RATIO_THRESHOLD if weak_cnt >= 2 else BREAKEND_CEN_RATIO_THRESHOLD 
 
-            results.append({
-                'chr': chrom,
-                'repeat_start_0': rep_start_0,
-                'repeat_end_0': rep_end_0,
-                'left_weighted_meandepth': final_left_weighted,
-                'right_weighted_meandepth': final_right_weighted,
-                'weighted_ratio': final_weighted_ratio,
-                'baseline' : baseline
-            })
+    def find_min_error_partition(depth_diff_data):
+        """
+        Given a dict mapping keys to numeric values, partition all keys into groups
+        of size 1, 2, or 3 to minimize total error.
+        
+        Returns a tuple (mapping, total_error):
+        - mapping: dict where for each group [k1, ...], mapping[k1] = list of other keys in the group
+        - total_error: sum of errors over all groups
+        """
+        # Sort keys for deterministic behavior
+        all_keys = tuple(sorted(depth_diff_data.keys()))
+        memo = {}
 
+        def recurse(remaining):
+            # remaining: tuple of keys still to partition
+            if not remaining:
+                return {}, 0
+            if remaining in memo:
+                return memo[remaining]
+
+            first, *rest = remaining
+            best_mapping = None
+            best_err = float('inf')
+
+            # Case 1: single
+            err1 = abs(depth_diff_data[first])
+            mapping1, err_sum1 = recurse(tuple(rest))
+            total1 = err1 + err_sum1
+            if total1 < best_err:
+                best_err = total1
+                best_mapping = {first: []}
+                best_mapping.update(mapping1)
+
+            # Case 2: pairs
+            for i, k2 in enumerate(rest):
+                err2 = abs(depth_diff_data[first] - depth_diff_data[k2])
+                rem2 = rest[:i] + rest[i+1:]
+                mapping2, err_sum2 = recurse(tuple(rem2))
+                total2 = err2 + err_sum2
+                if total2 < best_err:
+                    best_err = total2
+                    best_mapping = {first: [k2]}
+                    best_mapping.update(mapping2)
+
+            # Case 3: triples
+            n = len(rest)
+            for i in range(n):
+                for j in range(i+1, n):
+                    k2, k3 = rest[i], rest[j]
+                    v1 = depth_diff_data[first]
+                    v2 = depth_diff_data[k2]
+                    v3 = depth_diff_data[k3]
+                    # error = min over choosing one as single vs sum of the other two
+                    err3 = min(
+                        abs(v1 - (v2 + v3)),
+                        abs(v2 - (v1 + v3)),
+                        abs(v3 - (v1 + v2))
+                    )
+                    # build new remainder
+                    rem3 = list(rest)
+                    # remove k3 then k2 (reverse order to keep indices valid)
+                    rem3.pop(j)
+                    rem3.pop(i)
+                    mapping3, err_sum3 = recurse(tuple(rem3))
+                    total3 = err3 + err_sum3
+                    if total3 < best_err:
+                        best_err = total3
+                        best_mapping = {first: [k2, k3]}
+                        best_mapping.update(mapping3)
+
+            memo[remaining] = (best_mapping, best_err)
+            return memo[remaining]
+
+        return recurse(all_keys)
+
+    partition_dict, error = find_min_error_partition(depth_diff_data)
+
+    tar_set_set = set()
+
+    for k, v in partition_dict.items():
+        if len(v) == 1:
+            tar_set_set.add(tuple(sorted([k, v[0]])))
+        elif len(v) == 2:
+            tar_set_set.add(tuple(sorted([k, v[0]])))
+            tar_set_set.add(tuple(sorted([k, v[1]])))
+
+    # print(*partition_dict, sep='\n')
+
+    with open("censat_diff_list.txt", "a") as f:
+        print(PREFIX, file=f)
+        for k, v in sorted(depth_diff_data.items(), key=lambda t: -t[1]):
+            print(k, f"{round(v / meandepth, 2)}N", file=f)
+
+    cnt = 0
     result_df = pd.DataFrame(results)
+    vtg_list = []
+    prefix = "virtual_censat_contig"
+
+    for k, v in partition_dict.items():
+        connecting_pair = []
+        if len(v) == 1:
+            connecting_pair.append((k, v[0]))
+        elif len(v) == 2:
+            connecting_pair.append((k, v[0]))
+            connecting_pair.append((k, v[1]))
+        for chrom1, chrom2 in connecting_pair:
+            row1 = result_df[result_df['chr'] == chrom1].iloc[0]
+            row2 = result_df[result_df['chr'] == chrom2].iloc[0]
+            if depth_dir_data[chrom1] and depth_dir_data[chrom2]: #right right
+                cnt+=1
+                N = int(CENSAT_COMPRESSABLE_THRESHOLD//2)
+                mid_row1_censat = int(row1.repeat_start_0 + row1.repeat_end_0)//2
+                mid_row2_censat = int(row2.repeat_start_0 + row2.repeat_end_0)//2
+
+                temp_node1 = [f'{prefix}_{cnt}', N, 0, N//2, '-', row1.chr, 
+                            chr_len[row1.chr], mid_row1_censat - N//2, mid_row1_censat, 
+                            60, 1, (cnt-1)*2, (cnt-1)*2+1, 0, 0, 0, 0, 0, 0, '-', row1.chr, f"2.{(cnt-1)*2}"]
+                
+                temp_node2 = [f'{prefix}_{cnt}', N, N//2, N, '+', row2.chr,
+                            chr_len[row2.chr], mid_row2_censat, mid_row2_censat + N//2, 
+                            60, 1, (cnt-1)*2, (cnt-1)*2+1, 0, 0, 0, 0, 0, 0, '-', row1.chr, f"2.{(cnt-1)*2+1}"]
+                
+                vtg_list.append(temp_node1)
+                vtg_list.append(temp_node2)
+            elif not depth_dir_data[chrom1] and not depth_dir_data[chrom2]: #left left
+                cnt+=1
+                N = int(CENSAT_COMPRESSABLE_THRESHOLD//2)
+                mid_row1_censat = int(row1.repeat_start_0 + row1.repeat_end_0)//2
+                mid_row2_censat = int(row2.repeat_start_0 + row2.repeat_end_0)//2
+
+                temp_node1 = [f'{prefix}_{cnt}', N, 0, N//2, '+', row1.chr, 
+                            chr_len[row1.chr], mid_row1_censat - N//2, mid_row1_censat, 
+                            60, 1, (cnt-1)*2, (cnt-1)*2+1, 0, 0, 0, 0, 0, 0, '+', row1.chr, f"2.{(cnt-1)*2}"]
+                
+                temp_node2 = [f'{prefix}_{cnt}', N, N//2, N, '-', row2.chr,
+                            chr_len[row2.chr], mid_row2_censat, mid_row2_censat + N//2, 
+                            60, 1, (cnt-1)*2, (cnt-1)*2+1, 0, 0, 0, 0, 0, 0, '+', row1.chr, f"2.{(cnt-1)*2+1}"]
+                
+                vtg_list.append(temp_node1)
+                vtg_list.append(temp_node2)
+            elif depth_dir_data[chrom1] and not depth_dir_data[chrom2]: #right left
+                cnt+=1
+                N = int(CENSAT_COMPRESSABLE_THRESHOLD//2)
+                mid_row1_censat = int(row1.repeat_start_0 + row1.repeat_end_0)//2
+                mid_row2_censat = int(row2.repeat_start_0 + row2.repeat_end_0)//2
+
+                temp_node1 = [f'{prefix}_{cnt}', N, 0, N//2, '-', row1.chr, 
+                        chr_len[row1.chr], mid_row1_censat - N//2, mid_row1_censat, 
+                        60, 1, (cnt-1)*2, (cnt-1)*2+1, 0, 0, 0, 0, 0, 0, '-', row1.chr, f"2.{(cnt-1)*2}"]
+            
+                temp_node2 = [f'{prefix}_{cnt}', N, N//2, N, '-', row2.chr,
+                        chr_len[row2.chr], mid_row2_censat, mid_row2_censat + N//2, 
+                        60, 1, (cnt-1)*2, (cnt-1)*2+1, 0, 0, 0, 0, 0, 0, '-', row1.chr, f"2.{(cnt-1)*2+1}"]
+                
+                vtg_list.append(temp_node1)
+                vtg_list.append(temp_node2)
+            else: # left right
+                cnt+=1
+                N = int(CENSAT_COMPRESSABLE_THRESHOLD//2)
+                mid_row1_censat = int(row1.repeat_start_0 + row1.repeat_end_0)//2
+                mid_row2_censat = int(row2.repeat_start_0 + row2.repeat_end_0)//2
+
+                temp_node1 = [f'{prefix}_{cnt}', N, 0, N//2, '+', row1.chr, 
+                        chr_len[row1.chr], mid_row1_censat - N//2, mid_row1_censat, 
+                        60, 1, (cnt-1)*2, (cnt-1)*2+1, 0, 0, 0, 0, 0, 0, '+', row1.chr, f"2.{(cnt-1)*2}"]
+            
+                temp_node2 = [f'{prefix}_{cnt}', N, N//2, N, '+', row2.chr,
+                        chr_len[row2.chr], mid_row2_censat, mid_row2_censat + N//2, 
+                        60, 1, (cnt-1)*2, (cnt-1)*2+1, 0, 0, 0, 0, 0, 0, '+', row1.chr, f"2.{(cnt-1)*2+1}"]
+                
+                vtg_list.append(temp_node1)
+                vtg_list.append(temp_node2)
+
+
+    """
     result_df = result_df[result_df['weighted_ratio']>=result_df['baseline']]
 
     censat_bnd_chr_list = sorted(set(result_df['chr']), key=lambda t : chr2int(t))
@@ -1863,6 +2033,7 @@ def find_breakend_centromere(repeat_censat_data : dict, chr_len : dict, df : pd.
             
             vtg_list.append(temp_node1)
             vtg_list.append(temp_node2)
+    """
 
     return vtg_list
 

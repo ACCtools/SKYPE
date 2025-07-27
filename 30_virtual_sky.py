@@ -63,6 +63,9 @@ TARGET_WEIGHT = 0.1
 MEANDEPTH_FLANKING_LENGTH = 5*M
 TYPE34_BREAK_CHUKJI_LIMIT = 1*M
 
+TYPE4_CLUSTER_SIZE = 10 * M
+TYPE4_MEANDEPTH_FLANKING_LENGTH = 500 * K
+
 NCLOSE_SIM_COMPARE_RATIO = 1.2
 NCLOSE_SIM_DIFF_THRESHOLD = 5
 
@@ -114,6 +117,24 @@ def check_near_bnd(chrom, inside_st, inside_nd):
     # for inside_st
     st_depth = mean_depth(inside_st - MEANDEPTH_FLANKING_LENGTH, inside_st)
     nd_depth = mean_depth(inside_nd, inside_nd + MEANDEPTH_FLANKING_LENGTH)
+    if np.isnan(st_depth) or np.isnan(nd_depth):
+        return True
+
+    # print(chrom, inside_st, inside_nd, not similar_check(st_depth, nd_depth))
+    return not similar_check(st_depth, nd_depth, NCLOSE_SIM_COMPARE_RATIO)
+
+def check_near_type4(chrom, inside_st, inside_nd):
+    # subset of df for the given chromosome
+    df_chr = df[df['chr'] == chrom]
+
+    def mean_depth(start, end):
+        """Return mean meandepth over windows overlapping [start, end)."""
+        mask = (df_chr['nd'] > start) & (df_chr['st'] < end)
+        return df_chr.loc[mask, 'meandepth'].mean()
+
+    # for inside_st
+    st_depth = mean_depth(inside_st - TYPE4_MEANDEPTH_FLANKING_LENGTH, inside_st)
+    nd_depth = mean_depth(inside_nd, inside_nd + TYPE4_MEANDEPTH_FLANKING_LENGTH)
     if np.isnan(st_depth) or np.isnan(nd_depth):
         return True
 
@@ -526,7 +547,7 @@ for i in all_deletion_path:
         chr_nam2 = l[CHR_NAM]
         pos1 = int(l[CHR_STR])
         pos2 = int(l[CHR_END])
-        if abs(pos1-pos2) > MEANDEPTH_FLANKING_LENGTH:
+        if abs(pos1-pos2) > TYPE4_CLUSTER_SIZE:
             long_deletion_path[i] = (chr_nam1, pos1, pos2)
 
 for i in all_insertion_path:
@@ -538,22 +559,24 @@ for i in all_insertion_path:
         chr_nam2 = l[CHR_NAM]
         pos1 = int(l[CHR_STR])
         pos2 = int(l[CHR_END])
-        if abs(pos1-pos2) > MEANDEPTH_FLANKING_LENGTH:
+        if abs(pos1-pos2) > TYPE4_CLUSTER_SIZE:
             long_insertion_path[i] = (chr_nam1, pos1, pos2)
 
 display_indel = defaultdict(list)
 
 for path, check_arg in long_deletion_path.items():
     chrom, pos1, pos2 = check_arg
-    if check_near_bnd(chrom, pos1, pos1) or \
-       check_near_bnd(chrom, pos2, pos2):
-        display_indel[chrom].append(("d", pos1, pos2, deletion_path_dict[path]/meandepth * 2, chrom, path))
+    # if check_near_type4(chrom, pos1, pos1) or \
+    #    check_near_type4(chrom, pos2, pos2):
+    display_indel[chrom].append(("d", pos1, pos2, deletion_path_dict[path]/meandepth * 2, chrom, path))
 
 for path, check_arg in long_insertion_path.items():
     chrom, pos1, pos2 = check_arg
-    if check_near_bnd(chrom, pos1, pos1) or \
-       check_near_bnd(chrom, pos2, pos2):
-        display_indel[chrom].append(("i", pos1, pos2, insertion_path_dict[path]/meandepth * 2, chrom, path))
+    # if check_near_type4(chrom, pos1, pos1) or \
+    #    check_near_type4(chrom, pos2, pos2):
+    display_indel[chrom].append(("i", pos1, pos2, insertion_path_dict[path]/meandepth * 2, chrom, path))
+
+print(display_indel)
 
 path_dict = {}
 path_dict_raw = {}

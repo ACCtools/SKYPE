@@ -200,7 +200,7 @@ weight_list = jl.run_nnls_map(A_jl, B_jl, thread_data_jl)
 
 not_essential_nclose = set()
 
-print(f"Testing nclose pairs count : {len(tar_nclose_list)}")
+logging.info(f"Testing nclose pairs count : {len(tar_nclose_list)}")
 
 for nclose_pair, (weight_jl, predict_suc_B_jl) in zip(tar_nclose_list, weight_list):
     predict_suc_B = np.asarray(predict_suc_B_jl)
