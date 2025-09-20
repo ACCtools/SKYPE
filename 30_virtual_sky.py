@@ -65,7 +65,6 @@ TYPE34_BREAK_CHUKJI_LIMIT = 1*M
 
 TYPE4_CLUSTER_SIZE = 10 * M
 TYPE4_MEANDEPTH_FLANKING_LENGTH = 500 * K
-
 NCLOSE_SIM_COMPARE_RATIO = 1.2
 NCLOSE_SIM_DIFF_THRESHOLD = 5
 
@@ -576,7 +575,7 @@ for path, check_arg in long_insertion_path.items():
     #    check_near_type4(chrom, pos2, pos2):
     display_indel[chrom].append(("i", pos1, pos2, insertion_path_dict[path]/meandepth * 2, chrom, path))
 
-print(display_indel)
+# print(display_indel)
 
 path_dict = {}
 path_dict_raw = {}

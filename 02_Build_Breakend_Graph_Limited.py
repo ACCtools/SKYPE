@@ -3875,6 +3875,8 @@ parser.add_argument("--progress",
                     help="Show progress bar", action='store_true')
 parser.add_argument("--verbose", 
                     help="Enable index, paf output (Could be slow at HDD)", action='store_true')
+parser.add_argument("--test", 
+                    help=argparse.SUPPRESS, action='store_true')
 parser.add_argument("--skip_bam_analysis", 
                     help="Skip bam analysis", action='store_true')
 
@@ -3907,6 +3909,9 @@ SKIP_BAM_ANAL=args.skip_bam_analysis
 
 ORIGNAL_PAF_LOC_LIST = ORIGNAL_PAF_LOC_LIST_
 
+if args.test:
+    logging.warning("Test mode is enabled. This mode is for debugging purposes only. The results may be inaccurate and should not be trusted.")
+    CHR_CHANGE_LIMIT_ABS_MAX = 2
 
 assert(len(PAF_FILE_PATH) == len(ORIGNAL_PAF_LOC_LIST))
 
@@ -4533,7 +4538,7 @@ with open(f'{PREFIX}/path_di_data.pkl', 'wb') as f:
 with open(f'{PREFIX}/paf_file_path.pkl', 'wb') as f:
     pkl.dump(PAF_FILE_PATH, f)
 
-with open(f'{PREFIX}/report.txt', 'a') as f:
+with open(f'{PREFIX}/report.txt', 'w') as f:
     cnt = sum(i[1] for i in cnt_list)
     print(cancer_prefix, file=f)
     print(cnt, file=f)

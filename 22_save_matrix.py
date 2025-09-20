@@ -61,6 +61,8 @@ CHROMOSOME_COUNT = 23
 DIR_FOR = 1
 TELOMERE_EXPANSION = 5 * K
 
+HARD_PATH_COUNT_BASELINE = 100 * K
+
 def highpass_filter(data, cutoff, fs, order=3):
     """
     Butterworth high-pass filter를 이용하여 저주파 성분을 제거합니다.
@@ -702,7 +704,15 @@ m = np.shape(B)[0]
 n = len(paf_ans_list) + fclen // 4 + bclen // 4
 ncnt = 0
 
-AT = np.empty((n, ncm + m), dtype=np.float32, order='C')
+with open(f"{PREFIX}/report.txt", 'r') as f:
+    f.readline()
+    path_cnt = int(f.readline().strip())
+
+use_julia_solver = path_cnt <= HARD_PATH_COUNT_BASELINE
+
+shape = (n, ncm + m) if use_julia_solver else (ncm + m, n)
+A_arr = np.empty(shape, dtype=np.float32, order='C')
+
 fm = ncm + filter_len
 
 filter_vec_list = []
@@ -718,7 +728,7 @@ tar_def_path_ind_dict = {}
 ncnt = 0
 path_nclose_dict_set = defaultdict(set)
 for path, key_int_list in tqdm(paf_ans_list, desc='Recover depth from separated paths',
-                              disable=not sys.stdout.isatty() and not args.progress):
+                               disable=not sys.stdout.isatty() and not args.progress):
     ki = key_int_list[0]
     np.copyto(tmp_v, vec_dict[ki])
     for ki in key_int_list[1:]:
@@ -732,6 +742,7 @@ for path, key_int_list in tqdm(paf_ans_list, desc='Recover depth from separated 
             s+=2
         else:
             s+=1
+    
     if NCLOSE_WEIGHT_USE:
         tmp_n.fill(0)
         idx_edge_nclose_list = [pair[1] for pair in import_index_path(path)[1:-1]]
@@ -744,17 +755,20 @@ for path, key_int_list in tqdm(paf_ans_list, desc='Recover depth from separated 
                 tmp_n[nclose2int[pair]] += norm_nclose_weight
             if rev in cov_nclose_set:
                 tmp_n[nclose2int[rev]] += norm_nclose_weight
+        
+        if use_julia_solver:
+            A_arr[ncnt, :ncm] = tmp_n
+        else:
+            A_arr[:ncm, ncnt] = tmp_n
 
-        # Place nclose part into A
-        AT[ncnt, :ncm] = tmp_n
-
-    # Place coverage vector into A
-    AT[ncnt, ncm:] = tmp_v
-
+    if use_julia_solver:
+        A_arr[ncnt, ncm:] = tmp_v
+    else:
+        A_arr[ncm:, ncnt] = tmp_v
+        
     path_rel = get_relative_path(path)
     if path_rel in tar_def_path_set:
         tar_def_path_ind_dict[path_rel] = ncnt
-
 
     pathrel2ncnt[path_rel] = ncnt
     ncnt += 1
@@ -770,19 +784,32 @@ for i in tqdm(range(1, fclen // 4 + 1), desc='Parse coverage from forward-direct
 
     ov = get_vec_from_stat_loc(ov_loc)
     bv = get_vec_from_stat_loc(bv_loc)
-
+    
     if NCLOSE_WEIGHT_USE:
-        AT[ncnt, :ncm] = tmp_n
+        if use_julia_solver:
+            A_arr[ncnt, :ncm] = tmp_n
+        else:
+            A_arr[:ncm, ncnt] = tmp_n
 
-    AT[ncnt, ncm:] = ov - bv
+    if use_julia_solver:
+        A_arr[ncnt, ncm:] = ov - bv
+    else:
+        A_arr[ncm:, ncnt] = ov - bv
+        
     path_nclose_dict_set[ncnt] = set()
 
     pathrel2ncnt[get_relative_path(bv_paf_loc)] = ncnt
     ncnt += 1
-
+    
 init_cols = [tar_def_path_ind_dict[i] for i in tar_chr_data.values()]
-AT_pri = AT[init_cols, ncm:fm]
-A_pri = AT_pri.T
+
+if use_julia_solver:
+    AT_pri = A_arr[init_cols, ncm:fm]
+    A_pri = AT_pri.T
+else:
+    AT_pri = A_arr[ncm:fm, init_cols]
+    A_pri = AT_pri
+
 w_pri = nnls(A_pri, B[:filter_len])[0]
 
 # Process backward-directed outlier contigs
@@ -797,9 +824,16 @@ for i in tqdm(range(1, bclen // 4 + 1), desc='Parse coverage from backward-direc
     bv = get_vec_from_stat_loc(bv_loc)
 
     if NCLOSE_WEIGHT_USE:
-        AT[ncnt, :ncm] = tmp_n
-
-    AT[ncnt, ncm:] = ov + bv
+        if use_julia_solver:
+            A_arr[ncnt, :ncm] = tmp_n
+        else:
+            A_arr[:ncm, ncnt] = tmp_n
+            
+    if use_julia_solver:
+        A_arr[ncnt, ncm:] = ov + bv
+    else:
+        A_arr[ncm:, ncnt] = ov + bv
+        
     path_nclose_dict_set[ncnt] = set()
 
     pathrel2ncnt[get_relative_path(bv_paf_loc)] = ncnt
@@ -814,11 +848,19 @@ for (i1, i2) in itertools.pairwise(dep_list):
     assert(i1 >= i2)
 
 with h5py.File(f'{PREFIX}/matrix.h5', 'w') as hf:
-    dset_A = hf.create_dataset('A', shape=AT[:, :fm].shape, dtype=AT.dtype)
-    dset_A.write_direct(AT, source_sel=np.s_[:, :fm])
+    if use_julia_solver:
+        dset_A = hf.create_dataset('A', shape=A_arr[:, :fm].shape, dtype=A_arr.dtype)
+        dset_A.write_direct(A_arr, source_sel=np.s_[:, :fm])
 
-    dset_A_fail = hf.create_dataset('A_fail', shape=AT[:, fm:].shape, dtype=AT.dtype)
-    dset_A_fail.write_direct(AT, source_sel=np.s_[:, fm:])
+        dset_A_fail = hf.create_dataset('A_fail', shape=A_arr[:, fm:].shape, dtype=A_arr.dtype)
+        dset_A_fail.write_direct(A_arr, source_sel=np.s_[:, fm:])
+    else:
+        dset_A = hf.create_dataset('A', shape=A_arr[:fm, :].shape, dtype=A_arr.dtype)
+        dset_A.write_direct(A_arr, source_sel=np.s_[:fm, :])
+
+        dset_A_fail = hf.create_dataset('A_fail', shape=A_arr[fm:, :].shape, dtype=A_arr.dtype)
+        dset_A_fail.write_direct(A_arr, source_sel=np.s_[fm:, :])
+
 
     dset_B = hf.create_dataset('B', shape=B[:fm].shape, dtype=B.dtype)
     dset_B.write_direct(B, source_sel=np.s_[:fm])

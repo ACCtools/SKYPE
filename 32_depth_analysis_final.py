@@ -76,6 +76,8 @@ TYPE34_BREAK_CHUKJI_LIMIT = 1*M
 NCLOSE_SIM_COMPARE_RAITO = 1.2
 NCLOSE_SIM_DIFF_THRESHOLD = 5
 
+HARD_PATH_COUNT_BASELINE = 100 * K
+
 def similar_check(v1, v2, ratio=TYPE2_SIM_COMPARE_RAITO):
     try:
         assert(v1 >= 0 and v2 >= 0)
@@ -523,7 +525,7 @@ def pairs_to_vcf(pairs, contig_data, contig_lengths, display_indel, out_vcf_path
             pos_b = b[7]   # 두 번째의 reference start
 
             if chr_a != chr_b:
-                sv_id = f"tr{tr_counter}"
+                sv_id = f"SKYPE.BND.{tr_counter}"
                 tr_counter += 1
 
                 fo.write(
@@ -538,12 +540,17 @@ def pairs_to_vcf(pairs, contig_data, contig_lengths, display_indel, out_vcf_path
                 )
 
             else:
-                sv_id = f"inv{inv_counter}"
+                sv_id = f"SKYPE.INV.{inv_counter}"
                 inv_counter += 1
-
+                if pos_a < pos_b:
+                    fpos = pos_a
+                    bpos = pos_b
+                else:
+                    bpos = pos_a
+                    fpos = pos_b
                 fo.write(
-                    f"{chr_a}\t{pos_a}\t{sv_id}\tN\t<INV>\t.\t.\t"
-                    f"SVTYPE=INV;END={pos_b}\n"
+                    f"{chr_a}\t{fpos}\t{sv_id}\tN\t<INV>\t.\t.\t"
+                    f"SVTYPE=INV;END={bpos}\n"
                 )
 
         # 3) indel 처리
@@ -552,7 +559,7 @@ def pairs_to_vcf(pairs, contig_data, contig_lengths, display_indel, out_vcf_path
             for indel in indel_list:
                 indel_type, start, end, _, _ = indel
                 if indel_type == 'd':
-                    sv_id = f"del{indel_counter}"
+                    sv_id = f"SKYPE.DEL.{indel_counter}"
                     svlen = -(end - start)
                     alt = "<DEL>"
                 elif indel_type == 'i':
@@ -652,14 +659,22 @@ with h5py.File(f"{PREFIX}/matrix.h5", "r") as f:
     dBf.read_direct(B_fail)
 
     b_start_ind = int(f["B_depth_start"][()])
-os.remove(f'{PREFIX}/matrix.h5')
 
 B = np.hstack([B, B_fail])
 predicted_cluster_B_tmp = np.zeros_like(B)
 
+with open(f"{PREFIX}/report.txt", 'r') as f:
+    f.readline()
+    path_cnt = int(f.readline().strip())
+
+use_julia_solver = path_cnt <= HARD_PATH_COUNT_BASELINE
+
 for (path, cn) in final_sky_list:
     ncnt = pathrel2ncnt[get_relative_path(path)]
-    predicted_cluster_B_tmp += np.hstack([A[ncnt, :], A_fail[ncnt, :]]) * cn
+    if use_julia_solver:
+        predicted_cluster_B_tmp += np.hstack([A[ncnt, :], A_fail[ncnt, :]]) * cn
+    else:
+        predicted_cluster_B_tmp += np.hstack([A[:, ncnt].ravel(), A_fail[:, ncnt].ravel()]) * cn
 
 predicted_cluster_B = predicted_cluster_B_tmp[b_start_ind:]
 B = B[b_start_ind:]
@@ -1221,4 +1236,5 @@ circos.ax.add_artist(cn_line_legend)
 fig.savefig(f'{PREFIX}/total_cov.pdf')
 fig.savefig(f"{PREFIX}/total_cov.png")
 
+os.remove(f'{PREFIX}/matrix.h5')
 logging.info("SKYPE pipeline end")

@@ -540,10 +540,15 @@ def pairs_to_vcf(pairs, contig_data, contig_lengths, display_indel, out_vcf_path
             else:
                 sv_id = f"inv{inv_counter}"
                 inv_counter += 1
-
+                if pos_a < pos_b:
+                    fpos = pos_a
+                    bpos = pos_b
+                else:
+                    bpos = pos_a
+                    fpos = pos_b
                 fo.write(
-                    f"{chr_a}\t{pos_a}\t{sv_id}\tN\t<INV>\t.\t.\t"
-                    f"SVTYPE=INV;END={pos_b}\n"
+                    f"{chr_a}\t{fpos}\t{sv_id}\tN\t<INV>\t.\t.\t"
+                    f"SVTYPE=INV;END={bpos}\n"
                 )
 
         # 3) indel 처리
