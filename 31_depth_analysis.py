@@ -1185,5 +1185,5 @@ cn_line_legend = circos.ax.legend(
 )
 circos.ax.add_artist(cn_line_legend)
 
-fig.savefig(f'{PREFIX}/total_cov_raw.pdf')
-fig.savefig(f"{PREFIX}/total_cov_raw.png")
+fig.savefig(f'{PREFIX}/total_cov.pdf')
+fig.savefig(f"{PREFIX}/total_cov.png")

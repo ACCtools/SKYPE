@@ -14,7 +14,6 @@ import collections
 import scipy.stats
 import glob
 
-
 from scipy.signal import butter, filtfilt
 from pycirclize import Circos
 from matplotlib.lines import Line2D
@@ -23,14 +22,13 @@ from pycirclize.track import Track
 from collections import defaultdict
 from collections import Counter
 
-from juliacall import Main as jl
-
 
 logging.basicConfig(
     format='%(asctime)s %(levelname)s:%(message)s',
     level=logging.INFO,
     datefmt='%m/%d/%Y %I:%M:%S %p',
 )
+
 logging.info("32_depth_analysis_final start")
 
 BREAKEND_REMARKABLE_CN_RATIO = 0.05
@@ -107,7 +105,6 @@ def check_near_bnd(chrom, inside_st, inside_nd):
 
     # print(chrom, inside_st, inside_nd, not similar_check(st_depth, nd_depth))
     return not similar_check(st_depth, nd_depth, NCLOSE_SIM_COMPARE_RAITO)
-
 
 def import_index_path(file_path : str) -> list:
     file_path_list = file_path.split('/')
@@ -629,6 +626,17 @@ back_contig_path = RATIO_OUTLIER_FOLDER+"back_jump/"
 TELO_CONNECT_NODES_INFO_PATH = PREFIX+"/telomere_connected_list.txt"
 vcf_path = f"{PREFIX}/SV_call_result.vcf"
 
+with open(f"{PREFIX}/report.txt", 'r') as f:
+    f.readline()
+    path_cnt = int(f.readline().strip())
+
+use_julia_solver = path_cnt <= HARD_PATH_COUNT_BASELINE
+
+if not use_julia_solver:
+    os.remove(f'{PREFIX}/matrix.h5')
+    logging.info("SKYPE pipeline end")
+    exit(0)
+
 contig_data = import_data2(PREPROCESSED_PAF_FILE_PATH)
 telo_connected_node = extract_telomere_connect_contig(TELO_CONNECT_NODES_INFO_PATH)
 
@@ -663,18 +671,9 @@ with h5py.File(f"{PREFIX}/matrix.h5", "r") as f:
 B = np.hstack([B, B_fail])
 predicted_cluster_B_tmp = np.zeros_like(B)
 
-with open(f"{PREFIX}/report.txt", 'r') as f:
-    f.readline()
-    path_cnt = int(f.readline().strip())
-
-use_julia_solver = path_cnt <= HARD_PATH_COUNT_BASELINE
-
 for (path, cn) in final_sky_list:
     ncnt = pathrel2ncnt[get_relative_path(path)]
-    if use_julia_solver:
-        predicted_cluster_B_tmp += np.hstack([A[ncnt, :], A_fail[ncnt, :]]) * cn
-    else:
-        predicted_cluster_B_tmp += np.hstack([A[:, ncnt].ravel(), A_fail[:, ncnt].ravel()]) * cn
+    predicted_cluster_B_tmp += np.hstack([A[ncnt, :], A_fail[ncnt, :]]) * cn
 
 predicted_cluster_B = predicted_cluster_B_tmp[b_start_ind:]
 B = B[b_start_ind:]
@@ -1027,11 +1026,12 @@ for i, nclose_a in enumerate(nclose_list):
                             conjoined_nclose_node_set.add((nclose_b[0], nclose_a[1]))
 
 significant_nclose = []
-for nclose in (nclose_set | conjoined_nclose_node_set):
-    st, ed = nclose
-    if check_near_bnd(contig_data[st][CHR_NAM], contig_data[st][CHR_STR], contig_data[st][CHR_END]) or \
-       check_near_bnd(contig_data[ed][CHR_NAM], contig_data[ed][CHR_STR], contig_data[ed][CHR_END]):
-        significant_nclose.append(nclose)
+for data_set in [nclose_set, conjoined_nclose_node_set]:
+    for nclose in data_set:
+        st, ed = nclose
+        if check_near_bnd(contig_data[st][CHR_NAM], contig_data[st][CHR_STR], contig_data[st][CHR_END]) or \
+        check_near_bnd(contig_data[ed][CHR_NAM], contig_data[ed][CHR_STR], contig_data[ed][CHR_END]):
+            significant_nclose.append(nclose)
 
 significant_nclose = set(significant_nclose)
 
@@ -1233,8 +1233,8 @@ cn_line_legend = circos.ax.legend(
 )
 circos.ax.add_artist(cn_line_legend)
 
-fig.savefig(f'{PREFIX}/total_cov.pdf')
-fig.savefig(f"{PREFIX}/total_cov.png")
+fig.savefig(f'{PREFIX}/total_cov_cluster.pdf')
+fig.savefig(f"{PREFIX}/total_cov_cluster.png")
 
 os.remove(f'{PREFIX}/matrix.h5')
 logging.info("SKYPE pipeline end")
