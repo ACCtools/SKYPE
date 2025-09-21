@@ -4,12 +4,13 @@ import matplotlib.pyplot as plt
 import pickle as pkl
 import matplotlib.patches as patches
 
+import re
 import ast
 import glob
 import logging
 import argparse
-from datetime import datetime
 
+from tqdm import tqdm
 from matplotlib.ticker import MultipleLocator
 from collections import defaultdict
 from collections import Counter
@@ -42,6 +43,9 @@ CTG_RPTCASE = 17
 CTG_MAINFLOWDIR = 18
 CTG_MAINFLOWCHR = 19
 
+DIR_FOR = 1
+DIR_BAK = 1
+
 ABS_MAX_COVERAGE_RATIO = 3
 K = 1000
 M = K * 1000
@@ -58,7 +62,7 @@ TEL_TYPE = 2
 
 MAJOR_BASELINE = 0.6
 
-TARGET_WEIGHT = 0.1
+TARGET_DEPTH = 0.2
 
 MEANDEPTH_FLANKING_LENGTH = 5*M
 TYPE34_BREAK_CHUKJI_LIMIT = 1*M
@@ -67,6 +71,9 @@ TYPE4_CLUSTER_SIZE = 10 * M
 TYPE4_MEANDEPTH_FLANKING_LENGTH = 500 * K
 NCLOSE_SIM_COMPARE_RATIO = 1.2
 NCLOSE_SIM_DIFF_THRESHOLD = 5
+
+JOIN_BASELINE = 0.8
+KARYOTYPE_SECTION_MINIMUM_LENGTH = 100 * K
 
 CHR_COLORS = {
     "chr1":  "#FFC000",
@@ -104,7 +111,7 @@ def similar_check(v1, v2, ratio):
     mi, ma = sorted([v1, v2])
     return False if mi == 0 else (ma / mi <= ratio) or ma-mi < NCLOSE_SIM_DIFF_THRESHOLD
 
-def check_near_bnd(chrom, inside_st, inside_nd):
+def check_near_bnd(chrom, inside_st, inside_nd, ratio=NCLOSE_SIM_COMPARE_RATIO):
     # subset of df for the given chromosome
     df_chr = df[df['chr'] == chrom]
 
@@ -116,11 +123,12 @@ def check_near_bnd(chrom, inside_st, inside_nd):
     # for inside_st
     st_depth = mean_depth(inside_st - MEANDEPTH_FLANKING_LENGTH, inside_st)
     nd_depth = mean_depth(inside_nd, inside_nd + MEANDEPTH_FLANKING_LENGTH)
+    
     if np.isnan(st_depth) or np.isnan(nd_depth):
         return True
 
     # print(chrom, inside_st, inside_nd, not similar_check(st_depth, nd_depth))
-    return not similar_check(st_depth, nd_depth, NCLOSE_SIM_COMPARE_RATIO)
+    return not similar_check(st_depth, nd_depth, ratio)
 
 def check_near_type4(chrom, inside_st, inside_nd):
     # subset of df for the given chromosome
@@ -441,6 +449,149 @@ def extract_nclose_node(nclose_path: str) -> list:
             nclose_list.append((int(line[1]), int(line[2])))
     return nclose_list
 
+
+def parse_chromosome_labels(s):
+    """
+    Parse '...<f|b>_...<f|b>' into a canonical tuple:
+      (left_label, left_is_f, right_label, right_is_f)
+
+    Rules:
+    - The two ends must end with 'f' or 'b' (assert if not).
+    - Keep each '...' label string intact (e.g., 'chr12', 'scaf_007', etc.).
+    - Canonicalize by sorting so the lexicographically smaller label comes first.
+      If labels are equal, put 'f' (True) before 'b' (False).
+    - When swapping due to sorting, directions stay attached to their original labels.
+      (So 'chr12f_chr1b' becomes ('chr1', True, 'chr12', False).)
+    """
+    m = re.fullmatch(r'(.+?)([fb])_(.+?)([fb])', s)
+    assert m is not None, "Input must match ...(f|b)_...(f|b) pattern"
+
+    a_label, a_dir_ch, b_label, b_dir_ch = m.groups()
+    a_is_f = (a_dir_ch == 'f')
+    b_is_f = (b_dir_ch == 'f')
+
+    # Canonical order by label; if same label, 'f' (True) first.
+    if (a_label > b_label) or (a_label == b_label and not a_is_f and b_is_f):
+        # Swap ends to enforce canonical order; keep directions with their labels.
+        a_label, b_label = b_label, a_label
+        a_is_f, b_is_f = b_is_f, a_is_f
+
+    return (a_label, a_is_f, b_label, b_is_f)
+
+
+def max_aligned_match_length(
+    seq_a: list[tuple[tuple[str, str], int]],
+    seq_b: list[tuple[tuple[str, str], int]],
+) -> int:
+    """
+    Return the maximum total matched length after sliding two piecewise-constant
+    label sequences along one axis. A and B are lists of ((chrom, strand), length).
+    Only regions with exactly the same (chrom, strand) contribute to the score.
+
+    Algorithm:
+      1) Convert each sequence into absolute intervals [(start, end, label)].
+      2) Consider candidate shifts = {a_ep - b_ep | a_ep in endpoints(A), b_ep in endpoints(B)}.
+         (The overlap configuration only changes when an endpoint meets another.)
+      3) For each shift, line-sweep over the two interval lists and accumulate
+         overlap length where labels are equal.
+      4) Return the maximum accumulated length across all shifts.
+
+    Time complexity:
+      Let n, m be #segments. Endpoints ~ (n+1), (m+1).
+      Candidates O((n+1)*(m+1)); each evaluation O(n+m). Works well for tens~hundreds of segments.
+    """
+    # --- build absolute intervals: [(start, end, label)] and endpoint lists ---
+    def build_intervals(seq):
+        intervals = []
+        endpoints = []
+        pos = 0
+        endpoints.append(pos)
+        for (label, length) in seq:
+            start = pos
+            end = pos + length
+            intervals.append((start, end, label))
+            pos = end
+            endpoints.append(pos)
+        return intervals, endpoints
+
+    A, A_ep = build_intervals(seq_a)
+    B, B_ep = build_intervals(seq_b)
+
+    if not A or not B:
+        return 0
+
+    # --- generate candidate shifts (all endpoint differences) ---
+    # shift d means: compare A intervals with B intervals shifted by +d
+    candidates = set()
+    for a_e in A_ep:
+        for b_e in B_ep:
+            candidates.add(a_e - b_e)
+
+    # --- overlap length for a given shift ---
+    def match_length_for_shift(d: int) -> int:
+        i, j = 0, 0
+        total = 0
+        # Two-pointer sweep over A and shifted-B
+        while i < len(A) and j < len(B):
+            a_s, a_e, a_lab = A[i]
+            b_s, b_e, b_lab = B[j]
+            b_s += d
+            b_e += d
+
+            # If no overlap, advance the one that ends earlier / starts later
+            if a_e <= b_s:
+                i += 1
+                continue
+            if b_e <= a_s:
+                j += 1
+                continue
+
+            # Overlapping segment
+            ov_s = a_s if a_s > b_s else b_s
+            ov_e = a_e if a_e < b_e else b_e
+            if ov_e > ov_s and a_lab == b_lab:
+                total += (ov_e - ov_s)
+
+            # Advance the interval that ends first
+            if a_e <= b_e:
+                i += 1
+            else:
+                j += 1
+        return total
+
+    best = 0
+    # (Optional) small heuristic: iterate over sorted candidates for deterministic behavior
+    for d in sorted(candidates):
+        val = match_length_for_shift(d)
+        if val > best:
+            best = val
+
+    return best
+
+def should_join_by_baseline(
+    seq_a: list[tuple[tuple[str, str], int]],
+    seq_b: list[tuple[tuple[str, str], int]]
+) -> bool:
+    """
+    Decide if two sequences should be joined based on:
+      max_aligned_match_length(seq_a, seq_b) / max(total_len_a, total_len_b) >= JOIN_BASELINE
+
+    Notes:
+      - Returns False if both sequences have total length 0 (to avoid 0-division).
+      - Assumes non-negative lengths.
+      - Threshold is inclusive (>=).
+
+    """
+
+    total_a = sum(length for (_, length) in seq_a)
+    total_b = sum(length for (_, length) in seq_b)
+    denom = total_a if total_a >= total_b else total_b
+    if denom == 0:
+        return False
+
+    score = max_aligned_match_length(seq_a, seq_b)
+    return (score / denom) >= JOIN_BASELINE
+
 parser = argparse.ArgumentParser(description="SKYPE depth analysis")
 
 parser.add_argument("ppc_paf_file_path", 
@@ -462,6 +613,9 @@ parser.add_argument("cell_line_name",
                     help="Path to the cytoband information file.")
 
 args = parser.parse_args()
+
+# t = "30_virtual_sky.py /home/hyunwoo/ACCtools-pipeline/90_skype_run/Caki-1/20_alignasm/Caki-1.ctg.aln.paf.ppc.paf /home/hyunwoo/ACCtools-pipeline/90_skype_run/Caki-1/01_depth/Caki-1_normalized.win.stat.gz public_data/chm13v2.0_telomere.bed public_data/chm13v2.0.fa.fai 30_skype_pipe/Caki-1_23_28_17 Caki-1"
+# args = parser.parse_args(t.split()[1:])
 
 PREFIX = args.prefix
 CHROMOSOME_INFO_FILE_PATH = args.reference_fai_path
@@ -588,7 +742,7 @@ for ind, w in weights_sorted_data:
         if w > 0:
             non_type4_top_path_raw.append(paf_loc)
             path_dict_raw[paf_loc] = w
-            if w > meandepth * TARGET_WEIGHT:
+            if w > meandepth / 2 * TARGET_DEPTH:
                 non_type4_top_path.append(paf_loc)
                 path_dict[paf_loc] = w
 
@@ -628,8 +782,9 @@ for nclose in nclose_nodes:
     st, ed = nclose
     if ppc_data[st][CHR_NAM] != ppc_data[ed][CHR_NAM]:
         if check_near_bnd(ppc_data[st][CHR_NAM], ppc_data[st][CHR_STR], ppc_data[st][CHR_END]) or \
-        check_near_bnd(ppc_data[ed][CHR_NAM], ppc_data[ed][CHR_STR], ppc_data[ed][CHR_END]):
+           check_near_bnd(ppc_data[ed][CHR_NAM], ppc_data[ed][CHR_STR], ppc_data[ed][CHR_END]):
             significant_nclose.append(nclose)
+
 significant_nclose = set(significant_nclose)
 
 # for i in significant_nclose:
@@ -644,13 +799,17 @@ path_using_nclose_dict = defaultdict(set)
 path_using_significant_nclose_dict = defaultdict(set)
 cut_dict={}
 karyotypes_data = {}
+karyotypes_data_direction_include = {}
+
 for path_path in non_type4_top_path:
     paf_combo = []
     path_contig_data = []
     curr_path_cut_list = []
     curr_path_inverse_list = []
     curr_path_telo_list = []
+    paf_combo_with_dir = []
     path = import_index_path(path_path)
+    curr_increment = '+' if path[0][0][-1] == 'f' else '-'
     s = 1
     while s < len(path) - 2:
         nclose_cand = tuple(sorted([path[s][1], path[s+1][1]]))
@@ -686,8 +845,78 @@ for path_path in non_type4_top_path:
         tot_len += curr_len
         path_contig_data += temp_list
     cut_dict[path_path] = [curr_path_cut_list, curr_path_inverse_list, curr_path_telo_list]
-            
+
+    # if path_path == '30_skype_pipe/Caki-1_23_28_17/20_depth/chr3b_chr4b/1.paf':
+    #     with open("12f_12b_path.txt", "w") as f:
+    #         for i in path_contig_data:
+    #             print(i, file = f)
+
+    first_bias = 0
+    curr_chr_with_dir = (path_contig_data[0][CHR_NAM], curr_increment)
+    curr_combo_len_dir = path_contig_data[0][CHR_END] - path_contig_data[0][CHR_STR]
+    for i in range(1, len(path_contig_data)):
+        incr = curr_increment
+        if path_contig_data[i][CTG_NAM] != path_contig_data[i-1][CTG_NAM]: # 같은 염색체
+            if path_contig_data[i][CHR_END] > path_contig_data[i-1][CHR_STR]:
+                incr = '+'
+            elif path_contig_data[i][CHR_STR] < path_contig_data[i-1][CHR_END]:
+                incr = '-'
+        else: # 같은 contig : 쿼리 방향으로 봐야함
+            if path_contig_data[i][CTG_END] > path_contig_data[i-1][CTG_STR]:
+                incr = path_contig_data[i][CTG_DIR]
+            elif path_contig_data[i][CTG_STR] < path_contig_data[i-1][CTG_END]:
+                incr = '+' if path_contig_data[i][CTG_DIR] == '-' else '-'
+        if (path_contig_data[i][CHR_NAM], incr) != curr_chr_with_dir:
+            # if path_contig_data[i][CHR_NAM] == curr_chr_with_dir[0]:
+            #     if path_contig_data[i-1][CHR_END] > 
+                # if path_path == '30_skype_pipe/Caki-1_23_28_17/20_depth/chr3b_chr4b/1.paf':
+                #     print(path_contig_data[i])
+                curr_increment = incr
+                if curr_combo_len_dir > KARYOTYPE_SECTION_MINIMUM_LENGTH:
+                    if len(paf_combo_with_dir) > 0:
+                        paf_combo_with_dir.append((curr_chr_with_dir, curr_combo_len_dir))
+                    else:
+                        paf_combo_with_dir.append((curr_chr_with_dir, curr_combo_len_dir + first_bias))
+                        first_bias = 0
+                else:
+                    if len(paf_combo_with_dir) > 0:
+                        paf_combo_with_dir[-1] = (paf_combo_with_dir[-1][0], paf_combo_with_dir[-1][1] + curr_combo_len_dir)
+                    else:
+                        first_bias += curr_combo_len_dir
+                curr_chr_with_dir = (path_contig_data[i][CHR_NAM], incr)
+                curr_combo_len_dir = (
+                    path_contig_data[i][CHR_END]
+                    - path_contig_data[i][CHR_STR]
+                )
+        else:
+            curr_combo_len_dir += (
+                path_contig_data[i][CHR_END]
+                - path_contig_data[i][CHR_STR]
+            )
+
+    # if path_path == '30_skype_pipe/Caki-1_23_28_17/20_depth/chr5f_chr20f/1.paf':
+    #     with open("12f_12b_path check.txt", "w") as f:
+    #         for i in path_contig_data:
+    #             print(i, file=f)
+
+    if curr_combo_len_dir > KARYOTYPE_SECTION_MINIMUM_LENGTH:
+        if len(paf_combo_with_dir) > 0:
+            paf_combo_with_dir.append((curr_chr_with_dir, curr_combo_len_dir))
+        else:
+            paf_combo_with_dir.append((curr_chr_with_dir, curr_combo_len_dir + first_bias))
+    else:
+        if len(paf_combo_with_dir) > 0:
+            paf_combo_with_dir[-1] = (paf_combo_with_dir[-1][0], paf_combo_with_dir[-1][1] + curr_combo_len_dir)
+        else:
+            paf_combo_with_dir.append((curr_chr_with_dir, curr_combo_len_dir + first_bias))
+    paf_combo_with_dir_compress = [paf_combo_with_dir[0]]
+    for i in paf_combo_with_dir[1:]:
+        if paf_combo_with_dir_compress[-1][0] == i[0]:
+            paf_combo_with_dir_compress[-1] = (paf_combo_with_dir_compress[-1][0], paf_combo_with_dir_compress[-1][1] + i[1])
+        else:
+            paf_combo_with_dir_compress.append(i)
     
+    karyotypes_data_direction_include[path_path] = paf_combo_with_dir_compress
     curr_chr = path_contig_data[0][CHR_NAM]
     curr_combo_len = path_contig_data[0][CHR_END] - path_contig_data[0][CHR_STR]
     curr_chr_range = [path_contig_data[0][CHR_STR], path_contig_data[0][CHR_END]]
@@ -731,8 +960,8 @@ for path_path_raw in non_type4_top_path_raw:
     for idx_raw, ki_raw in enumerate(paf_ans_dict[path_path_raw]):
         temp_list_raw = import_paf_data(f'{output_folder}/{ki_raw}.paf')
         curr_len_raw = 0
-        for i_raw in temp_list_raw:
-            curr_len_raw += i_raw[CHR_END] - i_raw[CHR_STR]
+        for i in temp_list_raw:
+            curr_len_raw += i[CHR_END] - i[CHR_STR]
 
         if int2key[ki_raw][0] != TEL_TYPE:
             s_raw = int2key[ki_raw][1][0][1]
@@ -779,22 +1008,25 @@ for path_path_raw in non_type4_top_path_raw:
         path_contig_data_raw[0][CHR_END]
     ]
 
-    for i_raw in range(1, len(path_contig_data_raw)):
-        if path_contig_data_raw[i_raw][CHR_NAM] != curr_chr_raw:
+    for i in range(1, len(path_contig_data_raw)):
+        if path_contig_data_raw[i][CHR_NAM] != curr_chr_raw:
             paf_combo_raw.append((curr_chr_raw, curr_combo_len_raw))
-            curr_chr_raw = path_contig_data_raw[i_raw][CHR_NAM]
+            curr_chr_raw = path_contig_data_raw[i][CHR_NAM]
             curr_combo_len_raw = (
-                path_contig_data_raw[i_raw][CHR_END]
-                - path_contig_data_raw[i_raw][CHR_STR]
+                path_contig_data_raw[i][CHR_END]
+                - path_contig_data_raw[i][CHR_STR]
             )
         else:
             curr_combo_len_raw += (
-                path_contig_data_raw[i_raw][CHR_END]
-                - path_contig_data_raw[i_raw][CHR_STR]
+                path_contig_data_raw[i][CHR_END]
+                - path_contig_data_raw[i][CHR_STR]
             )
 
     paf_combo_raw.append((curr_chr_raw, curr_combo_len_raw))
     karyotypes_data_raw[path_path_raw] = paf_combo_raw
+
+with open(f"{PREFIX}/karyotypes_data_direction_include.pkl", "wb") as f:
+    pkl.dump(karyotypes_data_direction_include, f)
 
 maxh = max(chr_len.values())
 for i in karyotypes_data.values():
@@ -829,12 +1061,20 @@ loc2weight = dict(zip(tot_loc_list, weights))
 grouped_norm_data = defaultdict(list)
 grouped_norm_data_raw = defaultdict(list)
 chr_set_merge = defaultdict(list)
+
+
+"""
+Orignal clustering logic
+
 for path, data in karyotypes_norm_data.items():
+    chr_st2nd = path.split('/')[-2]
     cnt = Counter()
     for c, w in data:
         cnt[c] += w
     sorted_cnt_data = sorted(cnt.items(), key=lambda t: -t[1])
-    chr_set_merge[(sorted_cnt_data[0][0], tuple(sorted(path_using_significant_nclose_dict[path])))].append(path)
+    chr_set_merge[(sorted_cnt_data[0][0],
+                   tuple(sorted(path_using_significant_nclose_dict[path])),
+                   parse_chromosome_labels(chr_st2nd))].append(path)
 
     # Originally, it was tagged as "Mixed" if no major chromosome exists
 
@@ -843,11 +1083,30 @@ for path, data in karyotypes_norm_data.items():
     # else:
     #     grouped_norm_data['Mixed'].append((path, data)) 
 
-using_path = set()
+"""
 
+for path, seq_list in tqdm(karyotypes_data_direction_include.items()):
+    matched_master = None
+
+    # Compare only against master paths
+    for master_path, slave_list in chr_set_merge.items():
+        master_seq = karyotypes_data_direction_include[master_path]
+        if should_join_by_baseline(master_seq, seq_list):
+            matched_master = master_path
+            break
+
+    if matched_master is not None:
+        # Join to existing cluster as slave
+        chr_set_merge[matched_master].append(path)
+    else:
+        # Create new cluster with this path as master
+        chr_set_merge[path] = [path]
+
+
+using_path = set()
 using_loc2weight = defaultdict(float)
 
-for (major_chr, sig_nclose), path_list in chr_set_merge.items():
+for path_list in chr_set_merge.values():
     simple_sorted_path = sorted(path_list, key = lambda t : len(path_using_nclose_dict[t]))
     repr_path = simple_sorted_path[0]
     using_path.add(repr_path)
@@ -943,6 +1202,17 @@ legend_ax.axis('off')
 fig.savefig(f'{PREFIX}/virtual_sky_raw.pdf')
 fig.savefig(f'{PREFIX}/virtual_sky_raw.png')
 
+with open(f"{PREFIX}/report.txt", 'r') as f:
+    f.readline()
+    path_cnt = int(f.readline().strip())
+
+use_julia_solver = path_cnt <= HARD_PATH_COUNT_BASELINE
+
+if not use_julia_solver:
+    os.remove(f'{PREFIX}/matrix.h5')
+    logging.info("SKYPE pipeline end")
+    exit(0)
+
 cols = 10
 rows = 0
 for chr_name, data_list in grouped_norm_data.items():
@@ -1032,5 +1302,5 @@ legend_ax.axis('off')
 with open(f'{PREFIX}/33_input.pkl', 'wb') as f:
     pkl.dump(final_sky_list, f)
 
-fig.savefig(f'{PREFIX}/virtual_sky.pdf')
-fig.savefig(f'{PREFIX}/virtual_sky.png')
+fig.savefig(f'{PREFIX}/virtual_sky_cluster.pdf')
+fig.savefig(f'{PREFIX}/virtual_sky_cluster.png')

@@ -83,7 +83,7 @@ def similar_check(v1, v2, ratio=TYPE2_SIM_COMPARE_RAITO):
         logging.error(f"Invalid values for similarity check: v1={v1}, v2={v2}")
         assert(False)
     mi, ma = sorted([v1, v2])
-    return False if mi == 0 else (ma / mi <= ratio) or ma-mi < NCLOSE_SIM_DIFF_THRESHOLD
+    return False if mi == 0 else (ma / mi <= ratio) or ma - mi < NCLOSE_SIM_DIFF_THRESHOLD
 
 def check_near_bnd(chrom, inside_st, inside_nd):
     # subset of df for the given chromosome
