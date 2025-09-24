@@ -307,6 +307,13 @@ else:
     predict_B_succ = A.dot(weights)
     predict_B_fail = A_fail.dot(weights)
 
+
+# clustering weight
+
+
+
+
+
 b_norm = np.linalg.norm(B)
 
 error = np.linalg.norm(predict_B_succ - B)

@@ -1745,13 +1745,13 @@ def find_breakend_centromere(repeat_censat_data : dict, chr_len : dict, df : pd.
         if chrom_df.empty:
             continue
         
-        for rep in intervals:
-            rep_start_0, rep_end_0 = rep  # 0-indexed 좌표
+        rep_start_0, rep_end_0 = intervals[0]  # 0-indexed 좌표
 
-            if rep_start_0 == 0 or rep_end_0 == chrom_length - 1:
-                continue
+        if rep_start_0 == 0 or rep_end_0 == chrom_length - 1:
+            continue
 
-            FLANK_SIZE_BP = 1 * M
+        tmp_depth_data = []
+        for FLANK_SIZE_BP in [1*M, 5*M, 10*M]:
             # 좌측 flanking: repeat의 1-indexed 시작은 rep_start_0 + 1
             if rep_start_0 > 0:
                 left_flank_end = rep_start_0  # repeat 시작 전 마지막 base (1-indexed)
@@ -1785,33 +1785,83 @@ def find_breakend_centromere(repeat_censat_data : dict, chr_len : dict, df : pd.
                 right_weighted = None
 
             if not (right_weighted is None or left_weighted is None):
-                v = abs(right_weighted - left_weighted)
-                if 0.2 * meandepth <= v:
-                    depth_diff_data[chrom] = v
-                    depth_dir_data[chrom] = left_weighted < right_weighted
+                tmp_depth_data.append(right_weighted - left_weighted)
+            else:
+                break
+        
+        rules = [(1, 0.20), (2, 0.15), (3, 0.10)]
+        
+        for k, thr in rules:
+            if len(tmp_depth_data) < k:
+                continue
+
+            first_sign = tmp_depth_data[0] > 0
+            head = tmp_depth_data[:k]
+
+            same_sign = all((x > 0) == first_sign for x in head)
+            strong_enough = all(abs(x) >= abs(thr * meandepth) for x in head)
+
+            if same_sign and strong_enough:
+                depth_diff_data[chrom] = abs(tmp_depth_data[0])
+                depth_dir_data[chrom] = first_sign
+                break
+
 
     result_df = pd.DataFrame(results)
 
     def find_min_error_partition(depth_diff_data):
         """
-        Given a dict mapping keys to numeric values, partition all keys into groups
-        of size 1, 2, or 3 to minimize total error.
-        
-        Returns a tuple (mapping, total_error):
-        - mapping: dict where for each group [k1, ...], mapping[k1] = list of other keys in the group
-        - total_error: sum of errors over all groups
+        Partition keys into groups of size 1, 2, or 3 to minimize total error,
+        while ensuring that in each group the dict key is the 'minuend' (largest
+        by the rule below) and the value is the list of subtrahends.
+
+        For size-2 groups: key is the one with the larger value (tie -> lex key).
+        For size-3 groups: choose i that minimizes |v_i - (v_j + v_k)|; that i becomes key.
         """
-        # Sort keys for deterministic behavior
+        # Deterministic ordering
         all_keys = tuple(sorted(depth_diff_data.keys()))
         memo = {}
 
+        def best_pair_mapping(k1, k2):
+            v1, v2 = depth_diff_data[k1], depth_diff_data[k2]
+            # key should be the one with larger value; tie -> lexicographic key
+            if (v1 > v2) or (v1 == v2 and k1 < k2):
+                return {k1: [k2]}, abs(v1 - v2)
+            else:
+                return {k2: [k1]}, abs(v1 - v2)
+
+        def best_triple_mapping(a, b, c):
+            v = {a: depth_diff_data[a], b: depth_diff_data[b], c: depth_diff_data[c]}
+            # candidates: which one is the minuend
+            candidates = []
+            # a as key
+            candidates.append( (a, abs(v[a] - (v[b] + v[c]))) )
+            # b as key
+            candidates.append( (b, abs(v[b] - (v[a] + v[c]))) )
+            # c as key
+            candidates.append( (c, abs(v[c] - (v[a] + v[b]))) )
+
+            # pick by minimal error; tie-break by larger value, then lex key
+            min_err = min(err for _, err in candidates)
+            tied = [k for k, err in candidates if err == min_err]
+            if len(tied) == 1:
+                key = tied[0]
+            else:
+                # larger value first
+                max_val = max(v[k] for k in tied)
+                tied2 = [k for k in tied if v[k] == max_val]
+                key = min(tied2) if len(tied2) > 1 else tied2[0]
+
+            others = [x for x in (a, b, c) if x != key]
+            return {key: others}, min_err
+
         def recurse(remaining):
-            # remaining: tuple of keys still to partition
             if not remaining:
                 return {}, 0
             if remaining in memo:
                 return memo[remaining]
 
+            # we always pop the first, but mapping keys will be set by rules above
             first, *rest = remaining
             best_mapping = None
             best_err = float('inf')
@@ -1820,47 +1870,37 @@ def find_breakend_centromere(repeat_censat_data : dict, chr_len : dict, df : pd.
             err1 = abs(depth_diff_data[first])
             mapping1, err_sum1 = recurse(tuple(rest))
             total1 = err1 + err_sum1
-            if total1 < best_err:
-                best_err = total1
-                best_mapping = {first: []}
-                best_mapping.update(mapping1)
+            best_mapping = {first: []}
+            best_mapping.update(mapping1)
+            best_err = total1
 
             # Case 2: pairs
             for i, k2 in enumerate(rest):
-                err2 = abs(depth_diff_data[first] - depth_diff_data[k2])
+                pair_map, pair_err = best_pair_mapping(first, k2)
                 rem2 = rest[:i] + rest[i+1:]
-                mapping2, err_sum2 = recurse(tuple(rem2))
-                total2 = err2 + err_sum2
+                m2, e2 = recurse(tuple(rem2))
+                total2 = pair_err + e2
                 if total2 < best_err:
                     best_err = total2
-                    best_mapping = {first: [k2]}
-                    best_mapping.update(mapping2)
+                    # merge maps; ensure no conflicting keys
+                    best_mapping = {}
+                    best_mapping.update(pair_map)
+                    best_mapping.update(m2)
 
             # Case 3: triples
             n = len(rest)
             for i in range(n):
                 for j in range(i+1, n):
                     k2, k3 = rest[i], rest[j]
-                    v1 = depth_diff_data[first]
-                    v2 = depth_diff_data[k2]
-                    v3 = depth_diff_data[k3]
-                    # error = min over choosing one as single vs sum of the other two
-                    err3 = min(
-                        abs(v1 - (v2 + v3)),
-                        abs(v2 - (v1 + v3)),
-                        abs(v3 - (v1 + v2))
-                    )
-                    # build new remainder
-                    rem3 = list(rest)
-                    # remove k3 then k2 (reverse order to keep indices valid)
-                    rem3.pop(j)
-                    rem3.pop(i)
-                    mapping3, err_sum3 = recurse(tuple(rem3))
-                    total3 = err3 + err_sum3
+                    triple_map, triple_err = best_triple_mapping(first, k2, k3)
+                    rem3 = tuple(rest[:i] + rest[i+1:j] + rest[j+1:])
+                    m3, e3 = recurse(rem3)
+                    total3 = triple_err + e3
                     if total3 < best_err:
                         best_err = total3
-                        best_mapping = {first: [k2, k3]}
-                        best_mapping.update(mapping3)
+                        best_mapping = {}
+                        best_mapping.update(triple_map)
+                        best_mapping.update(m3)
 
             memo[remaining] = (best_mapping, best_err)
             return memo[remaining]
@@ -3882,7 +3922,7 @@ parser.add_argument("--skip_bam_analysis",
 
 args = parser.parse_args()
 
-# t = "02_Build_Breakend_Graph_Limited.py /home/hyunwoo/ACCtools-pipeline/90_skype_run/HG00438/20_alignasm/HG00438.ctg.aln.paf public_data/chm13v2.0.fa.fai public_data/chm13v2.0_telomere.bed public_data/chm13v2.0_repeat.m.bed public_data/chm13v2.0_censat_v2.1.m.bed /home/hyunwoo/ACCtools-pipeline/90_skype_run/HG00438/01_depth/HG00438_normalized.win.stat.gz 30_skype_pipe/HG00438_15_02_16 /home/hyunwoo/ACCtools-pipeline/90_skype_run/HG00438/01_depth/HG00438.bam --alt /home/hyunwoo/ACCtools-pipeline/90_skype_run/HG00438/20_alignasm/HG00438.utg.aln.paf --orignal_paf_loc /home/hyunwoo/ACCtools-pipeline/90_skype_run/HG00438/20_alignasm/HG00438.ctg.paf /home/hyunwoo/ACCtools-pipeline/90_skype_run/HG00438/20_alignasm/HG00438.utg.paf -t 128"
+# t = "02_Build_Breakend_Graph_Limited.py /home/hyunwoo/ACCtools-pipeline/90_skype_run/Caki-1/20_alignasm/Caki-1.ctg.aln.paf public_data/chm13v2.0.fa.fai public_data/chm13v2.0_telomere.bed public_data/chm13v2.0_repeat.m.bed public_data/chm13v2.0_censat_v2.1.m.bed /home/hyunwoo/ACCtools-pipeline/90_skype_run/Caki-1/01_depth/Caki-1_normalized.win.stat.gz 30_skype_pipe/Caki-1_13_26_52 /home/hyunwoo/ACCtools-pipeline/90_skype_run/Caki-1/01_depth/Caki-1.bam --alt /home/hyunwoo/ACCtools-pipeline/90_skype_run/Caki-1/20_alignasm/Caki-1.utg.aln.paf --orignal_paf_loc /home/hyunwoo/ACCtools-pipeline/90_skype_run/Caki-1/20_alignasm/Caki-1.ctg.paf /home/hyunwoo/ACCtools-pipeline/90_skype_run/Caki-1/20_alignasm/Caki-1.utg.paf --skip_bam_analysis -t 128"
 # args = parser.parse_args(t.split()[1:])
 
 PREFIX = args.prefix

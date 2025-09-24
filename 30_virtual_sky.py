@@ -4,13 +4,13 @@ import matplotlib.pyplot as plt
 import pickle as pkl
 import matplotlib.patches as patches
 
+import os
 import re
 import ast
 import glob
 import logging
 import argparse
 
-from tqdm import tqdm
 from matplotlib.ticker import MultipleLocator
 from collections import defaultdict
 from collections import Counter
@@ -74,6 +74,12 @@ NCLOSE_SIM_DIFF_THRESHOLD = 5
 
 JOIN_BASELINE = 0.8
 KARYOTYPE_SECTION_MINIMUM_LENGTH = 100 * K
+
+HARD_PATH_COUNT_BASELINE = 100 * K
+
+NODE_NAME = 1
+CHR_CHANGE_IDX = 2
+DIR_CHANGE_IDX = 3
 
 CHR_COLORS = {
     "chr1":  "#FFC000",
@@ -246,11 +252,11 @@ def distance_checker(node_a : tuple, node_b : tuple) -> int :
     else:
         return min(abs(int(node_b[0]) - int(node_a[1])), abs(int(node_b[1]) - int(node_a[0])))
 
-def telo_condition(node : list, need_label_index:dict) -> bool:
+def telo_condition(node : list, need_label_index : dict) -> bool:
     return node in need_label_index
 
 # SKY Figure
-def plot_virtual_chromosome(ax, segments_data, cut_dict, maxh, indel = None, label=None):
+def plot_virtual_chromosome(ax, segments_data, maxh, cell_col, def_cell_col, label=None):
     """
     주어진 segments 리스트로 가상 염색체를 그립니다.
     """
@@ -277,8 +283,16 @@ def plot_virtual_chromosome(ax, segments_data, cut_dict, maxh, indel = None, lab
 
     # 각 segment를 누적해서 그리며, 경계가 바뀔 때마다 텍스트 추가
     current_y = 0
+    text_obj_list = []
+    text_x = x_center + radius * 2
+    decoration_args = {
+        'ha': 'left',
+        'va': 'center',
+        'fontsize': 10,
+        'color': 'black'
+    }
     for i, (real_chr, seg_length) in enumerate(segments):
-        color = CHR_COLORS.get(real_chr, "gray")
+        color = CHR_COLORS.get(real_chr[0], "gray")
         rect = patches.Rectangle(
             (x_center - radius, current_y),
             width,
@@ -289,74 +303,16 @@ def plot_virtual_chromosome(ax, segments_data, cut_dict, maxh, indel = None, lab
         rect.set_clip_path(clip_patch)
         ax.add_patch(rect)
 
-        current_y += seg_length
-    
-    text_obj_list = []
-    for j in cut_dict[path]:
-        for i in j:
-            if len(i)==0:
-                continue
-            if len(i) > 2:
-                real_chr = i[0]
-                next_chr = i[1]
-                if next_chr != real_chr:
-                    # "chr" 접두어 제거 후 숫자나 문자만 추출 (예: chr1 -> 1, chrX -> X)
-                    from_val = real_chr[3:] if real_chr.lower().startswith("chr") else real_chr
-                    to_val = next_chr[3:] if next_chr.lower().startswith("chr") else next_chr
-                    text_label = f"t({to_val};{from_val})"
-                    # 텍스트는 가상 염색체 오른쪽 (x_center + radius + offset) 경계에 수직 중앙 정렬
-                    text_x = x_center + radius * 2
-                    text_obj = ax.text(text_x, i[2]/maxh*100, text_label, ha='left', va='center', fontsize=10, color='black')
-                    text_obj_list.append(text_obj)
-                else:
-                    from_val = real_chr[3:] if real_chr.lower().startswith("chr") else real_chr
-                    to_val = next_chr[3:] if next_chr.lower().startswith("chr") else next_chr
-                    text_label = f"t({to_val+i[2]};{from_val+i[3]})"
-                    text_x = x_center + radius * 2
-                    text_obj = ax.text(text_x, i[4]/maxh*100, text_label, ha='left', va='center', fontsize=10, color='black')
-                    text_obj_list.append(text_obj)
+        if 0 < i and i < len(segments):
+            last_chr = segments[i-1][0]
+            if real_chr[0] != last_chr[0]:
+                text_label = f"t({last_chr[0][3:]};{real_chr[0][3:]})"
             else:
-                ctg_idx = i[0]
-                telo_dist = need_label_index[ctg_idx]
-                text_label = f"{telo_dist[0]}, {round(ppc_data[ctg_idx][CHR_END]/M, 1)}Mb"
-                text_x = x_center + radius * 2
-                text_obj = ax.text(text_x, i[1]/maxh*100, text_label, ha='left', va='center', fontsize=10, color='black')
-                text_obj_list.append(text_obj)
-
-    if indel is not None:
-        if indel[0] == 'd':
-            current_y = indel[1] / maxh * 100
-            y1 = indel[1] / maxh * 100
-            y2 = indel[2] / maxh * 100
-            midy = (y1+y2)/2
-            seg_length = (indel[2] - indel[1]) / maxh * 100
-            indel_rect = patches.Rectangle(
-                    (x_center - radius, current_y),
-                    width,
-                    seg_length,
-                    facecolor = "white",
-                    edgecolor='none'
-                )
-            indel_rect.set_clip_path(clip_patch)
-            ax.add_patch(indel_rect)
-
-            x_start = x_center + radius
-            x_end   = x_center + 2 * radius
-
-            # 위쪽 선
-            ax.plot([x_start, x_end],
-                    [y1,     midy],
-                    linewidth=1,
-                    color='black')
-
-            # 아래쪽 선
-            ax.plot([x_start, x_end],
-                    [y2,     midy],
-                    linewidth=1,
-                    color='black')
-            
-            text_obj = ax.text(x_end+radius/5, midy, f"del({indel[-2][3:]})", ha='left', va='center', fontsize=10, color='black')
+                text_label = f"t({last_chr[0][3:]+str(last_chr[1])};{real_chr[0][3:] + str(real_chr[1])})"
+            text_obj = ax.text(text_x, current_y/maxh*100, text_label, **decoration_args)
             text_obj_list.append(text_obj)
+
+        current_y += seg_length
         
     mark_overlapping_texts_with_arrows(ax, text_obj_list, min_gap=5)
     outline_patch = patches.FancyBboxPatch(
@@ -373,6 +329,85 @@ def plot_virtual_chromosome(ax, segments_data, cut_dict, maxh, indel = None, lab
 
 
     # 가상 염색체 라벨 (옵션)
+    if label:
+        ax.text(x_center, -5, label, ha='center', va='top', fontsize=10)
+
+    ax.set_xlim(0, 60 * cell_col / def_cell_col)
+    ax.set_ylim(0, 100)
+    ax.axis('off')
+
+def plot_indel(ax, indel, maxh, cell_col, def_cell_col, chr_len, label=None):
+
+    x_center = 0  # 좌우 중앙값 (필요에 따라 조정)
+    width = 10     # 염색체 
+    real_chr = indel[4]
+    total_length = chr_len
+    radius = width / 2.0
+    round_radius = min(radius, total_length / 4)
+    chr_color = CHR_COLORS.get(real_chr, "gray")
+    background_color = 'white' if indel[0]=='i' else chr_color
+    face_color = chr_color if indel[0]=='i' else 'white'
+
+    clip_patch = patches.FancyBboxPatch(
+        (x_center - radius, 0),
+        width,
+        total_length,
+        boxstyle=f"round,pad=0,rounding_size={round_radius}",
+        facecolor='none',
+        edgecolor='none'
+    )
+    ax.add_patch(clip_patch)
+
+    outline_patch = patches.FancyBboxPatch(
+        (x_center - radius, 0),
+        width,
+        total_length,
+        boxstyle=f"round,pad=0,rounding_size={round_radius}",
+        facecolor=background_color,
+        edgecolor='black',
+        linestyle='dashed',
+        linewidth=1.2,
+        clip_on=False
+    )
+    ax.add_patch(outline_patch)
+
+
+    current_y = indel[1] / maxh * 100
+    y1 = indel[1] / maxh * 100
+    y2 = indel[2] / maxh * 100
+    midy = (y1+y2)/2
+    seg_length = (indel[2] - indel[1]) / maxh * 100
+
+    indel_rect = patches.Rectangle(
+                (x_center - radius, current_y),
+                width,
+                seg_length,
+                facecolor = face_color,
+                edgecolor='none'
+            )
+    
+    indel_rect.set_clip_path(clip_patch)
+    ax.add_patch(indel_rect)
+        
+    x_start = x_center + radius
+    x_end   = x_center + 2 * radius
+
+    # 위쪽 선
+    ax.plot([x_start, x_end],
+            [y1,     midy],
+            linewidth=1,
+            color='black')
+
+    # 아래쪽 선
+    ax.plot([x_start, x_end],
+            [y2,     midy],
+            linewidth=1,
+            color='black')
+    
+    text_obj = ax.text(x_end+radius/5, midy, f"{'del' if indel[0] == 'd' else 'ins'}({indel[-2][3:]})", ha='left', va='center', fontsize=10, color='black')
+    
+    mark_overlapping_texts_with_arrows(ax, [text_obj], min_gap=5)
+
     if label:
         ax.text(x_center, -5, label, ha='center', va='top', fontsize=10)
 
@@ -592,6 +627,228 @@ def should_join_by_baseline(
     score = max_aligned_match_length(seq_a, seq_b)
     return (score / denom) >= JOIN_BASELINE
 
+def get_karyotype_summary(non_type4_path_list : list):
+    karyotypes_data_direction_include = {}
+    
+    for path_path in non_type4_path_list:
+        pieces = []
+        path = import_index_path(path_path)
+
+        # padding for easier calculation
+        if len(path[0]) < 4:
+            path[0] = tuple([0] + list(path[0]))
+        if len(path[-1]) < 4:
+            path[-1] = tuple([0] + list(path[-1]))
+        
+        curr_ref = 0 if path[0][NODE_NAME][-1] =='f' else chr_len[path[0][NODE_NAME][:-1]]
+        curr_incr = '+' if path[0][NODE_NAME][-1] =='f' else '-'
+        curr_chr = [path[0][NODE_NAME][:-1], curr_incr]
+        
+        nclose_use_cnt = 0
+        for i in range(1, len(path)-1):
+            if path[i][CHR_CHANGE_IDX] > path[i-1][CHR_CHANGE_IDX] \
+            or path[i][DIR_CHANGE_IDX] > path[i-1][DIR_CHANGE_IDX]:
+                nclose_use_cnt += 1
+                last_node = ppc_data[path[i-1][NODE_NAME]]
+                curr_node = ppc_data[path[i][NODE_NAME]]
+                # add last piece
+                if curr_incr == '+':
+                    pieces.append((tuple(curr_chr), last_node[CHR_END] - curr_ref))
+                else:
+                    pieces.append((tuple(curr_chr), curr_ref - last_node[CHR_STR]))
+                
+                # update info of new piece (starting ref, chromosome type, increment ..)
+                if path[i][NODE_NAME] > path[i-1][NODE_NAME]:
+                    curr_incr = curr_node[CTG_DIR]
+                    curr_chr = [curr_node[CHR_NAM], curr_incr]
+                    curr_ref = curr_node[CHR_STR] if curr_incr == '+' else curr_node[CHR_END]
+                else:
+                    curr_incr = '-' if curr_node[CTG_DIR] == '+' else '+'
+                    curr_chr = [curr_node[CHR_NAM], curr_incr]
+                    curr_ref = curr_node[CHR_STR] if curr_incr == '+' else curr_node[CHR_END]
+
+        pieces.append((tuple(curr_chr), chr_len[curr_chr[0]] - curr_ref if curr_incr == '+' else curr_ref))
+        karyotypes_data_direction_include[path_path] = pieces
+
+    return karyotypes_data_direction_include
+
+def build_karyotype_diagram(weights, fig_prefix : str = '', filter_depth_N : float = 0):
+    loc2weight = dict(zip(tot_loc_list, weights))
+    weights_sorted_data = sorted(enumerate(weights), key=lambda t:t[1], reverse=True)
+    
+    non_type4_top_path = []
+    for ind, w in weights_sorted_data:
+        paf_loc = tot_loc_list[ind]
+        key = paf_loc.split('/')[-3]
+        if paf_loc.split('/')[-3] != '11_ref_ratio_outliers':
+            if w > filter_depth_N * meandepth / 2:
+                non_type4_top_path.append(paf_loc)
+
+    karyotypes_data = get_karyotype_summary(non_type4_top_path)
+
+    all_insertion_path = []
+    insertion_path_dict = {}
+
+    all_deletion_path = []
+    deletion_path_dict = {}
+
+    for ind, w in weights_sorted_data:
+        paf_loc = tot_loc_list[ind]
+        key = paf_loc.split('/')[-3]
+        indel_ind = paf_loc.split('/')[-2]
+        if key == '11_ref_ratio_outliers':
+            if indel_ind == 'front_jump' and w > NCLOSE_SIM_DIFF_THRESHOLD:
+                deletion_path_dict[paf_loc] = w
+                all_deletion_path.append(paf_loc)
+            if indel_ind == 'back_jump' and w > NCLOSE_SIM_DIFF_THRESHOLD:
+                insertion_path_dict[paf_loc] = w
+                all_insertion_path.append(paf_loc)
+
+    long_deletion_path = {}
+    long_insertion_path = {}
+
+    for i in all_deletion_path:
+        with open(i, "r") as f:
+            l = f.readline()
+            l = l.rstrip()
+            l = l.split("\t")
+            chr_nam1 = l[CHR_NAM]
+            chr_nam2 = l[CHR_NAM]
+            pos1 = int(l[CHR_STR])
+            pos2 = int(l[CHR_END])
+            if abs(pos1-pos2) > TYPE4_CLUSTER_SIZE:
+                long_deletion_path[i] = (chr_nam1, pos1, pos2)
+
+    for i in all_insertion_path:
+        with open(i, "r") as f:
+            l = f.readline()
+            l = l.rstrip()
+            l = l.split("\t")
+            chr_nam1 = l[CHR_NAM]
+            chr_nam2 = l[CHR_NAM]
+            pos1 = int(l[CHR_STR])
+            pos2 = int(l[CHR_END])
+            if abs(pos1-pos2) > TYPE4_CLUSTER_SIZE:
+                long_insertion_path[i] = (chr_nam1, pos1, pos2)
+
+    display_indel = defaultdict(list)
+
+    for path, check_arg in long_deletion_path.items():
+        chrom, pos1, pos2 = check_arg
+        # if check_near_type4(chrom, pos1, pos1) or \
+        #    check_near_type4(chrom, pos2, pos2):
+        display_indel[chrom].append(("d", pos1, pos2, deletion_path_dict[path]/meandepth * 2, chrom, path))
+
+    for path, check_arg in long_insertion_path.items():
+        chrom, pos1, pos2 = check_arg
+        # if check_near_type4(chrom, pos1, pos1) or \
+        #    check_near_type4(chrom, pos2, pos2):
+        display_indel[chrom].append(("i", pos1, pos2, insertion_path_dict[path]/meandepth * 2, chrom, path))
+
+        
+    loc2weight = dict(zip(tot_loc_list, weights))
+    
+    maxh = max(chr_len.values())
+    for i in karyotypes_data.values():
+        h = 0
+        for j in i:
+            h += j[1]
+        maxh = max(maxh, h)
+
+    karyotypes_norm_data = dict()
+    for path, i in karyotypes_data.items():
+        temp_list = []
+        for j in i:
+            temp_list.append((j[0], j[1] / maxh * 100))
+        karyotypes_norm_data[path] = temp_list
+
+    grouped_norm_data = defaultdict(list)
+    
+    for path, data in karyotypes_norm_data.items():
+        cnt = Counter()
+        for c, w in data:
+            cnt[c] += w
+        sorted_cnt_data = sorted(cnt.items(), key=lambda t: -t[1])
+        grouped_norm_data[sorted_cnt_data[0][0][0]].append((path, data))
+
+    cols = 10
+    rows = 0
+    for chr_name, data_list in grouped_norm_data.items():
+        indel_len = len(display_indel.get(chr_name[0], []))
+        rows += ((len(data_list) + indel_len - 1) // cols + 1) if len(data_list) + indel_len > 0 else 0
+
+    cell_col = 3
+    cell_row = 4.5
+    def_cell_col = 1.8
+
+    prefix_ratios = [0.5, 1]
+    ratio_ratios = prefix_ratios + [cell_col] * cols
+    height_ratios = [1.5] + [cell_row] * rows
+
+    fig, ax_array = plt.subplots(len(height_ratios), len(ratio_ratios), figsize=(sum(ratio_ratios), sum(height_ratios)), 
+                                gridspec_kw={"width_ratios" : ratio_ratios,
+                                            "height_ratios" : height_ratios,
+                                            "wspace": 0,
+                                            "hspace": 0.2})
+    for ax_list in ax_array:
+        for ax in ax_list:
+            ax.axis('off')
+
+    sorted_grouped_norm_data_items = sorted(grouped_norm_data.items(), key=lambda t: chr2int(t[0]))
+
+    now_col = 1
+    for chr_name, data_list in sorted_grouped_norm_data_items:
+        chr_indel = display_indel.get(chr_name, [])
+        indel_len = len(chr_indel)
+        bef_now_col = now_col
+        plot_chr_name(ax_array[now_col][0], chr_name)
+        for i, data in enumerate(data_list):
+            plot_virtual_chromosome(ax_array[i // cols + now_col][i % cols + len(prefix_ratios)], data, maxh,
+                                    cell_col, def_cell_col,
+                                    label=f"{round(float(loc2weight[data[0]] / meandepth * 2), 2)}N")
+        for j, data in enumerate(chr_indel):
+            i = j + len(data_list)
+            plot_indel(ax_array[i // cols + now_col][i % cols + len(prefix_ratios)], data, maxh,
+                                    cell_col, def_cell_col, chr_len[chr_name] / maxh * 100,
+                                    label=f"{round(data[3], 2)}N")
+
+        now_col += ((len(data_list) + indel_len - 1) // cols + 1) if len(data_list) + indel_len > 0 else 0
+        for col in range(bef_now_col, now_col):
+            plot_scale_bar(ax_array[col][len(prefix_ratios) - 1], chr_name, maxh)
+
+
+
+    legend_handles = []
+    sorted_chr_items = sorted(CHR_COLORS.items(), key=lambda item: chr2int(item[0]))
+
+    for chr_name, color in sorted_chr_items:
+        patch = patches.Patch(facecolor=color, edgecolor='black', linewidth=0.5, label=chr_name)
+        legend_handles.append(patch)
+
+    # 범례 생성 및 배치
+    gs = ax_array[0, 0].get_gridspec()
+    for ax in ax_array[0]:
+        ax.remove()
+
+    label_ncol = 8
+    reorder = lambda l, nc: sum((l[i::nc] for i in range(nc)), [])
+    legend_ax = fig.add_subplot(gs[0, :])
+    legend_ax.legend(handles=reorder(legend_handles, label_ncol),
+                    labels=reorder([h.get_label() for h in legend_handles], label_ncol),
+                    ncol=label_ncol,
+                    loc='center',
+                    fontsize=9,
+                    frameon=True,       # 범례 테두리
+                    handlelength=1.0,    # 핸들(색상 패치) 길이
+                    handleheight=1.0,    # 핸들(색상 패치) 높이
+                    labelspacing=0.8)    # 라벨 간 수직 간격
+
+    legend_ax.set_title(f'{CELL_LINE} Virtual SKY result', fontsize=15)
+    legend_ax.axis('off')
+
+    fig.savefig(f'{PREFIX}/virtual_sky{fig_prefix}.pdf')
+    fig.savefig(f'{PREFIX}/virtual_sky{fig_prefix}.png')
+
 parser = argparse.ArgumentParser(description="SKYPE depth analysis")
 
 parser.add_argument("ppc_paf_file_path", 
@@ -614,8 +871,10 @@ parser.add_argument("cell_line_name",
 
 args = parser.parse_args()
 
-# t = "30_virtual_sky.py /home/hyunwoo/ACCtools-pipeline/90_skype_run/Caki-1/20_alignasm/Caki-1.ctg.aln.paf.ppc.paf /home/hyunwoo/ACCtools-pipeline/90_skype_run/Caki-1/01_depth/Caki-1_normalized.win.stat.gz public_data/chm13v2.0_telomere.bed public_data/chm13v2.0.fa.fai 30_skype_pipe/Caki-1_23_28_17 Caki-1"
-# args = parser.parse_args(t.split()[1:])
+# t = """
+# 30_virtual_sky.py /home/hyunwoo/ACCtools-pipeline/90_skype_run/Caki-1/20_alignasm/Caki-1.ctg.aln.paf.ppc.paf /home/hyunwoo/ACCtools-pipeline/90_skype_run/Caki-1/01_depth/Caki-1_normalized.win.stat.gz public_data/chm13v2.0_telomere.bed public_data/chm13v2.0.fa.fai 30_skype_pipe/Caki-1_14_35_45 Caki-1
+# """
+# args = parser.parse_args(t.strip().split()[1:])
 
 PREFIX = args.prefix
 CHROMOSOME_INFO_FILE_PATH = args.reference_fai_path
@@ -646,7 +905,6 @@ chr_len = find_chr_len(CHROMOSOME_INFO_FILE_PATH)
 fclen = len(glob.glob(front_contig_path+"*"))
 bclen = len(glob.glob(back_contig_path+"*"))
 
-weights = np.load(f'{PREFIX}/weight.npy')
 tot_loc_list = []
 
 with open(f'{PREFIX}/contig_pat_vec_data.pkl', 'rb') as f:
@@ -663,92 +921,31 @@ for i in range(1, bclen//4 + 1):
     bv_paf_loc = back_contig_path+f"{i}_base.paf"
     tot_loc_list.append(bv_paf_loc)
 
-paf_ans_dict = dict(paf_ans_list)
+with open(f'{PREFIX}/tot_loc_list.pkl', 'wb') as f:
+    pkl.dump(tot_loc_list, f)
 
-with open(f'{PREFIX}/depth_weight.pkl', 'wb') as f:
-    pkl.dump((tot_loc_list, weights), f)
-
-weights_sorted_data = sorted(enumerate(weights), key=lambda t:t[1], reverse=True)
-
-all_deletion_path = []
-deletion_path_dict = {}
-
-all_insertion_path = []
-insertion_path_dict = {}
-
-for ind, w in weights_sorted_data:
-    paf_loc = tot_loc_list[ind]
-    key = paf_loc.split('/')[-3]
-    indel_ind = paf_loc.split('/')[-2]
-    if key == '11_ref_ratio_outliers':
-        if indel_ind == 'front_jump' and w > NCLOSE_SIM_DIFF_THRESHOLD:
-            deletion_path_dict[paf_loc] = w
-            all_deletion_path.append(paf_loc)
-        if indel_ind == 'back_jump' and w > NCLOSE_SIM_DIFF_THRESHOLD:
-            insertion_path_dict[paf_loc] = w
-            all_insertion_path.append(paf_loc)
-
-long_deletion_path = {}
-long_insertion_path = {}
-
-for i in all_deletion_path:
-    with open(i, "r") as f:
-        l = f.readline()
-        l = l.rstrip()
-        l = l.split("\t")
-        chr_nam1 = l[CHR_NAM]
-        chr_nam2 = l[CHR_NAM]
-        pos1 = int(l[CHR_STR])
-        pos2 = int(l[CHR_END])
-        if abs(pos1-pos2) > TYPE4_CLUSTER_SIZE:
-            long_deletion_path[i] = (chr_nam1, pos1, pos2)
-
-for i in all_insertion_path:
-    with open(i, "r") as f:
-        l = f.readline()
-        l = l.rstrip()
-        l = l.split("\t")
-        chr_nam1 = l[CHR_NAM]
-        chr_nam2 = l[CHR_NAM]
-        pos1 = int(l[CHR_STR])
-        pos2 = int(l[CHR_END])
-        if abs(pos1-pos2) > TYPE4_CLUSTER_SIZE:
-            long_insertion_path[i] = (chr_nam1, pos1, pos2)
-
-display_indel = defaultdict(list)
-
-for path, check_arg in long_deletion_path.items():
-    chrom, pos1, pos2 = check_arg
-    # if check_near_type4(chrom, pos1, pos1) or \
-    #    check_near_type4(chrom, pos2, pos2):
-    display_indel[chrom].append(("d", pos1, pos2, deletion_path_dict[path]/meandepth * 2, chrom, path))
-
-for path, check_arg in long_insertion_path.items():
-    chrom, pos1, pos2 = check_arg
-    # if check_near_type4(chrom, pos1, pos1) or \
-    #    check_near_type4(chrom, pos2, pos2):
-    display_indel[chrom].append(("i", pos1, pos2, insertion_path_dict[path]/meandepth * 2, chrom, path))
-
-# print(display_indel)
-
-path_dict = {}
-path_dict_raw = {}
-non_type4_top_path = []
-non_type4_top_path_raw = []
-for ind, w in weights_sorted_data:
-    paf_loc = tot_loc_list[ind]
-    key = paf_loc.split('/')[-3]
+tot_loc_list2nclosecnt = dict()
+for paf_loc in tot_loc_list:
     if paf_loc.split('/')[-3] != '11_ref_ratio_outliers':
-        if w > 0:
-            non_type4_top_path_raw.append(paf_loc)
-            path_dict_raw[paf_loc] = w
-            if w > meandepth / 2 * TARGET_DEPTH:
-                non_type4_top_path.append(paf_loc)
-                path_dict[paf_loc] = w
+        path = import_index_path(paf_loc)
+
+        if len(path[0]) < 4:
+            path[0] = tuple([0] + list(path[0])) # padding for easier calculation
+        if len(path[-1]) < 4:
+            path[-1] = tuple([0] + list(path[-1]))
+
+        nclose_use_cnt = 0
+        for i in range(1, len(path)-1):
+            if path[i][CHR_CHANGE_IDX] > path[i-1][CHR_CHANGE_IDX] \
+            or path[i][DIR_CHANGE_IDX] > path[i-1][DIR_CHANGE_IDX]:
+                nclose_use_cnt += 1
+
+        tot_loc_list2nclosecnt[paf_loc] = nclose_use_cnt
 
 telo_data = import_telo_data(TELOMERE_INFO_FILE_PATH, chr_len)
 telo_connected_node = extract_telomere_connect_contig(TELO_CONNECT_NODES_INFO_PATH)
 telo_dict = defaultdict(list)
+
 for _ in telo_data:
     telo_dict[_[0]].append(_[1:])
 
@@ -777,530 +974,8 @@ for node_id, telo_len, chr_dir in telo_len_data:
     need_label[chr_dir[:-1]].append((node_id, chr_dir[-1]))
     need_label_index[node_id] = (chr_dir, telo_len)
 
-significant_nclose = []
-for nclose in nclose_nodes:
-    st, ed = nclose
-    if ppc_data[st][CHR_NAM] != ppc_data[ed][CHR_NAM]:
-        if check_near_bnd(ppc_data[st][CHR_NAM], ppc_data[st][CHR_STR], ppc_data[st][CHR_END]) or \
-           check_near_bnd(ppc_data[ed][CHR_NAM], ppc_data[ed][CHR_STR], ppc_data[ed][CHR_END]):
-            significant_nclose.append(nclose)
+weights = np.load(f'{PREFIX}/weight.npy')
 
-significant_nclose = set(significant_nclose)
+build_karyotype_diagram(weights, "_raw")
 
-# for i in significant_nclose:
-#     if ppc_data[i[0]][CHR_NAM] == 'chr1' or ppc_data[i[1]][CHR_NAM] == 'chr1':
-#         print(i)
-#         print(ppc_data[i[0]])
-#         print(ppc_data[i[1]])
-#         print()
-
-using_path = set()
-path_using_nclose_dict = defaultdict(set)
-path_using_significant_nclose_dict = defaultdict(set)
-cut_dict={}
-karyotypes_data = {}
-karyotypes_data_direction_include = {}
-
-for path_path in non_type4_top_path:
-    paf_combo = []
-    path_contig_data = []
-    curr_path_cut_list = []
-    curr_path_inverse_list = []
-    curr_path_telo_list = []
-    paf_combo_with_dir = []
-    path = import_index_path(path_path)
-    curr_increment = '+' if path[0][0][-1] == 'f' else '-'
-    s = 1
-    while s < len(path) - 2:
-        nclose_cand = tuple(sorted([path[s][1], path[s+1][1]]))
-        if nclose_cand in nclose_nodes:
-             if nclose_cand in significant_nclose:
-                using_path.add(path_path)
-                path_using_significant_nclose_dict[path_path].add(nclose_cand)
-             path_using_nclose_dict[path_path].add(nclose_cand)
-             s+=2
-        else:
-            s += 1
-    tot_len = 0
-    for idx, ki in enumerate(paf_ans_dict[path_path]):
-        temp_list = import_paf_data(f'{output_folder}/{ki}.paf')
-        curr_len = 0
-        for i in temp_list:
-            curr_len += i[CHR_END] - i[CHR_STR]
-        if int2key[ki][0]!=TEL_TYPE:
-            s = int2key[ki][1][0][1]
-            e = int2key[ki][1][1][1]
-            if idx == 0 and telo_condition(s, need_label_index):
-                curr_path_telo_list.append((s, 0))
-            if idx == len(paf_ans_dict[path_path])-1 and telo_condition(e, need_label_index):
-                curr_path_telo_list.append((e, tot_len + curr_len))
-            if ppc_data[s][CHR_NAM]!=ppc_data[e][CHR_NAM]:
-                curr_path_cut_list.append((ppc_data[s][CHR_NAM], ppc_data[e][CHR_NAM], tot_len + curr_len//2))
-            elif ppc_data[s][CTG_DIR] != ppc_data[e][CTG_DIR] and int2key[ki][0] == CTG_IN_TYPE:
-                curr_path_inverse_list.append((ppc_data[s][CHR_NAM], ppc_data[e][CHR_NAM], ppc_data[s][CTG_DIR], ppc_data[e][CTG_DIR], tot_len + curr_len//2))
-        else:
-            s = int2key[ki][1]
-            if telo_condition(s, need_label_index):
-                curr_path_telo_list.append((s, tot_len + curr_len//2))
-        tot_len += curr_len
-        path_contig_data += temp_list
-    cut_dict[path_path] = [curr_path_cut_list, curr_path_inverse_list, curr_path_telo_list]
-
-    # if path_path == '30_skype_pipe/Caki-1_23_28_17/20_depth/chr3b_chr4b/1.paf':
-    #     with open("12f_12b_path.txt", "w") as f:
-    #         for i in path_contig_data:
-    #             print(i, file = f)
-
-    first_bias = 0
-    curr_chr_with_dir = (path_contig_data[0][CHR_NAM], curr_increment)
-    curr_combo_len_dir = path_contig_data[0][CHR_END] - path_contig_data[0][CHR_STR]
-    for i in range(1, len(path_contig_data)):
-        incr = curr_increment
-        if path_contig_data[i][CTG_NAM] != path_contig_data[i-1][CTG_NAM]: # 같은 염색체
-            if path_contig_data[i][CHR_END] > path_contig_data[i-1][CHR_STR]:
-                incr = '+'
-            elif path_contig_data[i][CHR_STR] < path_contig_data[i-1][CHR_END]:
-                incr = '-'
-        else: # 같은 contig : 쿼리 방향으로 봐야함
-            if path_contig_data[i][CTG_END] > path_contig_data[i-1][CTG_STR]:
-                incr = path_contig_data[i][CTG_DIR]
-            elif path_contig_data[i][CTG_STR] < path_contig_data[i-1][CTG_END]:
-                incr = '+' if path_contig_data[i][CTG_DIR] == '-' else '-'
-        if (path_contig_data[i][CHR_NAM], incr) != curr_chr_with_dir:
-            # if path_contig_data[i][CHR_NAM] == curr_chr_with_dir[0]:
-            #     if path_contig_data[i-1][CHR_END] > 
-                # if path_path == '30_skype_pipe/Caki-1_23_28_17/20_depth/chr3b_chr4b/1.paf':
-                #     print(path_contig_data[i])
-                curr_increment = incr
-                if curr_combo_len_dir > KARYOTYPE_SECTION_MINIMUM_LENGTH:
-                    if len(paf_combo_with_dir) > 0:
-                        paf_combo_with_dir.append((curr_chr_with_dir, curr_combo_len_dir))
-                    else:
-                        paf_combo_with_dir.append((curr_chr_with_dir, curr_combo_len_dir + first_bias))
-                        first_bias = 0
-                else:
-                    if len(paf_combo_with_dir) > 0:
-                        paf_combo_with_dir[-1] = (paf_combo_with_dir[-1][0], paf_combo_with_dir[-1][1] + curr_combo_len_dir)
-                    else:
-                        first_bias += curr_combo_len_dir
-                curr_chr_with_dir = (path_contig_data[i][CHR_NAM], incr)
-                curr_combo_len_dir = (
-                    path_contig_data[i][CHR_END]
-                    - path_contig_data[i][CHR_STR]
-                )
-        else:
-            curr_combo_len_dir += (
-                path_contig_data[i][CHR_END]
-                - path_contig_data[i][CHR_STR]
-            )
-
-    # if path_path == '30_skype_pipe/Caki-1_23_28_17/20_depth/chr5f_chr20f/1.paf':
-    #     with open("12f_12b_path check.txt", "w") as f:
-    #         for i in path_contig_data:
-    #             print(i, file=f)
-
-    if curr_combo_len_dir > KARYOTYPE_SECTION_MINIMUM_LENGTH:
-        if len(paf_combo_with_dir) > 0:
-            paf_combo_with_dir.append((curr_chr_with_dir, curr_combo_len_dir))
-        else:
-            paf_combo_with_dir.append((curr_chr_with_dir, curr_combo_len_dir + first_bias))
-    else:
-        if len(paf_combo_with_dir) > 0:
-            paf_combo_with_dir[-1] = (paf_combo_with_dir[-1][0], paf_combo_with_dir[-1][1] + curr_combo_len_dir)
-        else:
-            paf_combo_with_dir.append((curr_chr_with_dir, curr_combo_len_dir + first_bias))
-    paf_combo_with_dir_compress = [paf_combo_with_dir[0]]
-    for i in paf_combo_with_dir[1:]:
-        if paf_combo_with_dir_compress[-1][0] == i[0]:
-            paf_combo_with_dir_compress[-1] = (paf_combo_with_dir_compress[-1][0], paf_combo_with_dir_compress[-1][1] + i[1])
-        else:
-            paf_combo_with_dir_compress.append(i)
-    
-    karyotypes_data_direction_include[path_path] = paf_combo_with_dir_compress
-    curr_chr = path_contig_data[0][CHR_NAM]
-    curr_combo_len = path_contig_data[0][CHR_END] - path_contig_data[0][CHR_STR]
-    curr_chr_range = [path_contig_data[0][CHR_STR], path_contig_data[0][CHR_END]]
-    for i in range(1, len(path_contig_data)):
-        if path_contig_data[i][CHR_NAM] != curr_chr:
-            paf_combo.append((curr_chr, curr_combo_len))
-            curr_chr = path_contig_data[i][CHR_NAM]
-            curr_combo_len = path_contig_data[i][CHR_END] - path_contig_data[i][CHR_STR]
-        else:
-            curr_combo_len += path_contig_data[i][CHR_END] - path_contig_data[i][CHR_STR]
-    paf_combo.append((curr_chr, curr_combo_len))
-    karyotypes_data[path_path] = paf_combo
-
-using_path_raw = set()
-path_using_nclose_dict_raw = defaultdict(set)
-path_using_significant_nclose_dict_raw = defaultdict(set)
-cut_dict_raw = {}
-karyotypes_data_raw = {}
-
-for path_path_raw in non_type4_top_path_raw:
-    paf_combo_raw = []
-    path_contig_data_raw = []
-    curr_path_cut_list_raw = []
-    curr_path_inverse_list_raw = []
-    curr_path_telo_list_raw = []
-
-    path_raw = import_index_path(path_path_raw)
-    s_raw = 1
-    while s_raw < len(path_raw) - 2:
-        nclose_cand_raw = tuple(sorted([path_raw[s_raw][1], path_raw[s_raw+1][1]]))
-        if nclose_cand_raw in nclose_nodes:
-            if nclose_cand_raw in significant_nclose:
-                using_path_raw.add(path_path_raw)
-                path_using_significant_nclose_dict_raw[path_path_raw].add(nclose_cand_raw)
-            path_using_nclose_dict_raw[path_path_raw].add(nclose_cand_raw)
-            s_raw += 2
-        else:
-            s_raw += 1
-
-    tot_len_raw = 0
-    for idx_raw, ki_raw in enumerate(paf_ans_dict[path_path_raw]):
-        temp_list_raw = import_paf_data(f'{output_folder}/{ki_raw}.paf')
-        curr_len_raw = 0
-        for i in temp_list_raw:
-            curr_len_raw += i[CHR_END] - i[CHR_STR]
-
-        if int2key[ki_raw][0] != TEL_TYPE:
-            s_raw = int2key[ki_raw][1][0][1]
-            e_raw = int2key[ki_raw][1][1][1]
-
-            if idx_raw == 0 and telo_condition(s_raw, need_label_index):
-                curr_path_telo_list_raw.append((s_raw, 0))
-            if idx_raw == len(paf_ans_dict[path_path_raw]) - 1 and telo_condition(e_raw, need_label_index):
-                curr_path_telo_list_raw.append((e_raw, tot_len_raw + curr_len_raw))
-
-            if ppc_data[s_raw][CHR_NAM] != ppc_data[e_raw][CHR_NAM]:
-                curr_path_cut_list_raw.append((
-                    ppc_data[s_raw][CHR_NAM],
-                    ppc_data[e_raw][CHR_NAM],
-                    tot_len_raw + curr_len_raw // 2
-                ))
-            elif (ppc_data[s_raw][CTG_DIR] != ppc_data[e_raw][CTG_DIR]
-                  and int2key[ki_raw][0] == CTG_IN_TYPE):
-                curr_path_inverse_list_raw.append((
-                    ppc_data[s_raw][CHR_NAM],
-                    ppc_data[e_raw][CHR_NAM],
-                    ppc_data[s_raw][CTG_DIR],
-                    ppc_data[e_raw][CTG_DIR],
-                    tot_len_raw + curr_len_raw // 2
-                ))
-        else:
-            s_raw = int2key[ki_raw][1]
-            if telo_condition(s_raw, need_label_index):
-                curr_path_telo_list_raw.append((s_raw, tot_len_raw + curr_len_raw // 2))
-
-        tot_len_raw += curr_len_raw
-        path_contig_data_raw += temp_list_raw
-
-    cut_dict_raw[path_path_raw] = [
-        curr_path_cut_list_raw,
-        curr_path_inverse_list_raw,
-        curr_path_telo_list_raw
-    ]
-
-    curr_chr_raw = path_contig_data_raw[0][CHR_NAM]
-    curr_combo_len_raw = path_contig_data_raw[0][CHR_END] - path_contig_data_raw[0][CHR_STR]
-    curr_chr_range_raw = [
-        path_contig_data_raw[0][CHR_STR],
-        path_contig_data_raw[0][CHR_END]
-    ]
-
-    for i in range(1, len(path_contig_data_raw)):
-        if path_contig_data_raw[i][CHR_NAM] != curr_chr_raw:
-            paf_combo_raw.append((curr_chr_raw, curr_combo_len_raw))
-            curr_chr_raw = path_contig_data_raw[i][CHR_NAM]
-            curr_combo_len_raw = (
-                path_contig_data_raw[i][CHR_END]
-                - path_contig_data_raw[i][CHR_STR]
-            )
-        else:
-            curr_combo_len_raw += (
-                path_contig_data_raw[i][CHR_END]
-                - path_contig_data_raw[i][CHR_STR]
-            )
-
-    paf_combo_raw.append((curr_chr_raw, curr_combo_len_raw))
-    karyotypes_data_raw[path_path_raw] = paf_combo_raw
-
-with open(f"{PREFIX}/karyotypes_data_direction_include.pkl", "wb") as f:
-    pkl.dump(karyotypes_data_direction_include, f)
-
-maxh = max(chr_len.values())
-for i in karyotypes_data.values():
-    h = 0
-    for j in i:
-        h += j[1]
-    maxh = max(maxh, h)
-
-maxh_raw = max(chr_len.values())
-for i in karyotypes_data_raw.values():
-    h = 0
-    for j in i:
-        h += j[1]
-    maxh_raw = max(maxh_raw, h)
-
-karyotypes_norm_data = dict()
-for path, i in karyotypes_data.items():
-    temp_list = []
-    for j in i:
-        temp_list.append((j[0], j[1] / maxh * 100))
-    karyotypes_norm_data[path] = temp_list
-
-karyotypes_norm_data_raw = dict()
-for path, i in karyotypes_data_raw.items():
-    temp_list = []
-    for j in i:
-        temp_list.append((j[0], j[1] / maxh_raw * 100))
-    karyotypes_norm_data_raw[path] = temp_list
-
-loc2weight = dict(zip(tot_loc_list, weights))
-
-grouped_norm_data = defaultdict(list)
-grouped_norm_data_raw = defaultdict(list)
-chr_set_merge = defaultdict(list)
-
-
-"""
-Orignal clustering logic
-
-for path, data in karyotypes_norm_data.items():
-    chr_st2nd = path.split('/')[-2]
-    cnt = Counter()
-    for c, w in data:
-        cnt[c] += w
-    sorted_cnt_data = sorted(cnt.items(), key=lambda t: -t[1])
-    chr_set_merge[(sorted_cnt_data[0][0],
-                   tuple(sorted(path_using_significant_nclose_dict[path])),
-                   parse_chromosome_labels(chr_st2nd))].append(path)
-
-    # Originally, it was tagged as "Mixed" if no major chromosome exists
-
-    # if sorted_cnt_data[0][1] / sum(cnt.values()) > MAJOR_BASELINE:
-    #     grouped_norm_data[sorted_cnt_data[0][0]].append((path, data))
-    # else:
-    #     grouped_norm_data['Mixed'].append((path, data)) 
-
-"""
-
-for path, seq_list in tqdm(karyotypes_data_direction_include.items()):
-    matched_master = None
-
-    # Compare only against master paths
-    for master_path, slave_list in chr_set_merge.items():
-        master_seq = karyotypes_data_direction_include[master_path]
-        if should_join_by_baseline(master_seq, seq_list):
-            matched_master = master_path
-            break
-
-    if matched_master is not None:
-        # Join to existing cluster as slave
-        chr_set_merge[matched_master].append(path)
-    else:
-        # Create new cluster with this path as master
-        chr_set_merge[path] = [path]
-
-
-using_path = set()
-using_loc2weight = defaultdict(float)
-
-for path_list in chr_set_merge.values():
-    simple_sorted_path = sorted(path_list, key = lambda t : len(path_using_nclose_dict[t]))
-    repr_path = simple_sorted_path[0]
-    using_path.add(repr_path)
-    for path in simple_sorted_path:
-        using_loc2weight[repr_path] += loc2weight[path]
-
-for path, data in karyotypes_norm_data.items():
-    cnt = Counter()
-    for c, w in data:
-        cnt[c] += w
-    sorted_cnt_data = sorted(cnt.items(), key=lambda t: -t[1])
-    if path in using_path:
-        grouped_norm_data[sorted_cnt_data[0][0]].append((path, data))
-
-for path, data in karyotypes_norm_data_raw.items():
-    cnt = Counter()
-    for c, w in data:
-        cnt[c] += w
-    sorted_cnt_data = sorted(cnt.items(), key=lambda t: -t[1])
-    if sorted_cnt_data[0][1] / sum(cnt.values()) > MAJOR_BASELINE:
-        grouped_norm_data_raw[sorted_cnt_data[0][0]].append((path, data))
-    else:
-        grouped_norm_data_raw['Mixed'].append((path, data))
-
-
-cols = 10
-rows = 0
-for chr_name, data_list in grouped_norm_data_raw.items():
-    rows += ((len(data_list) - 1) // cols + 1) if data_list else 0
-
-cell_col = 3
-cell_row = 4.5
-def_cell_col = 1.8
-
-prefix_ratios = [0.5, 1]
-ratio_ratios = prefix_ratios + [cell_col] * cols
-height_ratios = [1.5] + [cell_row] * rows
-
-fig, ax_array = plt.subplots(len(height_ratios), len(ratio_ratios), figsize=(sum(ratio_ratios), sum(height_ratios)), 
-                             gridspec_kw={"width_ratios" : ratio_ratios,
-                                         "height_ratios" : height_ratios,
-                                         "wspace": 0,
-                                         "hspace": 0.2})
-for ax_list in ax_array:
-    for ax in ax_list:
-        ax.axis('off')
-
-
-sorted_grouped_norm_data_raw_items = sorted(grouped_norm_data_raw.items(), key=lambda t: chr2int(t[0]))
-
-now_col = 1
-for chr_name, data_list in sorted_grouped_norm_data_raw_items:
-    bef_now_col = now_col
-    plot_chr_name(ax_array[now_col][0], chr_name)
-    for i, data in enumerate(data_list):
-        plot_virtual_chromosome(ax_array[i // cols + now_col][i % cols + len(prefix_ratios)], data, cut_dict_raw, maxh_raw,
-                                label=f"{round(float(loc2weight[data[0]] / meandepth * 2), 2)}N")
-
-    now_col += ((len(data_list) - 1) // cols + 1) if data_list else 0
-    for col in range(bef_now_col, now_col):
-        plot_scale_bar(ax_array[col][len(prefix_ratios) - 1], chr_name, maxh_raw)
-
-
-
-legend_handles = []
-sorted_chr_items = sorted(CHR_COLORS.items(), key=lambda item: chr2int(item[0]))
-
-for chr_name, color in sorted_chr_items:
-    patch = patches.Patch(facecolor=color, edgecolor='black', linewidth=0.5, label=chr_name)
-    legend_handles.append(patch)
-
-# 범례 생성 및 배치
-gs = ax_array[0, 0].get_gridspec()
-for ax in ax_array[0]:
-    ax.remove()
-
-label_ncol = 8
-reorder = lambda l, nc: sum((l[i::nc] for i in range(nc)), [])
-legend_ax = fig.add_subplot(gs[0, :])
-legend_ax.legend(handles=reorder(legend_handles, label_ncol),
-                 labels=reorder([h.get_label() for h in legend_handles], label_ncol),
-                 ncol=label_ncol,
-                 loc='center',
-                 fontsize=9,
-                 frameon=True,       # 범례 테두리
-                 handlelength=1.0,    # 핸들(색상 패치) 길이
-                 handleheight=1.0,    # 핸들(색상 패치) 높이
-                 labelspacing=0.8)    # 라벨 간 수직 간격
-
-legend_ax.set_title(f'{CELL_LINE} Virtual SKY result', fontsize=15)
-legend_ax.axis('off')
-
-fig.savefig(f'{PREFIX}/virtual_sky_raw.pdf')
-fig.savefig(f'{PREFIX}/virtual_sky_raw.png')
-
-with open(f"{PREFIX}/report.txt", 'r') as f:
-    f.readline()
-    path_cnt = int(f.readline().strip())
-
-use_julia_solver = path_cnt <= HARD_PATH_COUNT_BASELINE
-
-if not use_julia_solver:
-    os.remove(f'{PREFIX}/matrix.h5')
-    logging.info("SKYPE pipeline end")
-    exit(0)
-
-cols = 10
-rows = 0
-for chr_name, data_list in grouped_norm_data.items():
-    rows += ((len(data_list) - 1) // cols + 1) if data_list else 0
-
-cell_col = 3
-cell_row = 4.5
-def_cell_col = 1.8
-
-prefix_ratios = [0.5, 1]
-ratio_ratios = prefix_ratios + [cell_col] * cols
-height_ratios = [1.5] + [cell_row] * rows
-
-fig, ax_array = plt.subplots(len(height_ratios), len(ratio_ratios), figsize=(sum(ratio_ratios), sum(height_ratios)), 
-                             gridspec_kw={"width_ratios" : ratio_ratios,
-                                         "height_ratios" : height_ratios,
-                                         "wspace": 0,
-                                         "hspace": 0.2})
-for ax_list in ax_array:
-    for ax in ax_list:
-        ax.axis('off')
-
-
-sorted_grouped_norm_data_items = sorted(grouped_norm_data.items(), key=lambda t: chr2int(t[0]))
-
-final_sky_list = []
-
-now_col = 1
-for chr_name, data_list in sorted_grouped_norm_data_items:
-    bef_now_col = now_col
-    plot_chr_name(ax_array[now_col][0], chr_name)
-    cnt = 0
-    pure_chr_exist = False
-    pure_data = None
-    for i, data in enumerate(data_list):
-        bias = 0
-        if not pure_chr_exist and len(path_using_significant_nclose_dict[data[0]]) == 0 and \
-            len(display_indel[chr_name]) > 0 and using_loc2weight[data[0]] > display_indel[chr_name][0][3]:
-
-            pure_chr_exist = True
-            bias = -display_indel[chr_name][0][3]
-            pure_data = data
-        
-        for j in range(int(using_loc2weight[data[0]] / meandepth * 2)*0+1):
-            plot_virtual_chromosome(ax_array[cnt // cols + now_col][cnt % cols + len(prefix_ratios)], data, cut_dict, maxh,
-                                    label=f"{round(float((using_loc2weight[data[0]]) / meandepth * 2) + bias, 2)}N")
-            final_sky_list.append((data[0], using_loc2weight[data[0]] - bias / 2 * meandepth))
-            cnt+=1
-    
-    if pure_chr_exist:
-        plot_virtual_chromosome(ax_array[cnt // cols + now_col][cnt % cols + len(prefix_ratios)], pure_data, cut_dict, maxh, indel = display_indel[chr_name][0],
-                                label=f"{round(display_indel[chr_name][0][3], 2)}N")
-        final_sky_list.append((display_indel[chr_name][0][-1], display_indel[chr_name][0][3] / 2 * meandepth))
-   
-    now_col += ((len(data_list) - 1) // cols + 1) if data_list else 0
-    for col in range(bef_now_col, now_col):
-        plot_scale_bar(ax_array[col][len(prefix_ratios) - 1], chr_name, maxh)
-
-legend_handles = []
-sorted_chr_items = sorted(CHR_COLORS.items(), key=lambda item: chr2int(item[0]))
-
-for chr_name, color in sorted_chr_items:
-    patch = patches.Patch(facecolor=color, edgecolor='black', linewidth=0.5, label=chr_name)
-    legend_handles.append(patch)
-
-# 범례 생성 및 배치
-gs = ax_array[0, 0].get_gridspec()
-for ax in ax_array[0]:
-    ax.remove()
-
-label_ncol = 8
-reorder = lambda l, nc: sum((l[i::nc] for i in range(nc)), [])
-legend_ax = fig.add_subplot(gs[0, :])
-legend_ax.legend(handles=reorder(legend_handles, label_ncol),
-                 labels=reorder([h.get_label() for h in legend_handles], label_ncol),
-                 ncol=label_ncol,
-                 loc='center',
-                 fontsize=9,
-                 frameon=True,       # 범례 테두리
-                 handlelength=1.0,    # 핸들(색상 패치) 길이
-                 handleheight=1.0,    # 핸들(색상 패치) 높이
-                 labelspacing=0.8)    # 라벨 간 수직 간격
-
-legend_ax.set_title(f'{CELL_LINE} Virtual SKY result', fontsize=15)
-legend_ax.axis('off')
-
-with open(f'{PREFIX}/33_input.pkl', 'wb') as f:
-    pkl.dump(final_sky_list, f)
-
-fig.savefig(f'{PREFIX}/virtual_sky_cluster.pdf')
-fig.savefig(f'{PREFIX}/virtual_sky_cluster.png')
+build_karyotype_diagram(weights, filter_depth_N=TARGET_DEPTH)
