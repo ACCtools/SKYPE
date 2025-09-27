@@ -728,7 +728,7 @@ tar_def_path_ind_dict = {}
 ncnt = 0
 path_nclose_dict_set = defaultdict(set)
 for path, key_int_list in tqdm(paf_ans_list, desc='Recover depth from separated paths',
-                               disable=not sys.stdout.isatty() and not args.progress):
+                                    disable=not sys.stdout.isatty() and not args.progress):
     ki = key_int_list[0]
     np.copyto(tmp_v, vec_dict[ki])
     for ki in key_int_list[1:]:
@@ -875,3 +875,6 @@ with open(f"{PREFIX}/23_input.pkl", "wb") as f:
 
 with open(f"{PREFIX}/pathrel2ncnt.pkl", "wb") as f:
     pkl.dump(pathrel2ncnt, f)
+
+with open(f"{PREFIX}/tar_chr_data.pkl", "wb") as f:
+    pkl.dump(tar_chr_data, f)

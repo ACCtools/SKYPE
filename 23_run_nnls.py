@@ -99,9 +99,13 @@ logging.info("23_run_nnls start")
 parser = argparse.ArgumentParser(description="SKYPE depth analysis")
 parser.add_argument("ppc_paf_file_path", 
                     help="Path to the preprocessed PAF file.")
+
 parser.add_argument("prefix", help="Prefix for pipeline")
+
 parser.add_argument("main_stat_path", help="Path to the main depth statistics file")
+
 parser.add_argument("-t", "--thread", help="Number of threads", type=int)
+
 args = parser.parse_args()
 
 PREPROCESSED_PAF_FILE_PATH = args.ppc_paf_file_path
@@ -309,11 +313,6 @@ else:
 
 
 # clustering weight
-
-
-
-
-
 b_norm = np.linalg.norm(B)
 
 error = np.linalg.norm(predict_B_succ - B)

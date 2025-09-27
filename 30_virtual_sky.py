@@ -309,7 +309,7 @@ def plot_virtual_chromosome(ax, segments_data, maxh, cell_col, def_cell_col, lab
                 text_label = f"t({last_chr[0][3:]};{real_chr[0][3:]})"
             else:
                 text_label = f"t({last_chr[0][3:]+str(last_chr[1])};{real_chr[0][3:] + str(real_chr[1])})"
-            text_obj = ax.text(text_x, current_y/maxh*100, text_label, **decoration_args)
+            text_obj = ax.text(text_x, current_y, text_label, **decoration_args)
             text_obj_list.append(text_obj)
 
         current_y += seg_length
@@ -774,7 +774,9 @@ def build_karyotype_diagram(weights, fig_prefix : str = '', filter_depth_N : flo
     cols = 10
     rows = 0
     for chr_name, data_list in grouped_norm_data.items():
-        indel_len = len(display_indel.get(chr_name[0], []))
+        chr_indel = display_indel.get(chr_name, [])
+        indel_len = len(chr_indel)
+        
         rows += ((len(data_list) + indel_len - 1) // cols + 1) if len(data_list) + indel_len > 0 else 0
 
     cell_col = 3
@@ -786,10 +788,11 @@ def build_karyotype_diagram(weights, fig_prefix : str = '', filter_depth_N : flo
     height_ratios = [1.5] + [cell_row] * rows
 
     fig, ax_array = plt.subplots(len(height_ratios), len(ratio_ratios), figsize=(sum(ratio_ratios), sum(height_ratios)), 
-                                gridspec_kw={"width_ratios" : ratio_ratios,
+                                 gridspec_kw={"width_ratios" : ratio_ratios,
                                             "height_ratios" : height_ratios,
                                             "wspace": 0,
                                             "hspace": 0.2})
+                                            
     for ax_list in ax_array:
         for ax in ax_list:
             ax.axis('off')
@@ -800,6 +803,7 @@ def build_karyotype_diagram(weights, fig_prefix : str = '', filter_depth_N : flo
     for chr_name, data_list in sorted_grouped_norm_data_items:
         chr_indel = display_indel.get(chr_name, [])
         indel_len = len(chr_indel)
+
         bef_now_col = now_col
         plot_chr_name(ax_array[now_col][0], chr_name)
         for i, data in enumerate(data_list):
@@ -979,3 +983,13 @@ weights = np.load(f'{PREFIX}/weight.npy')
 build_karyotype_diagram(weights, "_raw")
 
 build_karyotype_diagram(weights, filter_depth_N=TARGET_DEPTH)
+
+with open(f"{PREFIX}/report.txt", 'r') as f:
+    f.readline()
+    path_cnt = int(f.readline().strip())
+
+use_julia_solver = path_cnt <= HARD_PATH_COUNT_BASELINE
+
+if use_julia_solver:
+    weights_cluster = np.load(f'{PREFIX}/weight_cluster.npy')
+    build_karyotype_diagram(weights_cluster, '_cluster')

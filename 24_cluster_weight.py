@@ -1,12 +1,16 @@
 from collections import defaultdict
-import argparse
+from juliacall import Main as jl
 
+import os
 import ast
-import pickle as pkl
 import glob
+import psutil
+import logging
+import argparse
 
 import numpy as np
 import pandas as pd
+import pickle as pkl
 
 CTG_NAM = 0
 CTG_LEN = 1
@@ -40,14 +44,23 @@ BND_TYPE = 0
 CTG_IN_TYPE = 1
 TEL_TYPE = 2
 
-TARGET_DEPTH = 0.1
+CLUSTER_START_DEPTH = 0.1
+CLUSTER_FINAL_DEPTH = 0.2
 
 M = 1e6
 K = 1000
 
-JOIN_BASELINE = 0.8
+JOIN_SAME_CHR_BASELINE = 0.8
+JOIN_DIFF_CHR_BASELINE = 0.9
+
 TELOMERE_EXPANSION = 5 * K
 KARYOTYPE_SECTION_MINIMUM_LENGTH = 100*K
+
+HARD_PATH_COUNT_BASELINE = 100 * K
+TYPE4_CLUSTER_SIZE = 10 * M
+
+def get_relative_path(p):
+    return tuple(p.split('/')[-3:])
 
 def extract_nclose_node(nclose_path: str) -> list:
     nclose_list = []
@@ -263,12 +276,16 @@ def should_join_by_baseline(
 
     total_a = sum(length for (_, length) in seq_a)
     total_b = sum(length for (_, length) in seq_b)
+
     denom = total_a if total_a >= total_b else total_b
     if denom == 0:
         return False
 
+    seq_a_chr = (seq_a[0][0], seq_a[-1][0])
+    seq_b_chr = (seq_b[0][0], seq_b[-1][0])
+
     score = max_aligned_match_length(seq_a, seq_b)
-    return (score / denom) >= JOIN_BASELINE
+    return (score / denom) >= (JOIN_SAME_CHR_BASELINE if seq_a_chr == seq_b_chr else JOIN_DIFF_CHR_BASELINE)
 
 def root_find(uf, path):
     if path not in uf:
@@ -277,15 +294,7 @@ def root_find(uf, path):
         uf[path] = root_find(uf, uf[path])
     return uf[path]
 
-def root_merge(uf, path1, path2):
-    root1 = root_find(uf, path1)
-    root2 = root_find(uf, path2)
-    if root1 != root2:
-        uf[root2] = root1
-        return True
-    return False
-
-def get_karyotype_summary(non_type4_path_list : list):
+def get_karyotype_summary_relpath(non_type4_path_list : list):
     karyotypes_data_direction_include = {}
     karyotypes_nclose_count = {}
     
@@ -329,18 +338,14 @@ def get_karyotype_summary(non_type4_path_list : list):
         pieces.append((tuple(curr_chr), chr_len[curr_chr[0]] - curr_ref if curr_incr == '+' else curr_ref))
         karyotypes_data_direction_include[path_path] = pieces
 
-    clusters = defaultdict(list)
-    for path, seq in karyotypes_data_direction_include.items():
-        placed = False
-        for m in clusters.keys():
-            m_seq = karyotypes_data_direction_include[m]
-            if should_join_by_baseline(seq, m_seq):
-                root_merge(clusters, path, m)
-                placed = True
-            
-
     return karyotypes_data_direction_include
 
+logging.basicConfig(
+    format='%(asctime)s %(levelname)s:%(message)s',
+    level=logging.INFO,
+    datefmt='%m/%d/%Y %I:%M:%S %p',
+)
+logging.info("24_cluster_weight start")
 
 parser = argparse.ArgumentParser()
 
@@ -359,13 +364,14 @@ parser.add_argument("reference_fai_path",
 parser.add_argument("prefix", 
                     help="Pefix for pipeline")
 
+parser.add_argument("-t", "--thread", help="Number of threads", type=int)
 
-# args = parser.parse_args()
+args = parser.parse_args()
 
-t = """
-24_cluster_weight.py /home/hyunwoo/ACCtools-pipeline/90_skype_run/Caki-1/20_alignasm/Caki-1.ctg.aln.paf.ppc.paf /home/hyunwoo/ACCtools-pipeline/90_skype_run/Caki-1/01_depth/Caki-1_normalized.win.stat.gz public_data/chm13v2.0_telomere.bed public_data/chm13v2.0.fa.fai 30_skype_pipe/Caki-1_14_35_45
-"""
-args = parser.parse_args(t.strip().split()[1:])
+# t = """
+# 24_cluster_weight.py /home/hyunwoo/ACCtools-pipeline/90_skype_run/Caki-1/20_alignasm/Caki-1.ctg.aln.paf.ppc.paf /home/hyunwoo/ACCtools-pipeline/90_skype_run/Caki-1/01_depth/Caki-1_normalized.win.stat.gz public_data/chm13v2.0_telomere.bed public_data/chm13v2.0.fa.fai 30_skype_pipe/Caki-1_18_40_59 -t 128
+# """
+# args = parser.parse_args(t.strip().split()[1:])
 
 
 PREFIX = args.prefix
@@ -381,6 +387,21 @@ back_contig_path = RATIO_OUTLIER_FOLDER+"back_jump/"
 output_folder = f'{PREFIX}/21_pat_depth'
 NCLOSE_FILE_PATH = f"{args.prefix}/nclose_nodes_index.txt"
 
+with open(f"{PREFIX}/report.txt", 'r') as f:
+    f.readline()
+    path_cnt = int(f.readline().strip())
+
+use_julia_solver = path_cnt <= HARD_PATH_COUNT_BASELINE
+
+if not use_julia_solver:
+    exit(0)
+
+THREAD = args.thread
+core_num = psutil.cpu_count(logical=False)
+if core_num is None:
+    THREAD = THREAD
+else:
+    THREAD = min(int(THREAD), core_num)
 
 nclose_nodes = set(extract_nclose_node(NCLOSE_FILE_PATH))
 ppc_data = import_ppc_data(PREPROCESSED_PAF_FILE_PATH)
@@ -396,6 +417,8 @@ df = pd.read_csv(main_stat_loc, compression='gzip', comment='#', sep='\t', names
 df = df.query('chr != "chrM"')
 
 meandepth = np.median(df['meandepth'])
+N = meandepth / 2
+
 chr_len = find_chr_len(CHROMOSOME_INFO_FILE_PATH)
 weights = np.load(f'{PREFIX}/weight.npy')
 weights_sorted_data = sorted(enumerate(weights), key=lambda t:t[1], reverse=True)
@@ -439,7 +462,6 @@ tot_loc_list = []
 for loc, ll in paf_ans_list:
     tot_loc_list.append(loc)
 
-
 fclen = len(glob.glob(front_contig_path+"*"))
 bclen = len(glob.glob(back_contig_path+"*"))
 
@@ -451,15 +473,25 @@ for i in range(1, bclen//4 + 1):
     bv_paf_loc = back_contig_path+f"{i}_base.paf"
     tot_loc_list.append(bv_paf_loc)
 
-path_dict = {}
-non_type4_path_list = []
+loc2weight = dict(zip(tot_loc_list, weights))
+
+cluster_tar_path_list = []
+
+# Add pure chromosome
+with open(f"{PREFIX}/tar_chr_data.pkl", "rb") as f:
+    tar_chr_data = pkl.load(f)
+
+loc_prefix = paf_ans_list[0][0].split('/')[:-3]
+
+for path_tuple in tar_chr_data.values():
+    path = '/'.join(loc_prefix + list(path_tuple))
+    cluster_tar_path_list.append(path)
 
 for ind, w in weights_sorted_data:
     paf_loc = tot_loc_list[ind]
-    key = paf_loc.split('/')[-3]
     if paf_loc.split('/')[-3] != '11_ref_ratio_outliers':
-        if w > 0:
-            non_type4_path_list.append(paf_loc)
+        if w > CLUSTER_START_DEPTH * N:
+            cluster_tar_path_list.append(paf_loc)
 
 tot_loc_list2nclosecnt = dict()
 
@@ -481,7 +513,83 @@ for paf_loc in tot_loc_list:
         tot_loc_list2nclosecnt[paf_loc] = nclose_use_cnt
         
 # karyotypes_data : key (rel_path) => value (karyotype value)
-karyotypes_data = get_karyotype_summary(non_type4_path_list)
+karyotypes_data = get_karyotype_summary_relpath(cluster_tar_path_list)
 
-# for k, v in karyotypes_data.items():
-#     print(f"{k} : {v}")
+chr_set_merge = defaultdict(list)
+rel_path2ncnt = dict((v, i) for i, v in enumerate(tot_loc_list))
+
+for path, seq_list in karyotypes_data.items():
+    matched_master = None
+
+    # Compare only against master paths
+    for master_path, slave_list in chr_set_merge.items():
+        master_seq = karyotypes_data[master_path]
+        if should_join_by_baseline(master_seq, seq_list):
+            matched_master = master_path
+            break
+
+    if matched_master is not None:
+        # Join to existing cluster as slave
+        chr_set_merge[matched_master].append(path)
+    else:
+        # Create new cluster with this path as master
+        chr_set_merge[path] = [path]
+
+using_merge_ncnt_list = []
+for path_list in chr_set_merge.values():
+    merge_weight = sum(loc2weight[p] for p in path_list)
+    if merge_weight > CLUSTER_FINAL_DEPTH * N:
+        repr_path = min(path_list, key=lambda t : tot_loc_list2nclosecnt[t])
+        using_merge_ncnt_list.append(rel_path2ncnt[repr_path])
+
+for ncnt, (paf_loc, w) in enumerate(loc2weight.items()):
+    if paf_loc.split('/')[-3] == '11_ref_ratio_outliers' and w > CLUSTER_FINAL_DEPTH * N:
+        with open(paf_loc, "r") as f:
+            l = f.readline()
+            l = l.rstrip()
+            l = l.split("\t")
+            chr_nam1 = l[CHR_NAM]
+            chr_nam2 = l[CHR_NAM]
+            pos1 = int(l[CHR_STR])
+            pos2 = int(l[CHR_END])
+            if abs(pos1-pos2) > TYPE4_CLUSTER_SIZE:
+                using_merge_ncnt_list.append(ncnt)
+
+using_merge_ncnt_list.sort()
+using_merge_ncnt_arr = np.asarray(using_merge_ncnt_list)
+
+jl.include(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'anderson_nnls.jl'))
+jl.seval("using HDF5, LinearAlgebra")
+
+A_jl, B_jl, b_start_ind = jl.load_nnls_array(f'{PREFIX}/matrix.h5')
+A_fail_jl = jl.load_fail_array(f'{PREFIX}/matrix.h5')
+B = np.asarray(B_jl)
+
+final_idx_array_jl = jl.Vector[jl.Int]([i + 1 for i in using_merge_ncnt_list])
+A_final_jl = jl.view(A_jl, jl.Colon(), final_idx_array_jl)
+A_fail_final_jl = jl.view(A_fail_jl, jl.Colon(), final_idx_array_jl)
+
+
+final_weight_jl = jl.nnls_solve(A_final_jl, B_jl, THREAD, False)
+final_weight = np.asarray(final_weight_jl)
+final_weights_fullsize = np.zeros(jl.size(A_jl, 2))
+
+final_weight[final_weight <= CLUSTER_START_DEPTH * N] = 0
+final_weight_jl = jl.Vector[jl.eltype(final_weight_jl)](final_weight)
+
+for i, v in enumerate(final_weight):
+    final_weights_fullsize[using_merge_ncnt_list[i]] = v
+
+predict_B_succ = np.asarray(A_final_jl * final_weight_jl)
+predict_B_fail = np.asarray(A_fail_final_jl * final_weight_jl)
+
+b_norm = np.linalg.norm(B)
+
+error = np.linalg.norm(predict_B_succ - B)
+predict_B = np.concatenate((predict_B_succ, predict_B_fail))[b_start_ind:]
+
+logging.info(f'Error : {error:.4f}')
+logging.info(f'Relative error : {error/b_norm:.4f}')
+
+np.save(f'{PREFIX}/weight_cluster.npy', final_weights_fullsize)
+np.save(f'{PREFIX}/predict_B_cluster.npy', predict_B)

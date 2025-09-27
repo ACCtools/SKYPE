@@ -76,6 +76,8 @@ TYPE34_BREAK_CHUKJI_LIMIT = 1*M
 NCLOSE_SIM_COMPARE_RAITO = 1.2
 NCLOSE_SIM_DIFF_THRESHOLD = 5
 
+HARD_PATH_COUNT_BASELINE = 100 * K
+
 def similar_check(v1, v2, ratio=TYPE2_SIM_COMPARE_RAITO):
     try:
         assert(v1 >= 0 and v2 >= 0)
@@ -775,20 +777,6 @@ for chrom, data in grouped_data.items():
 noise_array = np.hstack(filtered_values_list)
 amplitude = np.std(noise_array)
 
-smooth_B = rebin_dataframe_B(df, 10)[chr_filt_idx_list + chr_no_filt_idx_list]
-predicted_B = np.maximum(np.load(f'{PREFIX}/predict_B.npy'), 0)
-diff = predicted_B - smooth_B
-
-threshold = amplitude * scipy.stats.norm.ppf(0.975)
-miss_B = np.abs(diff) > threshold
-over_B = np.asarray([False] * len(chr_filt_st_list) + [True] * len(chr_no_filt_st_list))
-
-color_label = np.ones_like(B)
-color_label[miss_B] = 3
-color_label[over_B] = 5
-
-logging.info(f'Fail ratio : {round(sum(color_label[miss_B] == 3) / len(B) * 100, 3)}%')
-
 chr_len = find_chr_len(CHROMOSOME_INFO_FILE_PATH)
 del chr_len['chrM']
 
@@ -839,6 +827,20 @@ for i, raw_path in enumerate(raw_path_list):
 
 
 def draw_circos_plot(weights, fig_prefix=''):
+    smooth_B = rebin_dataframe_B(df, 10)[chr_filt_idx_list + chr_no_filt_idx_list]
+    predicted_B = np.maximum(np.load(f'{PREFIX}/predict_B{fig_prefix}.npy'), 0)
+    diff = predicted_B - smooth_B
+
+    threshold = amplitude * scipy.stats.norm.ppf(0.975)
+    miss_B = np.abs(diff) > threshold
+    over_B = np.asarray([False] * len(chr_filt_st_list) + [True] * len(chr_no_filt_st_list))
+
+    color_label = np.ones_like(B)
+    color_label[miss_B] = 3
+    color_label[over_B] = 5
+
+    logging.info(f'Fail ratio : {round(sum(color_label[miss_B] == 3) / len(B) * 100, 3)}%')
+
     nclose_cn = defaultdict(float)
     for i, ctr in enumerate(path_nclose_usage):
         for j, v in ctr.items():
@@ -1101,8 +1103,15 @@ def draw_circos_plot(weights, fig_prefix=''):
 weights = np.load(f'{PREFIX}/weight.npy')
 draw_circos_plot(weights)
 
-# weights_cluster = np.load(f'{PREFIX}/weight_cluster.npy')
-# draw_circos_plot(weights_cluster, '_cluster')
+with open(f"{PREFIX}/report.txt", 'r') as f:
+    f.readline()
+    path_cnt = int(f.readline().strip())
+
+use_julia_solver = path_cnt <= HARD_PATH_COUNT_BASELINE
+
+if use_julia_solver:
+    weights_cluster = np.load(f'{PREFIX}/weight_cluster.npy')
+    draw_circos_plot(weights_cluster, '_cluster')
 
 # Parse as vcf
 
