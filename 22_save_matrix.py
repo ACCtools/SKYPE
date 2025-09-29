@@ -1,10 +1,15 @@
+import os
+import sys
+from termios import ECHONL
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+
+from skype_utils import *
+
 import numpy as np
 import pandas as pd
 import pickle as pkl
 
-import os
 import ast
-import sys
 import h5py
 import logging
 import argparse
@@ -53,15 +58,13 @@ CTG_GLOBALIDX = 21
 DEFAULT_NCLOSE_WEIGHT = 0.1
 
 ABS_MAX_COVERAGE_RATIO = 3
-K = 1000
-M = K * 1000
 MAX_PATH_CNT = 100
 
 CHROMOSOME_COUNT = 23
 DIR_FOR = 1
 TELOMERE_EXPANSION = 5 * K
 
-HARD_PATH_COUNT_BASELINE = 100 * K
+
 
 def highpass_filter(data, cutoff, fs, order=3):
     """
@@ -393,6 +396,8 @@ PREPROCESSED_PAF_FILE_PATH = args.ppc_paf_file_path
 RATIO_OUTLIER_FOLDER = f"{PREFIX}/11_ref_ratio_outliers/"
 front_contig_path = RATIO_OUTLIER_FOLDER + "front_jump/"
 back_contig_path = RATIO_OUTLIER_FOLDER + "back_jump/"
+ecdna_contig_path = RATIO_OUTLIER_FOLDER + "ecdna/"
+
 TELO_CONNECT_NODES_INFO_PATH = PREFIX + "/telomere_connected_list.txt"
 NCLOSE_FILE_PATH = f"{PREFIX}/nclose_nodes_index.txt"
 
@@ -699,9 +704,10 @@ with ProcessPoolExecutor(max_workers=THREAD) as executor:
 
 fclen = len(glob.glob(front_contig_path + "*"))
 bclen = len(glob.glob(back_contig_path + "*"))
+eclen = len(glob.glob(ecdna_contig_path + "*"))
 
 m = np.shape(B)[0]
-n = len(paf_ans_list) + fclen // 4 + bclen // 4
+n = len(paf_ans_list) + fclen // 4 + bclen // 4 + eclen // 2
 ncnt = 0
 
 with open(f"{PREFIX}/report.txt", 'r') as f:
@@ -721,8 +727,6 @@ bv_loc_list = []
 
 tmp_n = np.zeros(ncm, dtype=np.float32)
 tmp_v = np.zeros(m, dtype=np.float32)
-
-pathrel2ncnt = dict()
 
 tar_def_path_ind_dict = {}
 ncnt = 0
@@ -769,8 +773,6 @@ for path, key_int_list in tqdm(paf_ans_list, desc='Recover depth from separated 
     path_rel = get_relative_path(path)
     if path_rel in tar_def_path_set:
         tar_def_path_ind_dict[path_rel] = ncnt
-
-    pathrel2ncnt[path_rel] = ncnt
     ncnt += 1
 
 # Process forward-directed outlier contigs
@@ -797,8 +799,6 @@ for i in tqdm(range(1, fclen // 4 + 1), desc='Parse coverage from forward-direct
         A_arr[ncm:, ncnt] = ov - bv
         
     path_nclose_dict_set[ncnt] = set()
-
-    pathrel2ncnt[get_relative_path(bv_paf_loc)] = ncnt
     ncnt += 1
     
 init_cols = [tar_def_path_ind_dict[i] for i in tar_chr_data.values()]
@@ -835,15 +835,32 @@ for i in tqdm(range(1, bclen // 4 + 1), desc='Parse coverage from backward-direc
         A_arr[ncm:, ncnt] = ov + bv
         
     path_nclose_dict_set[ncnt] = set()
+    ncnt += 1
 
-    pathrel2ncnt[get_relative_path(bv_paf_loc)] = ncnt
+for i in range(1, eclen // 2 + 1):
+    ov_loc = ecdna_contig_path + f"{i}.win.stat.gz"
+    ov = get_vec_from_stat_loc(ov_loc)
+
+    if NCLOSE_WEIGHT_USE:
+        if use_julia_solver:
+            A_arr[ncnt, :ncm] = tmp_n
+        else:
+            A_arr[:ncm, ncnt] = tmp_n
+            
+    if use_julia_solver:
+        A_arr[ncnt, ncm:] = ov
+    else:
+        A_arr[ncm:, ncnt] = ov
+        
+    path_nclose_dict_set[ncnt] = set()
     ncnt += 1
 
 B = np.hstack((B_nclose, B))
 
-dep_list.extend([0] * (fclen // 4 + bclen // 4))
+dep_list.extend([0] * (fclen // 4 + bclen // 4 + eclen // 2))
 
 assert(len(dep_list) == n)
+
 for (i1, i2) in itertools.pairwise(dep_list):
     assert(i1 >= i2)
 
@@ -872,9 +889,6 @@ with h5py.File(f'{PREFIX}/matrix.h5', 'w') as hf:
 
 with open(f"{PREFIX}/23_input.pkl", "wb") as f:
     pkl.dump((chr_filt_st_list, path_nclose_dict_set, amplitude), f)
-
-with open(f"{PREFIX}/pathrel2ncnt.pkl", "wb") as f:
-    pkl.dump(pathrel2ncnt, f)
 
 with open(f"{PREFIX}/tar_chr_data.pkl", "wb") as f:
     pkl.dump(tar_chr_data, f)

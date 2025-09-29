@@ -1,4 +1,9 @@
 import os
+import sys
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+
+from skype_utils import *
+
 import psutil
 import logging
 import warnings
@@ -33,9 +38,6 @@ CTG_MAINFLOWDIR = 19
 CTG_MAINFLOWCHR = 20
 CTG_GLOBALIDX = 21
 
-K = 1000
-M = 1000 * K
-
 DEPTH_VECTOR_WINDOW = 100 * K
 DEPTH_ERROR_ALLOW_LEN = 500 * K
 
@@ -45,7 +47,7 @@ VCF_FLANKING_LENGTH = 1*M
 NCLOSE_SIM_COMPARE_RAITO = 1.2
 NCLOSE_SIM_DIFF_THRESHOLD = 5
 
-HARD_PATH_COUNT_BASELINE = 100 * K
+
 
 def similar_check(v1, v2, ratio):
     try:

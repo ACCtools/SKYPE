@@ -1,10 +1,18 @@
+from math import e
+import os
+import sys
+
+from matplotlib import axis
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+
+from skype_utils import *
+
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import pickle as pkl
 import matplotlib.patches as patches
 
-import os
 import re
 import ast
 import glob
@@ -47,8 +55,6 @@ DIR_FOR = 1
 DIR_BAK = 1
 
 ABS_MAX_COVERAGE_RATIO = 3
-K = 1000
-M = K * 1000
 MAX_PATH_CNT = 100
 INF = 1000000000
 
@@ -75,7 +81,7 @@ NCLOSE_SIM_DIFF_THRESHOLD = 5
 JOIN_BASELINE = 0.8
 KARYOTYPE_SECTION_MINIMUM_LENGTH = 100 * K
 
-HARD_PATH_COUNT_BASELINE = 100 * K
+
 
 NODE_NAME = 1
 CHR_CHANGE_IDX = 2
@@ -415,6 +421,39 @@ def plot_indel(ax, indel, maxh, cell_col, def_cell_col, chr_len, label=None):
     ax.set_ylim(0, 100)
     ax.axis('off')
 
+def plot_ecdna(ax, chr_name, cell_col, def_cell_col, label = None):
+    axis_xlim = 60
+    axis_ylim = 100
+    x_center = 30 * cell_col / def_cell_col  # 좌우 중앙값 (필요에 따라 조정)
+    width = 10     # 염색체 
+    radius = width / 1.3
+    chr_color = CHR_COLORS.get(chr_name[0])
+
+    ax.set_xlim(0, axis_xlim * cell_col / def_cell_col)
+    ax.set_ylim(0, axis_ylim)
+    ax.axis('off')
+
+    outline_circle = patches.Ellipse(
+        (x_center, 50),
+        radius*2*1.2, # Todo : 이 상수가 뭔지 이해하기 (일단 ylim/xlim은 아님)
+        radius*2,
+        facecolor=chr_color,
+        edgecolor='black',
+        linewidth=1.2
+    )
+    ax.add_patch(outline_circle)
+    hole_circle = patches.Ellipse(
+        (x_center, 50),
+        radius*1.2,
+        radius,
+        facecolor='white',
+        edgecolor='black',
+        linewidth=1.2
+    )
+    ax.add_patch(hole_circle)
+    if label:
+        ax.text(x_center, -5, label, ha='center', va='top', fontsize=10)
+
 def plot_scale_bar(ax, chr_name, maxh):
     ax.set_xlim(-5, 5)
     ax.axis(True)
@@ -672,6 +711,16 @@ def get_karyotype_summary(non_type4_path_list : list):
 
     return karyotypes_data_direction_include
 
+def ecdna_format(x:int) -> str:
+    if x >= 1_000_000_000:
+        return f"{x / 1_000_000_000:.2f}G"
+    elif x >= 1_000_000:
+        return f"{x / 1_000_000:.2f}M"
+    elif x >= 1_000:
+        return f"{x / 1_000:.2f}K"
+    else:
+        return str(x)
+
 def build_karyotype_diagram(weights, fig_prefix : str = '', filter_depth_N : float = 0):
     loc2weight = dict(zip(tot_loc_list, weights))
     weights_sorted_data = sorted(enumerate(weights), key=lambda t:t[1], reverse=True)
@@ -692,6 +741,9 @@ def build_karyotype_diagram(weights, fig_prefix : str = '', filter_depth_N : flo
     all_deletion_path = []
     deletion_path_dict = {}
 
+    all_ecdna_path = []
+    ecdna_path_dict = {}
+
     for ind, w in weights_sorted_data:
         paf_loc = tot_loc_list[ind]
         key = paf_loc.split('/')[-3]
@@ -703,6 +755,9 @@ def build_karyotype_diagram(weights, fig_prefix : str = '', filter_depth_N : flo
             if indel_ind == 'back_jump' and w > NCLOSE_SIM_DIFF_THRESHOLD:
                 insertion_path_dict[paf_loc] = w
                 all_insertion_path.append(paf_loc)
+            if indel_ind == 'ecdna' and w > NCLOSE_SIM_DIFF_THRESHOLD:
+                ecdna_path_dict[paf_loc] = w
+                all_ecdna_path.append(paf_loc)
 
     long_deletion_path = {}
     long_insertion_path = {}
@@ -730,6 +785,24 @@ def build_karyotype_diagram(weights, fig_prefix : str = '', filter_depth_N : flo
             pos2 = int(l[CHR_END])
             if abs(pos1-pos2) > TYPE4_CLUSTER_SIZE:
                 long_insertion_path[i] = (chr_nam1, pos1, pos2)
+
+    # long_ecdna_path = {}
+    # for i in all_ecdna_path:
+    #     min_pos = 1e9
+    #     max_pos = -1
+    #     chr_nam = ''
+    #     depth = ecdna_path_dict[i]/meandepth * 2
+    #     with open(i, "r") as f:
+    #         for line in f:
+    #             line = line.rstrip()
+    #             line = line.split("\t")
+    #             if chr_nam == '':
+    #                 chr_nam = line[CHR_NAM]
+    #             pos1 = int(line[CHR_STR])
+    #             pos2 = int(line[CHR_END])
+    #             min_pos = min(min_pos, pos1, pos2)
+    #             max_pos = max(max_pos, pos1, pos2)
+    #     long_ecdna_path[i] = (chr_nam, min_pos, max_pos, depth)
 
     display_indel = defaultdict(list)
 
@@ -779,6 +852,9 @@ def build_karyotype_diagram(weights, fig_prefix : str = '', filter_depth_N : flo
         
         rows += ((len(data_list) + indel_len - 1) // cols + 1) if len(data_list) + indel_len > 0 else 0
 
+    # if len(long_ecdna_path) > 0:
+    #     rows += ((len(long_ecdna_path)-1) // cols + 1)
+
     cell_col = 3
     cell_row = 4.5
     def_cell_col = 1.8
@@ -819,6 +895,11 @@ def build_karyotype_diagram(weights, fig_prefix : str = '', filter_depth_N : flo
         now_col += ((len(data_list) + indel_len - 1) // cols + 1) if len(data_list) + indel_len > 0 else 0
         for col in range(bef_now_col, now_col):
             plot_scale_bar(ax_array[col][len(prefix_ratios) - 1], chr_name, maxh)
+
+    # if len(long_ecdna_path) > 0:
+    #     plot_chr_name(ax_array[now_col][0], 'ecDNA')
+    #     for i, data in enumerate(long_ecdna_path.values()):
+    #         plot_ecdna(ax_array[i // cols + now_col][i % cols + len(prefix_ratios)], data[0], cell_col, def_cell_col, label=f"{data[0]} : {ecdna_format(data[1])}-{ecdna_format(data[2])}\n({round(data[3], 2)}N)")
 
 
 
@@ -890,6 +971,7 @@ CELL_LINE = args.cell_line_name
 RATIO_OUTLIER_FOLDER = f"{PREFIX}/11_ref_ratio_outliers/"
 front_contig_path = RATIO_OUTLIER_FOLDER+"front_jump/"
 back_contig_path = RATIO_OUTLIER_FOLDER+"back_jump/"
+ecdna_contig_path = RATIO_OUTLIER_FOLDER+"ecdna/"
 TELO_CONNECT_NODES_INFO_PATH = PREFIX+"/telomere_connected_list.txt"
 output_folder = f'{PREFIX}/21_pat_depth'
 NCLOSE_FILE_PATH = f"{args.prefix}/nclose_nodes_index.txt"
@@ -908,6 +990,7 @@ chr_len = find_chr_len(CHROMOSOME_INFO_FILE_PATH)
 
 fclen = len(glob.glob(front_contig_path+"*"))
 bclen = len(glob.glob(back_contig_path+"*"))
+eclen = len(glob.glob(ecdna_contig_path+"*"))
 
 tot_loc_list = []
 
@@ -924,6 +1007,10 @@ for i in range(1, fclen//4 + 1):
 for i in range(1, bclen//4 + 1):
     bv_paf_loc = back_contig_path+f"{i}_base.paf"
     tot_loc_list.append(bv_paf_loc)
+
+for i in range(1, eclen//2 + 1):
+    ec_paf_loc = ecdna_contig_path+f"{i}.paf"
+    tot_loc_list.append(ec_paf_loc)
 
 with open(f'{PREFIX}/tot_loc_list.pkl', 'wb') as f:
     pkl.dump(tot_loc_list, f)

@@ -1,9 +1,14 @@
+import os
+import sys
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+
+from skype_utils import *
+
 import numpy as np
 import pandas as pd
 from collections import defaultdict 
 import argparse
 
-K = 1000
 CENSAT_COMPRESSABLE_THRESHOLD = 1000*K
 INF = 1e9
 

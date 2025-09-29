@@ -1,15 +1,17 @@
+import os
 import sys
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+
+from skype_utils import *
+
+import shutil
 import argparse
 import subprocess
 
-import shutil
-import os
 import pickle as pkl
-
 import pandas as pd
 import numpy as np
 
-import itertools
 import ast
 
 import copy
@@ -64,8 +66,7 @@ DIR_OUT = 2
 INF = 1000000000
 BUFFER = 10000000
 CHROMOSOME_COUNT = 23
-K = 1000
-M = 1000 * K
+
 CHUKJI_LIMIT = -1
 BND_CONTIG_BOUND = 0.1
 TYPE2_CONTIG_MINIMUM_LENGTH = 200*K
@@ -124,6 +125,8 @@ MAX_OVERLAP_SCORE = 3
 
 SPLIT_CTG_LEN_LIMIT = 100 * K
 TRUST_SPLIT_CTG_LEN_LIMIT = 20 * K
+
+MIN_PATH_REF_LEN = 5 * M
 
 def import_data(file_path : str) -> list :
     contig_data = []
@@ -4355,6 +4358,8 @@ def run_graph(data, nonzero_telo_set, CHR_CHANGE_LIMIT, DIR_CHANGE_LIMIT):
                     flag = False
                 if chr_len[longest_chr[0]] + chr_len[second_chr[0]] < total_path_ref_len:
                     flag = False
+                if total_path_ref_len < MIN_PATH_REF_LEN:
+                    flag = False
                 if flag:
                     key = tuple(sorted(path_counter.keys()))
                     flagflag = True
@@ -4499,7 +4504,7 @@ def run_graph_pipeline():
 
 inversion_adjacency = initialize_inversion_only_graph(contig_data, nclose_nodes)
 
-inversion_graph = nx2gt(make_inversion_nx_graph(inversion_adjacency))\
+inversion_graph = nx2gt(make_inversion_nx_graph(inversion_adjacency))
 
 ecdna_circuit_candidate_set = set()
 
@@ -4519,7 +4524,8 @@ for circuit in ecdna_circuit_candidate_set:
         ecdna_circuit_set.add(circuit)
 
 # Todo : transform into vcf format
-ecdna_circuit_set
+with open(f"{PREFIX}/ecdna_circuit.pkl", "wb") as f:
+    pkl.dump(ecdna_circuit_set, f)
 
 last_success = run_graph_pipeline()
 if not last_success:

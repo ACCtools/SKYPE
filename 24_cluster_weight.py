@@ -1,7 +1,12 @@
+import os
+import sys
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+
+from skype_utils import *
+
 from collections import defaultdict
 from juliacall import Main as jl
 
-import os
 import ast
 import glob
 import psutil
@@ -47,16 +52,13 @@ TEL_TYPE = 2
 CLUSTER_START_DEPTH = 0.1
 CLUSTER_FINAL_DEPTH = 0.2
 
-M = 1e6
-K = 1000
-
 JOIN_SAME_CHR_BASELINE = 0.8
 JOIN_DIFF_CHR_BASELINE = 0.9
 
 TELOMERE_EXPANSION = 5 * K
 KARYOTYPE_SECTION_MINIMUM_LENGTH = 100*K
 
-HARD_PATH_COUNT_BASELINE = 100 * K
+
 TYPE4_CLUSTER_SIZE = 10 * M
 
 def get_relative_path(p):
@@ -345,7 +347,6 @@ logging.basicConfig(
     level=logging.INFO,
     datefmt='%m/%d/%Y %I:%M:%S %p',
 )
-logging.info("24_cluster_weight start")
 
 parser = argparse.ArgumentParser()
 
@@ -384,6 +385,7 @@ RATIO_OUTLIER_FOLDER = f"{PREFIX}/11_ref_ratio_outliers/"
 TELO_CONNECT_NODES_INFO_PATH = PREFIX+"/telomere_connected_list.txt"
 front_contig_path = RATIO_OUTLIER_FOLDER+"front_jump/"
 back_contig_path = RATIO_OUTLIER_FOLDER+"back_jump/"
+ecdna_contig_path = RATIO_OUTLIER_FOLDER+"ecdna/"
 output_folder = f'{PREFIX}/21_pat_depth'
 NCLOSE_FILE_PATH = f"{args.prefix}/nclose_nodes_index.txt"
 
@@ -395,6 +397,7 @@ use_julia_solver = path_cnt <= HARD_PATH_COUNT_BASELINE
 
 if not use_julia_solver:
     exit(0)
+logging.info("24_cluster_weight start")
 
 THREAD = args.thread
 core_num = psutil.cpu_count(logical=False)
@@ -464,6 +467,7 @@ for loc, ll in paf_ans_list:
 
 fclen = len(glob.glob(front_contig_path+"*"))
 bclen = len(glob.glob(back_contig_path+"*"))
+eclen = len(glob.glob(ecdna_contig_path+"*"))
 
 for i in range(1, fclen//4 + 1):
     bv_paf_loc = front_contig_path+f"{i}_base.paf"
@@ -472,6 +476,10 @@ for i in range(1, fclen//4 + 1):
 for i in range(1, bclen//4 + 1):
     bv_paf_loc = back_contig_path+f"{i}_base.paf"
     tot_loc_list.append(bv_paf_loc)
+
+for i in range(1, eclen//2 + 1):
+    ecdna_paf_loc = ecdna_contig_path+f"{i}.paf"
+    tot_loc_list.append(ecdna_paf_loc)
 
 loc2weight = dict(zip(tot_loc_list, weights))
 
@@ -588,8 +596,8 @@ b_norm = np.linalg.norm(B)
 error = np.linalg.norm(predict_B_succ - B)
 predict_B = np.concatenate((predict_B_succ, predict_B_fail))[b_start_ind:]
 
-logging.info(f'Error : {error:.4f}')
-logging.info(f'Relative error : {error/b_norm:.4f}')
+logging.info(f'Cluster error : {error:.4f}')
+logging.info(f'Cluster relative error : {error/b_norm:.4f}')
 
 np.save(f'{PREFIX}/weight_cluster.npy', final_weights_fullsize)
 np.save(f'{PREFIX}/predict_B_cluster.npy', predict_B)

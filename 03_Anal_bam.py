@@ -1,5 +1,9 @@
 import os
 import sys
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+
+from skype_utils import *
+
 import logging
 import argparse
 import pickle as pkl
@@ -17,9 +21,6 @@ logging.basicConfig(
     datefmt='%m/%d/%Y %I:%M:%S %p',
 )
 logging.info("03_anal_bam start")
-
-K = 1000
-M = 1000000
 
 AC_WA_RATIO_LIMIT = 5
 FLANK_LENGTH = 1 * M

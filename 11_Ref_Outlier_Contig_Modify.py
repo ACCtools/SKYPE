@@ -1,7 +1,13 @@
-import argparse
 import os
+import sys
+import pickle as pkl
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+
+from skype_utils import *
+
 import re
 import logging
+import argparse
 
 logging.basicConfig(
     format='%(asctime)s %(levelname)s:%(message)s',
@@ -33,7 +39,6 @@ CTG_MAINFLOWDIR = 19
 CTG_MAINFLOWCHR = 20
 CTG_GLOBALIDX = 21
 
-K = 1000
 CHUKJI_LIMIT = 100*K
 
 def import_origin_data(file_path : list) -> list :

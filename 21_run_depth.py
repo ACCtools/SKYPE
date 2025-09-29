@@ -1,7 +1,11 @@
 import os
+import sys
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+
+from skype_utils import *
+
 import re
 import ast
-import sys
 import glob
 import copy
 import logging
@@ -58,7 +62,7 @@ DIR_OUT = 2
 INF = 1000000000
 BUFFER = 10000000
 CHROMOSOME_COUNT = 23
-K = 1000
+
 
 PANDEPTH_RETRY = 3
 DEPTH_WINDOW=100 * K
@@ -606,6 +610,116 @@ def process_raw_contig_list(full_connected_path, key_cnt):
             cnt+=1
             cigar_str = 'cg:Z:' + cs_to_cigar(i[-1][5:])
             print("\t".join(list(map(str, i + [cigar_str]))), file=f)
+
+def process_raw_contig_list_ecdna(full_connected_path):
+    init_contig = form_normal_contig(contig_data[full_connected_path[0][1]])
+    path_contig = [init_contig]
+    full_connected_path_len = len(full_connected_path)
+    vcnt = 0
+    for i in range(1, full_connected_path_len):
+        curr_contig = path_contig[-1]
+        next_contig = contig_data[full_connected_path[i][1]]
+        if curr_contig[CHR_NAM] == next_contig[CHR_NAM] and curr_contig[CTG_NAM] != next_contig[CTG_NAM] \
+        or (curr_contig[CHR_NAM] == next_contig[CHR_NAM] and (full_connected_path[i-1][0] in (2, 3) or full_connected_path[i][0] in (2, 3))):
+            dist = distance_checker(curr_contig, next_contig)
+            if dist > 0:
+                if curr_contig[CHR_END] < next_contig[CHR_STR]:
+                    if curr_contig[CTG_NAM] != next_contig[CTG_NAM]:
+                        vcnt += 1
+                        new_contig = form_virtual_contig(curr_contig[CHR_LEN], curr_contig[CHR_END], next_contig[CHR_STR], curr_contig[CHR_NAM], vcnt)
+                        new_next_contig = form_normal_contig(next_contig)
+                        path_contig.append(new_contig)
+                        path_contig.append(new_next_contig)
+                    else:
+                        new_next_contig = form_normal_contig(next_contig)
+                        path_contig.append(new_next_contig)
+                else:
+                    if curr_contig[CTG_NAM] != next_contig[CTG_NAM]:
+                        vcnt += 1
+                        new_contig = form_virtual_contig(curr_contig[CHR_LEN], next_contig[CHR_END], curr_contig[CHR_STR], curr_contig[CHR_NAM], vcnt)
+                        new_next_contig = form_normal_contig(next_contig)
+                        path_contig.append(new_contig)
+                        path_contig.append(new_next_contig)
+                    else:
+                        new_next_contig = form_normal_contig(next_contig)
+                        path_contig.append(new_next_contig)
+            elif curr_contig[CHR_END] == next_contig[CHR_STR] or curr_contig[CHR_STR] == next_contig[CHR_END]:
+                new_next_contig = form_normal_contig(next_contig)
+                path_contig.append(new_next_contig)
+            else:
+                if curr_contig[CTG_DIR] == '-':
+                    curr_contig_rc = node_dir_transform(curr_contig)
+                else:
+                    curr_contig_rc = copy.deepcopy(curr_contig)
+                if next_contig[CTG_DIR] == '-':
+                    next_contig_rc = node_dir_transform(next_contig)
+                else:
+                    next_contig_rc = copy.deepcopy(next_contig)
+                curr_contig_data = [curr_contig_rc[CHR_STR], curr_contig_rc[CHR_END],
+                                    curr_contig_rc[CTG_STR], curr_contig_rc[CTG_END],
+                                    curr_contig[9], curr_contig[10],
+                                    curr_contig[-1][5:]]
+
+                next_contig_origin = form_normal_contig(next_contig)
+                
+                next_contig_data = [next_contig_rc[CHR_STR], next_contig_rc[CHR_END],
+                                    next_contig_rc[CTG_STR], next_contig_rc[CTG_END],
+                                    next_contig_origin[9], next_contig_origin[10],
+                                    next_contig_origin[-1][5:]]
+                # try:
+                #     assert(not (inclusive_checker_pair(tuple(curr_contig_data[0:2]), tuple(next_contig_data[0:2])) \
+                #            or inclusive_checker_pair(tuple(next_contig_data[0:2]), tuple(curr_contig_data[0:2]))))
+                # except:
+                #     print(tuple(curr_contig_data[0:2]), tuple(next_contig_data[0:2]))
+                #     print(index_file_path)
+                if full_connected_path[i-1][0] in {2, 3}:
+                    is_index_inc = (next_contig[CTG_DIR]=='+' and full_connected_path[i][0]==1) or \
+                                (next_contig[CTG_DIR]=='-' and full_connected_path[i][0]==0)
+                elif full_connected_path[i][0] in {2, 3}:
+                    is_index_inc = (curr_contig[CTG_DIR]=='+' and full_connected_path[i-1][0]==1) or \
+                            (curr_contig[CTG_DIR]=='-' and full_connected_path[i-1][0]==0)
+                else:
+                    assert(curr_contig[CTG_NAM] != next_contig[CTG_NAM])
+                    is_index_inc = (curr_contig[CTG_DIR]=='+' and full_connected_path[i-1][0]==1) or \
+                            (curr_contig[CTG_DIR]=='-' and full_connected_path[i-1][0]==0)
+
+                if is_index_inc: # 1324 2413
+
+                    curr_paf, next_paf = adjust_paf_overlap(curr_contig_data, next_contig_data)
+                    
+                    curr_result = form_adjusted_contig(curr_contig, curr_paf)
+                    if curr_contig[CTG_DIR]=='-':
+                        curr_result = node_dir_transform(curr_result)
+                    next_result = form_adjusted_contig(next_contig_origin, next_paf)
+                    if next_contig[CTG_DIR]=='-':
+                        next_result = node_dir_transform(next_result)
+                    path_contig[-1] = curr_result
+                    path_contig.append(next_result)
+                else:
+                    next_paf, curr_paf = adjust_paf_overlap(next_contig_data, curr_contig_data)
+                    
+                    curr_result = form_adjusted_contig(curr_contig, curr_paf)
+                    if curr_contig[CTG_DIR]=='-':
+                        curr_result = node_dir_transform(curr_result)
+                    next_result = form_adjusted_contig(next_contig_origin, next_paf)
+                    if next_contig[CTG_DIR]=='-':
+                        next_result = node_dir_transform(next_result)
+                    path_contig[-1] = curr_result
+                    path_contig.append(next_result)
+
+                
+        else:
+            next_contig_origin = form_normal_contig(next_contig)
+            path_contig.append(next_contig_origin)
+    cnt = 0
+
+    final_output_list = []
+    for i in path_contig:
+        cnt+=1
+        cigar_str = 'cg:Z:' + cs_to_cigar(i[-1][5:])
+        final_output_list.append("\t".join(list(map(str, i + [cigar_str]))))
+    
+    return final_output_list
     
 def create_final_depth_paf(data):
     (key, key_cnt) = data
@@ -655,6 +769,65 @@ def create_final_depth_paf(data):
         # Create empty file
         with open(f'{output_folder}/{key_cnt}.paf', 'w') as f:
             pass
+
+def create_final_depth_paf_ecdna(ecdna_circuit, save_path):
+    for idx, circuit in enumerate(ecdna_circuit):
+        assert(len(circuit) == 4)
+        data = []
+        s1, e1, s2, e2 = circuit
+        data.append((CTG_IN_TYPE, ((DIR_FOR, s1), (DIR_FOR, e1))))
+        data.append((BND_TYPE, ((DIR_FOR, e1), (DIR_BAK, e2))))
+        data.append((CTG_IN_TYPE, ((DIR_BAK, e2), (DIR_BAK, s2))))
+        data.append((BND_TYPE, ((DIR_BAK, s2), (DIR_FOR, s1))))
+        circuit_paf = []
+        for (key_type, key_val) in data:
+            raw_contig_list = []
+            if key_type == TEL_TYPE:
+                # Single contig
+                ctg_node_ind = key_val
+                raw_contig_list.append((DIR_FOR, ctg_node_ind))
+            elif key_type == CTG_IN_TYPE:
+                (s_type, s), (e_type, e) = key_val
+                assert(contig_data[s][CTG_NAM] == contig_data[e][CTG_NAM])
+                if s<e:
+                    for i in range(s+1, e):
+                        raw_contig_list.append((DIR_FOR, i))
+                else:
+                    for i in range(s-1, e, -1):
+                        raw_contig_list.append((DIR_BAK, i))
+            elif key_type == BND_TYPE:
+                (s_type, s), (e_type, e) = key_val
+                
+                if contig_data[s][CTG_NAM] != contig_data[e][CTG_NAM]:
+                    if nx.has_path(G, source=(DIR_OUT, s), target=(DIR_IN, e)):
+                        path = nx.shortest_path(G, source=(DIR_OUT, s), target=(DIR_IN, e), weight='weight')
+                        raw_contig_list.append((s_type, s))
+                        for node in path[1:-1]:
+                            raw_contig_list.append((node[0], node[1]))
+                        raw_contig_list.append((e_type, e))
+                    else:
+                        raw_contig_list.append((s_type, s))
+                        raw_contig_list.append((e_type, e))
+                else:
+                    if s<e:
+                        for i in range(s, e+1):
+                            raw_contig_list.append((DIR_FOR, i))
+                    else:
+                        for i in range(s, e-1, -1):
+                            raw_contig_list.append((DIR_BAK, i))
+            else:
+                # Never happen
+                assert(False)
+
+            if len(raw_contig_list) > 0:
+                circuit_paf += process_raw_contig_list_ecdna(raw_contig_list)
+            else:
+                # Create empty file
+                    pass
+        with open(f'{save_path}/{idx+1}.paf', 'wt') as f:
+            for i in circuit_paf:
+                print(i, file=f)
+
 
 def rev_dir(d):
     if d == DIR_IN:
@@ -1079,7 +1252,6 @@ contig_data_size = len(contig_data)
 
 THREAD = args.thread
 PREFIX = args.prefix
-
 # 20_fill_path code
 
 with open(f'{PREFIX}/paf_file_path.pkl', 'rb') as f:
@@ -1135,6 +1307,13 @@ for node in bnd_connected_graph:
 for node in bnd_connected_graph:
     for edge in bnd_connected_graph[node]:
         G.add_weighted_edges_from([(node, tuple(edge[:-1]), edge[-1])])
+
+os.makedirs(f'{PREFIX}/11_ref_ratio_outliers/ecdna', exist_ok=True)
+with open(f'{PREFIX}/ecdna_circuit.pkl', 'rb') as f:
+    ecdna_circuit = pkl.load(f)
+
+print(ecdna_circuit)
+create_final_depth_paf_ecdna(ecdna_circuit, f'{PREFIX}/11_ref_ratio_outliers/ecdna')
 
 # 21_run_depth
 

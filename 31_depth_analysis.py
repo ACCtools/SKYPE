@@ -1,3 +1,9 @@
+import os
+import sys
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+
+from skype_utils import *
+
 import numpy as np
 import pandas as pd
 import seaborn as sns
@@ -5,7 +11,6 @@ import matplotlib.pyplot as plt
 import matplotlib as mpl
 import pickle as pkl
 
-import os
 import ast
 import h5py
 import logging
@@ -22,9 +27,6 @@ from matplotlib.projections.polar import PolarAxes
 from pycirclize.track import Track
 from collections import defaultdict
 from collections import Counter
-
-from juliacall import Main as jl
-
 
 logging.basicConfig(
     format='%(asctime)s %(levelname)s:%(message)s',
@@ -58,8 +60,6 @@ CTG_MAINFLOWDIR = 18
 CTG_MAINFLOWCHR = 19
 
 ABS_MAX_COVERAGE_RATIO = 3
-K = 1000
-M = K * 1000
 MAX_PATH_CNT = 100
 
 CHROMOSOME_COUNT = 23
@@ -76,7 +76,6 @@ TYPE34_BREAK_CHUKJI_LIMIT = 1*M
 NCLOSE_SIM_COMPARE_RAITO = 1.2
 NCLOSE_SIM_DIFF_THRESHOLD = 5
 
-HARD_PATH_COUNT_BASELINE = 100 * K
 
 def similar_check(v1, v2, ratio=TYPE2_SIM_COMPARE_RAITO):
     try:
@@ -632,9 +631,6 @@ telo_connected_node = extract_telomere_connect_contig(TELO_CONNECT_NODES_INFO_PA
 with open(f'{PREFIX}/path_data.pkl', 'rb') as f:
     path_list_dict = pkl.load(f)
 
-with open(f"{PREFIX}/pathrel2ncnt.pkl", "rb") as f:
-    pathrel2ncnt = pkl.load(f)
-
 with h5py.File(f"{PREFIX}/matrix.h5", "r") as f:
     dB = f["B"]
     B = np.empty(dB.shape, dtype=dB.dtype)
@@ -839,7 +835,12 @@ def draw_circos_plot(weights, fig_prefix=''):
     color_label[miss_B] = 3
     color_label[over_B] = 5
 
-    logging.info(f'Fail ratio : {round(sum(color_label[miss_B] == 3) / len(B) * 100, 3)}%')
+    if fig_prefix == '':
+        msg_prefix = 'Fail'
+    else:
+        msg_prefix = 'Cluster fail'
+
+    logging.info(f'{msg_prefix} ratio : {round(sum(color_label[miss_B] == 3) / len(B) * 100, 3)}%')
 
     nclose_cn = defaultdict(float)
     for i, ctr in enumerate(path_nclose_usage):

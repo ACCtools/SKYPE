@@ -1,0 +1,5 @@
+K = 1000
+M = 1000 * K
+
+HARD_PATH_COUNT_BASELINE = 100 * K
+
