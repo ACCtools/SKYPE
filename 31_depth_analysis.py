@@ -11,6 +11,7 @@ import matplotlib.pyplot as plt
 import matplotlib as mpl
 import pickle as pkl
 
+import csv
 import ast
 import h5py
 import logging
@@ -471,7 +472,8 @@ def import_data2(file_path : str) -> list :
     contig_data = []
     for curr_contig in paf_file:
         temp_list = curr_contig.split("\t")
-        int_induce_idx = [CTG_LEN, CTG_STR, CTG_END, \
+        int_induce_idx = [
+            CTG_LEN, CTG_STR, CTG_END, \
                           CHR_LEN, CHR_STR, CHR_END, \
                           CTG_MAPQ, CTG_TYP, CTG_STRND, CTG_ENDND,]
         for i in int_induce_idx:
@@ -519,12 +521,12 @@ def pairs_to_vcf(pairs, contig_data, contig_lengths, display_indel, out_vcf_path
             a = contig_data[a_idx]
             b = contig_data[b_idx]
 
-            chr_a, chr_b = a[5], b[5]
-            pos_a = a[8]   # 첫 세그먼트의 reference end
-            pos_b = b[7]   # 두 번째의 reference start
+            chr_a, chr_b = a[CHR_NAM], b[CHR_NAM]
+            pos_a = a[CHR_END]   # 첫 세그먼트의 reference end
+            pos_b = b[CHR_STR]   # 두 번째의 reference start
 
             if chr_a != chr_b:
-                sv_id = f"tr{tr_counter}"
+                sv_id = f"SKYPE.BND.{tr_counter}"
                 tr_counter += 1
 
                 fo.write(
@@ -539,7 +541,7 @@ def pairs_to_vcf(pairs, contig_data, contig_lengths, display_indel, out_vcf_path
                 )
 
             else:
-                sv_id = f"inv{inv_counter}"
+                sv_id = f"SKYPE.INV.{inv_counter}"
                 inv_counter += 1
                 if pos_a < pos_b:
                     fpos = pos_a
@@ -553,22 +555,26 @@ def pairs_to_vcf(pairs, contig_data, contig_lengths, display_indel, out_vcf_path
                 )
 
         # 3) indel 처리
-        indel_counter = 1
+        ins_counter = 1
+        del_dounter = 1
+        
         for chrom, indel_list in display_indel.items():
             for indel in indel_list:
                 indel_type, start, end, _, _ = indel
                 if indel_type == 'd':
-                    sv_id = f"del{indel_counter}"
+                    sv_id = f"SKYPE.DEL.{del_dounter}"
                     svlen = -(end - start)
                     alt = "<DEL>"
+
+                    del_dounter += 1
                 elif indel_type == 'i':
-                    sv_id = f"ins{indel_counter}"
+                    sv_id = f"SKYPE.INS.{ins_counter}"
                     svlen = end - start
                     alt = "<INS>"
-                else:
-                    continue
 
-                indel_counter += 1
+                    ins_counter += 1
+                else:
+                    assert(False)
 
                 fo.write(
                     f"{chrom}\t{start}\t{sv_id}\tN\t{alt}\t.\t.\t"
@@ -622,6 +628,8 @@ PREPROCESSED_PAF_FILE_PATH = args.ppc_paf_file_path
 RATIO_OUTLIER_FOLDER = f"{PREFIX}/11_ref_ratio_outliers/"
 front_contig_path = RATIO_OUTLIER_FOLDER+"front_jump/"
 back_contig_path = RATIO_OUTLIER_FOLDER+"back_jump/"
+ecdna_contig_path = RATIO_OUTLIER_FOLDER + "ecdna/"
+
 TELO_CONNECT_NODES_INFO_PATH = PREFIX+"/telomere_connected_list.txt"
 vcf_path = f"{PREFIX}/SV_call_result.vcf"
 
@@ -651,6 +659,7 @@ meandepth = np.median(df['meandepth'])
 
 BREAKEND_REMARKABLE_CN = meandepth * BREAKEND_REMARKABLE_CN_RATIO
 TELOMERE_REMARKABLE_CN = meandepth * TELOMERE_REMARKABLE_CN_RATIO
+N = meandepth / 2
 
 chr_order_list = extract_groups(list(df['chr']))
 
@@ -728,7 +737,8 @@ def get_vec_from_ki(ki):
             v.append(chr_st_data[cs])
     
     return ki, np.asarray(v, dtype=np.float32)
-# os.remove(f'{PREFIX}/matrix.h5')
+
+os.remove(f'{PREFIX}/matrix.h5')
 
 with open(f'{PREFIX}/contig_pat_vec_data.pkl', 'rb') as f:
     paf_ans_list, key_list, int2key, _ = pkl.load(f)
@@ -818,6 +828,7 @@ for i, raw_path in enumerate(raw_path_list):
         using_telo[path[1][1]]+=1
     if path[len(path)-2][1] in telo_node_set:
         using_telo[path[len(path)-2][1]]+=1
+
     path_nclose_usage.append(using_nclose)
     path_telo_usage.append(using_telo)          
 
@@ -1233,6 +1244,7 @@ for k, v in nclose_cn_std.items():
 
 indel_val_list = []
 non_type4_cnt = len(bnd_cn_data)
+
 rpll = len(raw_path_list)
 for i in range(rpll, len(weights)):
     paf_loc = tot_loc_list[i]
@@ -1260,4 +1272,78 @@ for i in range(rpll, len(weights)):
 logging.info(f"Total called breakends (INS, DEL, BND, INV) : {len(significant_nclose) + len(display_indel)}")
 
 pairs_to_vcf(significant_nclose, contig_data, chr_len, display_indel, vcf_path)
+
+# Bed output for further analysis
+
+fclen = len(glob.glob(front_contig_path + "*"))
+bclen = len(glob.glob(back_contig_path + "*"))
+eclen = len(glob.glob(ecdna_contig_path + "*"))
+
+n = len(paf_ans_list) + fclen // 4 + bclen // 4 + eclen // 2
+
+with open(f'{PREFIX}/ecdna_circuit_data.pkl', 'rb') as f:
+    ecdna_circuit, _ = pkl.load(file=f)
+
+def make_bed_output(weights, output_prefix=''):
+    nclose_cn = defaultdict(float)
+
+    for i, ctr in enumerate(path_nclose_usage):
+        for j, v in ctr.items():
+            nclose_cn[j] += v * weights[i]
+    
+    with open(f'{PREFIX}/SKYPE_result{output_prefix}.bed', 'w') as f:
+        cf = csv.writer(f, delimiter='\t')
+        cf.writerow(['#chrom', 'cordst', 'cordnd', 'type', 'weight (N)'])
+
+    
+        for ind, v in nclose_cn.items():
+            if v > BREAKEND_REMARKABLE_CN:
+                cf.writerow([contig_data[ind][CHR_NAM], contig_data[ind][CHR_STR], contig_data[ind][CHR_END],
+                                'Breakend', round(v / N, 2)])
+
+        for i in range(rpll, len(weights)):
+            v = weights[i]
+
+            if v > BREAKEND_REMARKABLE_CN:
+                paf_loc = tot_loc_list[i]
+                event_type = paf_loc.split('/')[-2]
+
+                if event_type in {'front_jump', 'back_jump'}:
+                    with open(tot_loc_list[i], "r") as f:
+                        l = f.readline()
+                        l = l.rstrip()
+                        l = l.split("\t")
+                        
+
+                        cf.writerow([l[CHR_NAM], l[CHR_STR], l[CHR_END],
+                                        'Insertion' if event_type == 'front_jump' else 'Deletion',
+                                        round(v / N, 2)])
+
+                elif event_type == 'ecdna':
+                    ecdna_ind = len(paf_ans_list) + fclen // 4 + bclen // 4 - i
+
+                    ctg_st_list = []
+                    ctg_nd_list = []
+
+                    for ctg_ind in ecdna_circuit[ecdna_ind]:
+                        ctg_st_list.append(contig_data[ctg_ind][CHR_STR])
+                        ctg_nd_list.append(contig_data[ctg_ind][CHR_END])
+
+                    ctg_ind = ecdna_circuit[ecdna_ind][0]
+                    
+                    ctg_st = min(ctg_st_list)
+                    ctg_nd = max(ctg_nd_list)
+
+                    cf.writerow([contig_data[ctg_ind][CHR_NAM], ctg_st, ctg_nd,
+                                     'Amplicon', round(v / N, 2)])
+
+                else:
+                    assert(False)
+
+
+make_bed_output(weights)
+
+if use_julia_solver:
+    make_bed_output(weights_cluster, '_cluster')
+
 logging.info("SKYPE pipeline end")

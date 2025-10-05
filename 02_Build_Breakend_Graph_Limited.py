@@ -3519,6 +3519,114 @@ def get_corr_dir(is_for : bool, dir_str : str) -> str:
         else:
             return '+'
 
+def get_left_right_centromere(repeat_censat_data : dict, chr_len : dict):
+    left_start_cent = {}
+    right_end_cent = {}
+    for chrom, intervals in repeat_censat_data.items():
+        chrom_length = chr_len[chrom]
+        rep_start_0, rep_end_0 = intervals[0]  # 0-indexed 좌표
+        if rep_start_0 == 0:
+            left_start_cent[chrom] = rep_end_0
+        elif rep_end_0 == chrom_length - 1:
+            right_end_cent[chrom] = rep_start_0
+
+    return left_start_cent, right_end_cent
+
+def similar_centromere_nclose_cluster(nclose_dict : dict, contig_data : list, repeat_censat_data : dict, chr_len : dict):
+    nclose_nodes = set()
+    for j in nclose_dict:
+        for k in nclose_dict[j]:
+            nclose_nodes.add(k)
+
+    left_cent, right_cent = get_left_right_centromere(repeat_censat_data, chr_len)
+    centromere_nclose_master = set()
+    slave_dict = dict()
+    for (s, e) in nclose_nodes:
+        contig_s = contig_data[s]
+        contig_e = contig_data[e]
+        if contig_s[CHR_NAM] in left_cent and contig_s[CHR_STR] <= left_cent[contig_s[CHR_NAM]] and contig_s[CTG_DIR] == '+':
+            chk = True
+            for (sm, em) in centromere_nclose_master:
+                contig_sm = contig_data[sm]
+                contig_em = contig_data[em]
+                if contig_sm[CHR_NAM] in left_cent and contig_e[CHR_NAM] == contig_em[CHR_NAM] \
+                        and contig_s[CTG_DIR] == contig_sm[CTG_DIR] and contig_e[CTG_DIR] == contig_em[CTG_DIR] \
+                        and distance_checker(contig_e, contig_em) <= NCLOSE_COMPRESS_LIMIT:
+                    slave_dict[(s, e)] = (sm, em)
+                    chk = False
+                    break
+                elif contig_em[CHR_NAM] in left_cent and contig_e[CHR_NAM] == contig_sm[CHR_NAM] \
+                        and contig_s[CTG_DIR] != contig_em[CTG_DIR] and contig_e[CTG_DIR] != contig_sm[CTG_DIR] \
+                        and distance_checker(contig_e, contig_sm) <= NCLOSE_COMPRESS_LIMIT:
+                    slave_dict[(s, e)] = (sm, em)
+                    chk = False
+                    break
+            if chk:
+                centromere_nclose_master.add((s, e))
+
+        elif contig_e[CHR_NAM] in left_cent and contig_e[CHR_STR] <= left_cent[contig_e[CHR_NAM]] and contig_e[CTG_DIR] == '-':
+            chk = True
+            for (sm, em) in centromere_nclose_master:
+                contig_sm = contig_data[sm]
+                contig_em = contig_data[em]
+                if contig_em[CHR_NAM] in left_cent and contig_s[CHR_NAM] == contig_sm[CHR_NAM] \
+                        and contig_s[CTG_DIR] == contig_sm[CTG_DIR] and contig_e[CTG_DIR] == contig_em[CTG_DIR] \
+                        and distance_checker(contig_s, contig_sm) <= NCLOSE_COMPRESS_LIMIT:
+                    slave_dict[(s, e)] = (sm, em)
+                    chk = False
+                    break
+                elif contig_sm[CHR_NAM] in left_cent and contig_s[CHR_NAM] == contig_em[CHR_NAM] \
+                        and contig_s[CTG_DIR] != contig_em[CTG_DIR] and contig_e[CTG_DIR] != contig_sm[CTG_DIR] \
+                        and distance_checker(contig_s, contig_em) <= NCLOSE_COMPRESS_LIMIT:
+                    slave_dict[(s, e)] = (sm, em)
+                    chk = False
+                    break
+            if chk:
+                centromere_nclose_master.add((s, e))
+
+        elif contig_s[CHR_NAM] in right_cent and contig_s[CHR_END] >= right_cent[contig_s[CHR_NAM]] and contig_s[CTG_DIR] == '-':
+            chk = True
+            for (sm, em) in centromere_nclose_master:
+                contig_sm = contig_data[sm]
+                contig_em = contig_data[em]
+                if contig_sm[CHR_NAM] in right_cent and contig_e[CHR_NAM] == contig_em[CHR_NAM] \
+                        and contig_s[CTG_DIR] == contig_sm[CTG_DIR] and contig_e[CTG_DIR] == contig_em[CTG_DIR] \
+                        and distance_checker(contig_e, contig_em) <= NCLOSE_COMPRESS_LIMIT:
+                    slave_dict[(s, e)] = (sm, em)
+                    chk = False
+                    break
+                elif contig_em[CHR_NAM] in right_cent and contig_e[CHR_NAM] == contig_sm[CHR_NAM] \
+                        and contig_s[CTG_DIR] != contig_em[CTG_DIR] and contig_e[CTG_DIR] != contig_sm[CTG_DIR] \
+                        and distance_checker(contig_e, contig_sm) <= NCLOSE_COMPRESS_LIMIT:
+                    slave_dict[(s, e)] = (sm, em)
+                    chk = False
+                    break
+            if chk:
+                centromere_nclose_master.add((s, e))
+        elif contig_e[CHR_NAM] in right_cent and contig_e[CHR_END] >= right_cent[contig_e[CHR_NAM]] and contig_e[CTG_DIR] == '+':
+            chk = True
+            for (sm, em) in centromere_nclose_master:
+                contig_sm = contig_data[sm]
+                contig_em = contig_data[em]
+                if contig_em[CHR_NAM] in right_cent and contig_s[CHR_NAM] == contig_sm[CHR_NAM] \
+                        and contig_s[CTG_DIR] == contig_sm[CTG_DIR] and contig_e[CTG_DIR] == contig_em[CTG_DIR] \
+                        and distance_checker(contig_s, contig_sm) <= NCLOSE_COMPRESS_LIMIT:
+                    slave_dict[(s, e)] = (sm, em)
+                    chk = False
+                    break
+                elif contig_sm[CHR_NAM] in right_cent and contig_s[CHR_NAM] == contig_em[CHR_NAM] \
+                        and contig_s[CTG_DIR] != contig_em[CTG_DIR] and contig_e[CTG_DIR] != contig_sm[CTG_DIR] \
+                        and distance_checker(contig_s, contig_em) <= NCLOSE_COMPRESS_LIMIT:
+                    slave_dict[(s, e)] = (sm, em)
+                    chk = False
+                    break
+
+            if chk:
+                centromere_nclose_master.add((s, e))
+
+    return centromere_nclose_master, slave_dict
+
+
 def nclose_calc():
     repeat_censat_data = import_censat_repeat_data(CENSAT_PATH)
     chr_len = find_chr_len(CHROMOSOME_INFO_FILE_PATH)
@@ -3565,11 +3673,13 @@ def nclose_calc():
 
 
     # Type 1, 2, 4에 대해서 
-    nclose_nodes, nclose_start_compress, nclose_end_compress, vctg_dict, all_nclose_comp, nclose_coverage, nclose_compress_track = \
+    raw_nclose_nodes, nclose_start_compress, nclose_end_compress, vctg_dict, all_nclose_comp, nclose_coverage, nclose_compress_track = \
         extract_nclose_node(contig_data, bnd_contig, rpt_con, rpt_censat_con, repeat_censat_data, PAF_FILE_PATH, ORIGNAL_PAF_LOC_LIST, telo_set, chr_len, asm2cov)
 
     not_using_nclose_node = set()
     type1_nclose_node = []
+
+    nclose_nodes = raw_nclose_nodes
     for j in nclose_nodes:
         for s, e in nclose_nodes[j]:
             curr_contig_first_fragment = contig_data[s]
@@ -3586,6 +3696,8 @@ def nclose_calc():
                     not_using_nclose_node.add((s, e))
             else:
                 type1_nclose_node.append((s, e))
+
+    _, centromere_slave = similar_centromere_nclose_cluster(nclose_nodes, contig_data, repeat_censat_data, chr_len)
 
     saved_not_using_nclose_node = set()
     conjoined_nclose_node_set = set()
@@ -3621,6 +3733,8 @@ def nclose_calc():
                     if (type2_contig_back[CHR_STR] < template_contig[CHR_END] and dist < TYPE2_CONTIG_MINIMUM_LENGTH) or dist == 0:
                         saved_not_using_nclose_node.add(nunclose)
                         conjoined_nclose_node_set.add((t1nn[1], nunclose[1]))
+
+    not_using_nclose_node |= set(centromere_slave.keys())
 
     for conjoined_nclose in conjoined_nclose_node_set:
         pass
@@ -3925,7 +4039,7 @@ parser.add_argument("--skip_bam_analysis",
 
 args = parser.parse_args()
 
-# t = "02_Build_Breakend_Graph_Limited.py /home/hyunwoo/ACCtools-pipeline/90_skype_run/Caki-1/20_alignasm/Caki-1.ctg.aln.paf public_data/chm13v2.0.fa.fai public_data/chm13v2.0_telomere.bed public_data/chm13v2.0_repeat.m.bed public_data/chm13v2.0_censat_v2.1.m.bed /home/hyunwoo/ACCtools-pipeline/90_skype_run/Caki-1/01_depth/Caki-1_normalized.win.stat.gz 30_skype_pipe/Caki-1_13_26_52 /home/hyunwoo/ACCtools-pipeline/90_skype_run/Caki-1/01_depth/Caki-1.bam --alt /home/hyunwoo/ACCtools-pipeline/90_skype_run/Caki-1/20_alignasm/Caki-1.utg.aln.paf --orignal_paf_loc /home/hyunwoo/ACCtools-pipeline/90_skype_run/Caki-1/20_alignasm/Caki-1.ctg.paf /home/hyunwoo/ACCtools-pipeline/90_skype_run/Caki-1/20_alignasm/Caki-1.utg.paf --skip_bam_analysis -t 128"
+# t = "02_Build_Breakend_Graph_Limited.py /home/hyunwoo/ACCtools-pipeline/90_skype_run/COLO829/20_alignasm/COLO829.ctg.aln.paf public_data/chm13v2.0.fa.fai public_data/chm13v2.0_telomere.bed public_data/chm13v2.0_repeat.m.bed public_data/chm13v2.0_censat_v2.1.m.bed /home/hyunwoo/ACCtools-pipeline/90_skype_run/COLO829/01_depth/COLO829_normalized.win.stat.gz 30_skype_pipe/COLO829_19_42_33 /home/hyunwoo/ACCtools-pipeline/90_skype_run/COLO829/01_depth/COLO829.bam --alt /home/hyunwoo/ACCtools-pipeline/90_skype_run/COLO829/20_alignasm/COLO829.utg.aln.paf --orignal_paf_loc /home/hyunwoo/ACCtools-pipeline/90_skype_run/COLO829/20_alignasm/COLO829.ctg.paf /home/hyunwoo/ACCtools-pipeline/90_skype_run/COLO829/20_alignasm/COLO829.utg.paf --test --skip_bam_analysis -t 32"
 # args = parser.parse_args(t.split()[1:])
 
 PREFIX = args.prefix
@@ -4291,6 +4405,7 @@ def run_graph(data, nonzero_telo_set, CHR_CHANGE_LIMIT, DIR_CHANGE_LIMIT):
                 censat_node_vis = 0
                 contig_overuse_flag = False
                 censat_overuse_flag = False
+
                 for node in range(1, path_len - 2):
                     contig_set[path[node][1]] += 1
                     if contig_set[path[node][1]] >= BND_OVERUSE_CNT:
@@ -4368,6 +4483,7 @@ def run_graph(data, nonzero_telo_set, CHR_CHANGE_LIMIT, DIR_CHANGE_LIMIT):
                             abs(curr_path_counter[chr_name] - path_counter[chr_name]) <= PATH_COMPRESS_LIMIT 
                             for chr_name in key
                         )
+                        
                         if check:
                             flagflag = False
                             break
@@ -4502,31 +4618,6 @@ def run_graph_pipeline():
     return last_success
 
 
-inversion_adjacency = initialize_inversion_only_graph(contig_data, nclose_nodes)
-
-inversion_graph = nx2gt(make_inversion_nx_graph(inversion_adjacency))
-
-ecdna_circuit_candidate_set = set()
-
-for circuit in gt.all_circuits(inversion_graph, max_length=4):
-    if len(circuit) == 4:
-        circuit_node_list = []
-        for idx in circuit:
-            v = inversion_graph.vertex(idx)
-            node = int(inversion_graph.vp['id'][v][1:-1].split(", ")[-1])
-            circuit_node_list.append(node)
-        ecdna_circuit_candidate_set.add(tuple(sorted(circuit_node_list)))
-
-ecdna_circuit_set = set()
-
-for circuit in ecdna_circuit_candidate_set:
-    if circuit_length_calculator(circuit) < CIRCUIT_ECDNA_LENGTH_LIMIT:
-        ecdna_circuit_set.add(circuit)
-
-# Todo : transform into vcf format
-with open(f"{PREFIX}/ecdna_circuit.pkl", "wb") as f:
-    pkl.dump(ecdna_circuit_set, f)
-
 last_success = run_graph_pipeline()
 if not last_success:
     logging.info('Breakend graph is too divergent.')
@@ -4570,6 +4661,33 @@ for k, v in path_list_dict_data:
 path_di_list_dict = dict()
 for k, v in path_di_list_dict_data:
     path_di_list_dict[k] = v
+
+
+inversion_adjacency = initialize_inversion_only_graph(contig_data, raw_nclose_nodes)
+
+inversion_graph = nx2gt(make_inversion_nx_graph(inversion_adjacency))
+
+ecdna_circuit_candidate_set = set()
+
+for circuit in gt.all_circuits(inversion_graph, max_length=4):
+    if len(circuit) == 4:
+        circuit_node_list = []
+        for idx in circuit:
+            v = inversion_graph.vertex(idx)
+            node = int(inversion_graph.vp['id'][v][1:-1].split(", ")[-1])
+            circuit_node_list.append(node)
+        ecdna_circuit_candidate_set.add(tuple(sorted(circuit_node_list)))
+
+ecdna_circuit_set = set()
+
+for circuit in ecdna_circuit_candidate_set:
+    if circuit_length_calculator(circuit) < CIRCUIT_ECDNA_LENGTH_LIMIT:
+        ecdna_circuit_set.add(circuit)
+
+
+# Todo : transform into vcf format
+with open(f"{PREFIX}/ecdna_circuit_data.pkl", "wb") as f:
+    pkl.dump((list(ecdna_circuit_set), raw_nclose_nodes), f)
 
 logging.info(f'Final success settings: {(CHR_CHANGE_LIMIT_PREFIX, DIR_CHANGE_LIMIT_PREFIX)}')
 

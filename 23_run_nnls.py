@@ -156,6 +156,13 @@ if use_julia_solver:
     B = np.asarray(B_jl)
 
     weight_base_jl = jl.nnls_solve(A_jl, B_jl, THREAD, False)
+    # final_weights_fullsize = np.asarray(weight_base_jl)
+
+        
+    # predict_B_succ = np.asarray(A_jl * weight_base_jl)
+    # predict_B_fail = np.asarray(A_fail_jl * weight_base_jl)
+
+
     weight_base = np.asarray(weight_base_jl)
 
     final_weights_fullsize = np.zeros(len(weight_base))
@@ -276,7 +283,6 @@ if use_julia_solver:
 
     predict_B_succ = np.asarray(A_final_jl * final_weight_jl)
     predict_B_fail = np.asarray(A_fail_final_jl * final_weight_jl)
-
 else:
     import h5py
 

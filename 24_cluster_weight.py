@@ -552,16 +552,23 @@ for path_list in chr_set_merge.values():
 
 for ncnt, (paf_loc, w) in enumerate(loc2weight.items()):
     if paf_loc.split('/')[-3] == '11_ref_ratio_outliers' and w > CLUSTER_FINAL_DEPTH * N:
-        with open(paf_loc, "r") as f:
-            l = f.readline()
-            l = l.rstrip()
-            l = l.split("\t")
-            chr_nam1 = l[CHR_NAM]
-            chr_nam2 = l[CHR_NAM]
-            pos1 = int(l[CHR_STR])
-            pos2 = int(l[CHR_END])
-            if abs(pos1-pos2) > TYPE4_CLUSTER_SIZE:
-                using_merge_ncnt_list.append(ncnt)
+        event_type = paf_loc.split('/')[-2]
+
+        if event_type in {'front_jump', 'back_jump'}:
+            with open(paf_loc, "r") as f:
+                l = f.readline()
+                l = l.rstrip()
+                l = l.split("\t")
+                chr_nam1 = l[CHR_NAM]
+                chr_nam2 = l[CHR_NAM]
+                pos1 = int(l[CHR_STR])
+                pos2 = int(l[CHR_END])
+                if abs(pos1-pos2) > TYPE4_CLUSTER_SIZE:
+                    using_merge_ncnt_list.append(ncnt)
+        elif event_type == 'ecdna':
+            using_merge_ncnt_list.append(ncnt)
+        else:
+            assert(False)
 
 using_merge_ncnt_list.sort()
 using_merge_ncnt_arr = np.asarray(using_merge_ncnt_list)

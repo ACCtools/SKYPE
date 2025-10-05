@@ -381,7 +381,7 @@ parser.add_argument("--progress",
 
 args = parser.parse_args()
 
-# t = "22_save_matrix.py public_data/chm13v2.0_censat_v2.1.m.bed /Data/hyunwoo/00_skype_run_data/Caki-1/20_alignasm/Caki-1.ctg.aln.paf.ppc.paf /Data/hyunwoo/00_skype_run_data/Caki-1/01_depth/Caki-1.win.stat.gz public_data/chm13v2.0_telomere.bed public_data/chm13v2.0.fa.fai public_data/chm13v2.0_cytobands_allchrs.bed 30_skype_pipe/Caki-1_00_08_07 -t 64"
+# t = "22_save_matrix.py public_data/chm13v2.0_censat_v2.1.m.bed /home/hyunwoo/ACCtools-pipeline/90_skype_run/COLO829/20_alignasm/COLO829.ctg.aln.paf.ppc.paf /home/hyunwoo/ACCtools-pipeline/90_skype_run/COLO829/01_depth/COLO829_normalized.win.stat.gz public_data/chm13v2.0_telomere.bed public_data/chm13v2.0.fa.fai public_data/chm13v2.0_cytobands_allchrs.bed 30_skype_pipe/COLO829_14_12_42 -t 4"
 # args = parser.parse_args(t.split()[1:])
 
 bed_data = import_bed(args.censat_bed_path)
@@ -737,7 +737,9 @@ for path, key_int_list in tqdm(paf_ans_list, desc='Recover depth from separated 
     np.copyto(tmp_v, vec_dict[ki])
     for ki in key_int_list[1:]:
         tmp_v += vec_dict[ki]
+
     idx_path = import_index_path(path)
+
     s = 1
     while s < len(idx_path)-2:
         nclose_cand = tuple(sorted([idx_path[s][1], idx_path[s+1][1]]))
@@ -747,6 +749,9 @@ for path, key_int_list in tqdm(paf_ans_list, desc='Recover depth from separated 
         else:
             s+=1
     
+    if path.split('/')[-2] == 'chr13f_chr9b':
+        print(key_int_list)
+
     if NCLOSE_WEIGHT_USE:
         tmp_n.fill(0)
         idx_edge_nclose_list = [pair[1] for pair in import_index_path(path)[1:-1]]

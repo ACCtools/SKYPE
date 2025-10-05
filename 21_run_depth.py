@@ -1245,6 +1245,9 @@ parser.add_argument("--progress",
 
 args = parser.parse_args()
 
+# t = "21_run_depth.py /home/hyunwoo/ACCtools-pipeline/90_skype_run/COLO829/20_alignasm/COLO829.ctg.aln.paf.ppc.paf 30_skype_pipe/COLO829_17_00_42/ --pandepth_loc ./PanDepth/bin/pandepth -t 128"
+# args = parser.parse_args(t.split()[1:])
+
 PREPROCESSED_PAF_FILE_PATH = args.ppc_paf_file_path
 
 contig_data = import_data2(PREPROCESSED_PAF_FILE_PATH)
@@ -1293,6 +1296,35 @@ nclose_nodes = extract_nclose_node(NCLOSE_FILE_PATH)
 
 bnd_connected_graph = connect_nclose_telo(contig_data, using_node, type_3_graph, nclose_nodes, telo_contig)
 
+os.makedirs(f'{PREFIX}/11_ref_ratio_outliers/ecdna', exist_ok=True)
+with open(f'{PREFIX}/ecdna_circuit_data.pkl', 'rb') as f:
+    ecdna_circuit, raw_nclose_nodes = pkl.load(file=f)
+
+raw_nclose_nodes_list = []
+for vl in raw_nclose_nodes.values():
+    for v in vl:
+        raw_nclose_nodes_list.extend(list(v))
+
+G = nx.DiGraph()
+
+for node in telo_contig + raw_nclose_nodes_list:
+    G.add_node((DIR_IN, node))
+    G.add_node((DIR_OUT, node))
+
+for node in bnd_connected_graph:
+    G.add_node(node)
+    for edge in bnd_connected_graph[node]:
+        G.add_node(tuple(edge[:-1]))
+
+for node in bnd_connected_graph:
+    for edge in bnd_connected_graph[node]:
+        G.add_weighted_edges_from([(node, tuple(edge[:-1]), edge[-1])])
+
+
+create_final_depth_paf_ecdna(ecdna_circuit, f'{PREFIX}/11_ref_ratio_outliers/ecdna')
+
+# 21_run_depth
+
 G = nx.DiGraph()
 
 for node in telo_contig + nclose_nodes:
@@ -1308,14 +1340,6 @@ for node in bnd_connected_graph:
     for edge in bnd_connected_graph[node]:
         G.add_weighted_edges_from([(node, tuple(edge[:-1]), edge[-1])])
 
-os.makedirs(f'{PREFIX}/11_ref_ratio_outliers/ecdna', exist_ok=True)
-with open(f'{PREFIX}/ecdna_circuit.pkl', 'rb') as f:
-    ecdna_circuit = pkl.load(f)
-
-print(ecdna_circuit)
-create_final_depth_paf_ecdna(ecdna_circuit, f'{PREFIX}/11_ref_ratio_outliers/ecdna')
-
-# 21_run_depth
 
 key_cnt = 0
 key2int = dict()
