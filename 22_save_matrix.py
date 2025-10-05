@@ -748,9 +748,6 @@ for path, key_int_list in tqdm(paf_ans_list, desc='Recover depth from separated 
             s+=2
         else:
             s+=1
-    
-    if path.split('/')[-2] == 'chr13f_chr9b':
-        print(key_int_list)
 
     if NCLOSE_WEIGHT_USE:
         tmp_n.fill(0)

@@ -612,8 +612,7 @@ parser.add_argument("--progress",
 
 args = parser.parse_args()
 
-# t = "30_depth_analysis.py public_data/chm13v2.0_censat_v2.1.m.bed /home/hyunwoo/ACCtools-pipeline/90_skype_run/Caki-1/20_alignasm/Caki-1.ctg.aln.paf.ppc.paf /home/hyunwoo/ACCtools-pipeline/90_skype_run/Caki-1/01_depth/Caki-1_normalized.win.stat.gz public_data/chm13v2.0_telomere.bed public_data/chm13v2.0.fa.fai public_data/chm13v2.0_cytobands_allchrs.bed 30_skype_pipe/Caki-1_21_14_23 -t 128"
-
+# t = "31_depth_analysis.py public_data/chm13v2.0_censat_v2.1.m.bed /home/hyunwoo/ACCtools-pipeline/90_skype_run/COLO829/20_alignasm/COLO829.ctg.aln.paf.ppc.paf /home/hyunwoo/ACCtools-pipeline/90_skype_run/COLO829/01_depth/COLO829_normalized.win.stat.gz public_data/chm13v2.0_telomere.bed public_data/chm13v2.0.fa.fai public_data/chm13v2.0_cytobands_allchrs.bed 30_skype_pipe/COLO829_22_36_47 -t 32"
 # args = parser.parse_args(t.split()[1:])
 
 bed_data = import_bed(args.censat_bed_path)
@@ -1320,7 +1319,7 @@ def make_bed_output(weights, output_prefix=''):
                                         round(v / N, 2)])
 
                 elif event_type == 'ecdna':
-                    ecdna_ind = len(paf_ans_list) + fclen // 4 + bclen // 4 - i
+                    ecdna_ind = i - (rpll + fclen // 4 + bclen // 4)
 
                     ctg_st_list = []
                     ctg_nd_list = []
@@ -1335,7 +1334,7 @@ def make_bed_output(weights, output_prefix=''):
                     ctg_nd = max(ctg_nd_list)
 
                     cf.writerow([contig_data[ctg_ind][CHR_NAM], ctg_st, ctg_nd,
-                                     'Amplicon', round(v / N, 2)])
+                                     'Amplicon', round(v / N * 2, 2)])
 
                 else:
                     assert(False)
