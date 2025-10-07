@@ -57,7 +57,7 @@ def similar_check(v1, v2, ratio):
     mi, ma = sorted([v1, v2])
     return True if mi == 0 else (ma / mi <= ratio) or ma-mi < NCLOSE_SIM_DIFF_THRESHOLD
 
-def check_near_bnd(chrom, inside_st, inside_nd):
+def exist_near_bnd(chrom, inside_st, inside_nd):
     # subset of df for the given chromosome
     df_chr = df[df['chr'] == chrom]
 
@@ -72,7 +72,7 @@ def check_near_bnd(chrom, inside_st, inside_nd):
     if np.isnan(st_depth) or np.isnan(nd_depth):
         return True
     
-    return similar_check(st_depth, nd_depth, NCLOSE_SIM_COMPARE_RAITO)
+    return not similar_check(st_depth, nd_depth, NCLOSE_SIM_COMPARE_RAITO)
 
 def import_ppc_contig_data(file_path: str) -> list:
     paf_file = open(file_path, "r")
@@ -128,14 +128,25 @@ df = pd.read_csv(main_stat_loc, compression='gzip', comment='#', sep='\t',
 df = df.query('chr != "chrM"')
 meandepth = df['meandepth'].median()
 
-ydf = df.query('chr == "chrY"')
-chry_nz_len = len(ydf.query('meandepth != 0'))
-no_chrY = (chry_nz_len / len(ydf)) < 0.5
 
 with open(f'{PREFIX}/23_input.pkl', 'rb') as f:
 #     dep_list, init_cols, w_pri, using_ncnt_array, \
 #     div_nclose_set, each_nclose_notusing_path_dict, \
-    chr_filt_st_list, path_nclose_set_dict, amplitude = pkl.load(f)
+    chr_filt_st_list, path_nclose_set_dict, amplitude, bed_data = pkl.load(f)
+
+ydf = df.query('chr == "chrY"')
+
+bed_intervals = pd.IntervalIndex.from_tuples(bed_data['chrY'], closed='left')
+y_mask = ydf.apply(
+    lambda row: bed_intervals.overlaps(pd.Interval(row['st'], row['nd'], closed='left')),
+    axis=1
+)
+
+correct_mask = y_mask.apply(any)
+ydf_not_censat = ydf[~correct_mask]
+
+chry_nz_len = len(ydf_not_censat.query('meandepth != 0'))
+no_chrY = (chry_nz_len / len(ydf_not_censat)) < chrY_MINIMUM_RATIO
 
 with open(f"{PREFIX}/report.txt", 'r') as f:
     f.readline()
@@ -196,8 +207,8 @@ if use_julia_solver:
         if v > 0.2 * meandepth \
         and ppc_contig_data[st][CHR_NAM] != ppc_contig_data[ed][CHR_NAM]:
             # Check if at least one of endpoint have non-diverse depth & not a virtual censat contig
-            if (check_near_bnd(ppc_contig_data[st][CHR_NAM], ppc_contig_data[st][CHR_STR], ppc_contig_data[st][CHR_END]) or \
-            check_near_bnd(ppc_contig_data[ed][CHR_NAM], ppc_contig_data[ed][CHR_STR], ppc_contig_data[ed][CHR_END])) and \
+            if (not exist_near_bnd(ppc_contig_data[st][CHR_NAM], ppc_contig_data[st][CHR_STR], ppc_contig_data[st][CHR_END]) or \
+            not exist_near_bnd(ppc_contig_data[ed][CHR_NAM], ppc_contig_data[ed][CHR_STR], ppc_contig_data[ed][CHR_END])) and \
             not ppc_contig_data[st][CTG_NAM].startswith('virtual_censat_contig'):
                 div_nclose_set.add(k)
             # Check if at least one of endpoint is censat contig

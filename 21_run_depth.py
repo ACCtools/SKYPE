@@ -828,6 +828,64 @@ def create_final_depth_paf_ecdna(ecdna_circuit, save_path):
             for i in circuit_paf:
                 print(i, file=f)
 
+def create_final_depth_paf_type2(type2_ins_del, PREFIX):
+    type2_ins, type2_del = type2_ins_del
+    merge_save_path = f'{PREFIX}/11_ref_ratio_outliers/type2_ins'
+    os.makedirs(merge_save_path, exist_ok=True)
+    for idx, circuit in enumerate(list(type2_del) + list(type2_ins)):
+        assert(len(circuit) == 4)
+        data = []
+        s1, e1, s2, e2 = circuit
+        data.append((BND_TYPE, ((DIR_FOR, e1), (DIR_FOR, s2))))
+        ins_paf = []
+        for (key_type, key_val) in data:
+            raw_contig_list = []
+            if key_type == TEL_TYPE:
+                # Single contig
+                ctg_node_ind = key_val
+                raw_contig_list.append((DIR_FOR, ctg_node_ind))
+            elif key_type == CTG_IN_TYPE:
+                (s_type, s), (e_type, e) = key_val
+                assert(contig_data[s][CTG_NAM] == contig_data[e][CTG_NAM])
+                if s<e:
+                    for i in range(s+1, e):
+                        raw_contig_list.append((DIR_FOR, i))
+                else:
+                    for i in range(s-1, e, -1):
+                        raw_contig_list.append((DIR_BAK, i))
+            elif key_type == BND_TYPE:
+                (s_type, s), (e_type, e) = key_val
+                
+                if contig_data[s][CTG_NAM] != contig_data[e][CTG_NAM]:
+                    if nx.has_path(G, source=(DIR_OUT, s), target=(DIR_IN, e)):
+                        path = nx.shortest_path(G, source=(DIR_OUT, s), target=(DIR_IN, e), weight='weight')
+                        raw_contig_list.append((s_type, s))
+                        for node in path[1:-1]:
+                            raw_contig_list.append((node[0], node[1]))
+                        raw_contig_list.append((e_type, e))
+                    else:
+                        raw_contig_list.append((s_type, s))
+                        raw_contig_list.append((e_type, e))
+                else:
+                    if s<e:
+                        for i in range(s, e+1):
+                            raw_contig_list.append((DIR_FOR, i))
+                    else:
+                        for i in range(s, e-1, -1):
+                            raw_contig_list.append((DIR_BAK, i))
+            else:
+                # Never happen
+                assert(False)
+
+            if len(raw_contig_list) > 0:
+                ins_paf += process_raw_contig_list_ecdna(raw_contig_list)
+            else:
+                # Create empty file
+                    pass
+        with open(f'{PREFIX}/11_ref_ratio_outliers/type2_ins/{idx+1}.paf', 'wt') as f:
+            for i in ins_paf:
+                print(i, file=f)
+
 
 def rev_dir(d):
     if d == DIR_IN:
@@ -1300,6 +1358,9 @@ os.makedirs(f'{PREFIX}/11_ref_ratio_outliers/ecdna', exist_ok=True)
 with open(f'{PREFIX}/ecdna_circuit_data.pkl', 'rb') as f:
     ecdna_circuit, raw_nclose_nodes = pkl.load(file=f)
 
+with open(f'{PREFIX}/conjoined_type4_ins_del.pkl', 'rb') as f:
+    type4_ins_del = pkl.load(file=f)
+
 raw_nclose_nodes_list = []
 for vl in raw_nclose_nodes.values():
     for v in vl:
@@ -1322,6 +1383,8 @@ for node in bnd_connected_graph:
 
 
 create_final_depth_paf_ecdna(ecdna_circuit, f'{PREFIX}/11_ref_ratio_outliers/ecdna')
+
+create_final_depth_paf_type2(type4_ins_del, PREFIX)
 
 # 21_run_depth
 

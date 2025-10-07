@@ -206,6 +206,8 @@ chr_data = find_chr_len(CHROMOSOME_INFO_FILE_PATH)
 contig_data = import_data(PREPROCESSED_PAF_FILE_PATH)
 contig_data_size = len(contig_data)
 
+with open(f'{args.prefix}/conjoined_type4_ins_del.pkl', 'rb') as f:
+    type4_ins, type4_del = pkl.load(file=f)
 s = 0
 cntfj = 0
 cntbj = 0
@@ -263,6 +265,62 @@ while s<contig_data_size:
                     print("", file=f)
             
     s = e+1
+
+
+type2_indel_cnt = 0
+
+for s1, e1, s2, e2 in list(type4_del) + list(type4_ins):
+    type2_indel_cnt += 1
+    chr_name = contig_data[s1][CHR_NAM]
+    chr_len = chr_data[chr_name]
+    rat, ref_st_ed = calculate_single_contig_ref_ratio([contig_data[s1], contig_data[e2]])
+    if rat > 0:
+        cntfj+=1
+        with open(f"{TYPE_4_VECTOR_PATH}/front_jump/{cntfj}_type2_merge_{type2_indel_cnt}.paf", "wt") as f:
+            for i in (s1, e2):
+                glob_paf_idx = int(contig_data[i][CTG_GLOBALIDX][0])
+                glob_idx = int(contig_data[i][CTG_GLOBALIDX][2:])
+                cigar_str = 'cg:Z:' + cs_to_cigar(paf_file[glob_paf_idx][glob_idx][-1][5:])
+                for j in paf_file[glob_paf_idx][glob_idx]:
+                    print(j, end="\t", file=f)
+                print(cigar_str, end="\t", file=f)
+                print("", file=f)
+            
+        with open(f"{TYPE_4_VECTOR_PATH}/front_jump/{cntfj}_base.paf", "wt") as f:
+                N = ref_st_ed[1] - ref_st_ed[0]
+                virtual_contig = [f"base_contig_1", N, 0, N]
+                virtual_contig += ['+', chr_name, chr_len, ref_st_ed[0], ref_st_ed[1]]
+                virtual_contig += [N, N, 0]
+                virtual_contig += ['tp:A:P', 'cs:Z:'+f":{N}"]
+                cigar_str = 'cg:Z:' + cs_to_cigar(virtual_contig[-1][5:])
+                virtual_contig += [cigar_str]
+                for j in virtual_contig:
+                    print(j, end="\t", file=f)
+                print("", file=f)
+    else:
+        cntbj+=1
+        with open(f"{TYPE_4_VECTOR_PATH}/back_jump/{cntbj}_type2_merge_{type2_indel_cnt}.paf", "wt") as f:
+            for i in (s1, e2):
+                glob_paf_idx = int(contig_data[i][CTG_GLOBALIDX][0])
+                glob_idx = int(contig_data[i][CTG_GLOBALIDX][2:])
+                cigar_str = 'cg:Z:' + cs_to_cigar(paf_file[glob_paf_idx][glob_idx][-1][5:])
+                for j in paf_file[glob_paf_idx][glob_idx]:
+                    print(j, end="\t", file=f)
+                print(cigar_str, end="\t", file=f)
+                print("", file=f)
+            
+        with open(f"{TYPE_4_VECTOR_PATH}/back_jump/{cntbj}_base.paf", "wt") as f:
+                N = ref_st_ed[0] - ref_st_ed[1]
+                virtual_contig = [f"base_contig_1", N, 0, N]
+                virtual_contig += ['+', chr_name, chr_len, ref_st_ed[1], ref_st_ed[0]]
+                virtual_contig += [N, N, 0]
+                virtual_contig += ['tp:A:P', 'cs:Z:'+f":{N}"]
+                cigar_str = 'cg:Z:' + cs_to_cigar(virtual_contig[-1][5:])
+                virtual_contig += [cigar_str]
+                for j in virtual_contig:
+                    print(j, end="\t", file=f)
+                print("", file=f)
+
 
 logging.info(f"Forward-directed outlier contig count : {cntfj}")
 logging.info(f"Backward-directed outlier contig count : {cntbj}")

@@ -72,7 +72,7 @@ BND_CONTIG_BOUND = 0.1
 TYPE2_CONTIG_MINIMUM_LENGTH = 200*K
 SUBTELOMERE_REPEAT_LENGTH = 0 # 100*K
 TYPE2_FLANKING_LENGTH = 500 * K
-TYPE2_SIM_COMPARE_RAITO = 1.5
+TYPE2_SIM_COMPARE_RAITO = 1.3
 TYPE34_BREAK_CHUKJI_LIMIT = 1*M
 CHUKJI_FAIL_TYPE2_RESCUE_THRESHOLD = 2*K
 CIRCUIT_ECDNA_LENGTH_LIMIT = 40*M
@@ -127,6 +127,9 @@ SPLIT_CTG_LEN_LIMIT = 100 * K
 TRUST_SPLIT_CTG_LEN_LIMIT = 20 * K
 
 MIN_PATH_REF_LEN = 5 * M
+
+TYPE2_CHUKJI_AS_TYPE4 = 5 * M
+TYPE2_CONJOIN_COMPRESS_LIMIT = 1 * M
 
 def import_data(file_path : str) -> list :
     contig_data = []
@@ -1470,7 +1473,7 @@ def similar_check(v1, v2, ratio=TYPE2_SIM_COMPARE_RAITO):
     mi, ma = sorted([v1, v2])
     return False if mi == 0 else (ma / mi <= ratio) or ma-mi < NCLOSE_SIM_DIFF_THRESHOLD
 
-def check_near_bnd(chrom, inside_st, inside_nd):
+def exist_near_bnd_point(chrom, inside_st):
     # subset of df for the given chromosome
     df_chr = df[df['chr'] == chrom]
 
@@ -1481,7 +1484,7 @@ def check_near_bnd(chrom, inside_st, inside_nd):
 
     # for inside_st
     st_depth = mean_depth(inside_st - TYPE2_FLANKING_LENGTH, inside_st)
-    nd_depth = mean_depth(inside_nd, inside_nd + TYPE2_FLANKING_LENGTH)
+    nd_depth = mean_depth(inside_st, inside_st + TYPE2_FLANKING_LENGTH)
 
     # print(chrom, inside_st, inside_nd, not similar_check(st_depth, nd_depth))
     return not similar_check(st_depth, nd_depth)
@@ -2038,14 +2041,30 @@ def break_double_telomere_contig(contig_data : list, telo_connected_set : set):
         s = e+1
     return vtg_list
 
+def delete_contig(contig_data : list, to_delete_contig_set : set) -> list:
+    new_contig_data = []
+    delete_count = 0
+    for chunk in contig_data:
+        if chunk[CTG_NAM] in to_delete_contig_set:
+            delete_count += 1
+        else:
+            chunk[CTG_STRND] -= delete_count
+            chunk[CTG_ENDND] -= delete_count
+            new_contig_data.append(chunk)
+    
+    return new_contig_data
+
 def break_type34_contig(contig_data : list):
     s = 0
     vtg_list = []
+    broken_contig_set = set()
+    
     while s < len(contig_data):
         e = contig_data[s][CTG_ENDND]
         curr_contig_name = contig_data[s][CTG_NAM]
         if contig_data[s][CTG_TYP] == 3:
             cnt = 0
+            broken_chk = False
             for i in range(s, e):
                 front_chr = (contig_data[i][CHR_NAM], contig_data[i][CTG_DIR])
                 back_chr = (contig_data[i+1][CHR_NAM], contig_data[i+1][CTG_DIR])
@@ -2055,13 +2074,16 @@ def break_type34_contig(contig_data : list):
                 else:
                     bnd_bound = BND_CONTIG_BOUND
                 if front_chr == back_chr and abs(1-ref_ratio) > bnd_bound and abs(chukji) > TYPE34_BREAK_CHUKJI_LIMIT:
+                    broken_chk = True
                     cnt += 1
                     vtg = copy.deepcopy(contig_data[i:i+2])
                     for j in vtg:
                         j[CTG_NAM] = f'{curr_contig_name}_split34_{cnt}'
                         vtg_list.append(j)
+        if broken_chk:
+            broken_contig_set.add(curr_contig_name)
         s = e+1
-    return vtg_list
+    return vtg_list, broken_contig_set
 
 def pass_pipeline(pre_contig_data, telo_dict, telo_bound_dict, repeat_data, repeat_censat_data, telo_ppc_passed, chr_len):
     if not telo_ppc_passed:
@@ -3324,23 +3346,17 @@ def contig_preprocessing_00(PAF_FILE_PATH_ : list):
     subtelo_label = label_subtelo_node(real_final_contig, telo_dict)
     subtelo_ppc_node = subtelo_cut(real_final_contig, telo_label, subtelo_label)
 
-    # with open("subtelo.txt", "wt") as f:
-    #     for i in subtelo_ppc_node:
-    #         for j in i:
-    #             print(j, end="\t", file=f)
-    #         print(file=f)
-
     adjacency = initial_graph_build(real_final_contig, telo_bound_dict)
 
     telo_connected_node, telo_connected_dict, _, telo_coverage = edge_optimization(real_final_contig, adjacency, telo_bound_dict, asm2cov)
-
-    # for i in range(total_len):
-    #     if i in telo_connected_node:
-    #         real_final_contig[i][CTG_TELCON] = telo_connected_dict[i]
     
     break_contig = break_double_telomere_contig(real_final_contig, telo_connected_node)
 
-    type34_split_contig = break_type34_contig(real_final_contig)
+    type34_split_contig, broken_contig_set = break_type34_contig(real_final_contig)
+
+    real_final_contig = delete_contig(real_final_contig, broken_contig_set)
+
+    total_len = len(real_final_contig)
 
     if len(break_contig) > 0:
         final_break_contig = pass_pipeline(break_contig, telo_dict, telo_bound_dict, repeat_data, repeat_censat_data, False, chr_len)
@@ -3627,6 +3643,42 @@ def similar_centromere_nclose_cluster(nclose_dict : dict, contig_data : list, re
     return centromere_nclose_master, slave_dict
 
 
+def conjoined_type4(contig_data : list, type2_nclose_node : dict):
+    conjoined_type4_ins = set()
+    conjoined_type4_del = set()
+
+    for chrom, type2_list in type2_nclose_node.items():
+        for i in range(len(type2_list)):
+            for j in range(i+1, len(type2_list)):
+                t2n1 = type2_list[i]
+                t2n2 = type2_list[j]
+                contig_1_front = contig_data[t2n1[0]]
+                contig_1_back = contig_data[t2n1[1]]
+                contig_2_front = contig_data[t2n2[0]]
+                contig_2_back = contig_data[t2n2[1]]
+                if contig_1_back[CTG_DIR] == contig_2_front[CTG_DIR]:
+                    dist_for = distance_checker(contig_1_back, contig_2_front)
+                    dist_bak = distance_checker(contig_1_front, contig_2_back)
+                    if dist_for < TYPE2_CONJOIN_COMPRESS_LIMIT:
+                        ratio, total_ref_len = calculate_single_contig_ref_ratio([contig_data[t2n1[0]], contig_data[t2n2[1]]])
+                        estimated_ref_len = total_ref_len * ratio
+                        if abs(ratio - 1) > BND_CONTIG_BOUND and estimated_ref_len > TYPE2_CHUKJI_AS_TYPE4:
+                            if ratio < 0 :
+                                conjoined_type4_ins.add((*t2n1, *t2n2))
+                            else:
+                                conjoined_type4_del.add((*t2n1, *t2n2))
+
+                    if dist_bak < TYPE2_CONJOIN_COMPRESS_LIMIT:
+                        ratio, total_ref_len = calculate_single_contig_ref_ratio([contig_data[t2n2[0]], contig_data[t2n1[1]]])
+                        estimated_ref_len = total_ref_len * ratio
+                        if abs(ratio - 1) > BND_CONTIG_BOUND and estimated_ref_len > TYPE2_CHUKJI_AS_TYPE4:
+                            if ratio < 0 :
+                                conjoined_type4_ins.add((*t2n2, *t2n1))
+                            else:
+                                conjoined_type4_del.add((*t2n2, *t2n1))
+    
+    return conjoined_type4_ins, conjoined_type4_del
+
 def nclose_calc():
     repeat_censat_data = import_censat_repeat_data(CENSAT_PATH)
     chr_len = find_chr_len(CHROMOSOME_INFO_FILE_PATH)
@@ -3678,6 +3730,7 @@ def nclose_calc():
 
     not_using_nclose_node = set()
     type1_nclose_node = []
+    type2_nclose_node = defaultdict(list)
 
     nclose_nodes = raw_nclose_nodes
     for j in nclose_nodes:
@@ -3685,6 +3738,7 @@ def nclose_calc():
             curr_contig_first_fragment = contig_data[s]
             curr_contig_end_fragment = contig_data[e]
             if curr_contig_first_fragment[CHR_NAM] == curr_contig_end_fragment[CHR_NAM]:
+                type2_nclose_node[curr_contig_first_fragment[CHR_NAM]].append((s, e))
                 if curr_contig_first_fragment[CTG_DIR] == '+':
                     inside_st, inside_nd = sorted([curr_contig_end_fragment[CHR_END], curr_contig_first_fragment[CHR_STR]])
                 else:
@@ -3692,12 +3746,16 @@ def nclose_calc():
                 chukji = inside_nd - inside_st
                 chukji_chrom = curr_contig_first_fragment[CHR_NAM]
 
-                if chukji > TYPE2_CONTIG_MINIMUM_LENGTH or check_near_bnd(chukji_chrom, inside_st, inside_nd) and (not censat_overlap_check(repeat_censat_data, chukji_chrom, inside_st, inside_nd)): # sub-200k inversion delete
+                if (not exist_near_bnd_point(chukji_chrom, inside_st)) and (not exist_near_bnd_point(chukji_chrom, inside_st)) and \
+                   (not censat_overlap_check(repeat_censat_data, chukji_chrom, inside_st, inside_nd)):
                     not_using_nclose_node.add((s, e))
             else:
                 type1_nclose_node.append((s, e))
 
     _, centromere_slave = similar_centromere_nclose_cluster(nclose_nodes, contig_data, repeat_censat_data, chr_len)
+
+    with open(f"{PREFIX}/conjoined_type4_ins_del.pkl", "wb") as f:
+        pkl.dump(conjoined_type4(contig_data, type2_nclose_node), f)
 
     saved_not_using_nclose_node = set()
     conjoined_nclose_node_set = set()
@@ -3746,17 +3804,6 @@ def nclose_calc():
             for j in i:
                 print(j, end = "\t", file=f)
             print("", file = f)
-
-
-    nclose_type = defaultdict(list)
-    for j in nclose_nodes:
-        for pair in nclose_nodes[j]:
-            contig_a = contig_data[pair[0]]
-            contig_b = contig_data[pair[1]]
-            if chr2int(contig_a[CHR_NAM]) <= chr2int(contig_b[CHR_NAM]):
-                nclose_type[(contig_a[CHR_NAM], contig_b[CHR_NAM])].append(pair)
-            else:
-                nclose_type[(contig_b[CHR_NAM], contig_a[CHR_NAM])].append((pair[1], pair[0]))
 
     all_nclose_type = defaultdict(list)
 
@@ -3839,6 +3886,16 @@ def nclose_calc():
                 final_nclose_nodes[i].append(j)
     
     nclose_nodes = final_nclose_nodes
+
+    nclose_type = defaultdict(list)
+    for j in nclose_nodes:
+        for pair in nclose_nodes[j]:
+            contig_a = contig_data[pair[0]]
+            contig_b = contig_data[pair[1]]
+            if chr2int(contig_a[CHR_NAM]) <= chr2int(contig_b[CHR_NAM]):
+                nclose_type[(contig_a[CHR_NAM], contig_b[CHR_NAM])].append(pair)
+            else:
+                nclose_type[(contig_b[CHR_NAM], contig_a[CHR_NAM])].append((pair[1], pair[0]))
     
     transloc_nclose_pair_count = 0  
     with open(f"{PREFIX}/compressed_nclose_nodes_list.txt", "wt") as f:
@@ -3865,11 +3922,12 @@ def nclose_calc():
                 list_a = [contig_a[CTG_NAM], get_corr_dir(is_for, contig_a[CTG_DIR]), contig_a[CHR_STR], contig_a[CHR_END]]
                 list_b = [contig_b[CTG_NAM], get_corr_dir(is_for, contig_b[CTG_DIR]), contig_b[CHR_STR], contig_b[CHR_END]]
                 original_nclose = tuple(sorted(pair))
-                if original_nclose not in not_using_nclose_node or original_nclose in saved_not_using_nclose_node:
-                    if contig_a[CTG_NAM] in rpt_con:
-                        print(list_a, list_b, "all_repeat", file=f)
-                    else:
-                        print(list_a, list_b, file=f)
+                
+                assert(original_nclose not in not_using_nclose_node or original_nclose in saved_not_using_nclose_node)
+                if contig_a[CTG_NAM] in rpt_con:
+                    print(list_a, list_b, "all_repeat", file=f)
+                else:
+                    print(list_a, list_b, file=f)
             print("", file=f)
 
     nclose_cord_list = []
@@ -4039,7 +4097,7 @@ parser.add_argument("--skip_bam_analysis",
 
 args = parser.parse_args()
 
-# t = "02_Build_Breakend_Graph_Limited.py /home/hyunwoo/ACCtools-pipeline/90_skype_run/COLO829/20_alignasm/COLO829.ctg.aln.paf public_data/chm13v2.0.fa.fai public_data/chm13v2.0_telomere.bed public_data/chm13v2.0_repeat.m.bed public_data/chm13v2.0_censat_v2.1.m.bed /home/hyunwoo/ACCtools-pipeline/90_skype_run/COLO829/01_depth/COLO829_normalized.win.stat.gz 30_skype_pipe/COLO829_19_42_33 /home/hyunwoo/ACCtools-pipeline/90_skype_run/COLO829/01_depth/COLO829.bam --alt /home/hyunwoo/ACCtools-pipeline/90_skype_run/COLO829/20_alignasm/COLO829.utg.aln.paf --orignal_paf_loc /home/hyunwoo/ACCtools-pipeline/90_skype_run/COLO829/20_alignasm/COLO829.ctg.paf /home/hyunwoo/ACCtools-pipeline/90_skype_run/COLO829/20_alignasm/COLO829.utg.paf --test --skip_bam_analysis -t 32"
+# t = "02_Build_Breakend_Graph_Limited.py /home/hyunwoo/ACCtools-pipeline/90_skype_run/PC-3/20_alignasm/PC-3.ctg.aln.paf public_data/chm13v2.0.fa.fai public_data/chm13v2.0_telomere.bed public_data/chm13v2.0_repeat.m.bed public_data/chm13v2.0_censat_v2.1.m.bed /home/hyunwoo/ACCtools-pipeline/90_skype_run/PC-3/01_depth/PC-3_normalized.win.stat.gz 30_skype_pipe/PC-3_10_40_46 /home/hyunwoo/ACCtools-pipeline/90_skype_run/PC-3/01_depth/PC-3.bam --alt /home/hyunwoo/ACCtools-pipeline/90_skype_run/PC-3/20_alignasm/PC-3.utg.aln.paf --orignal_paf_loc /home/hyunwoo/ACCtools-pipeline/90_skype_run/PC-3/20_alignasm/PC-3.ctg.paf /home/hyunwoo/ACCtools-pipeline/90_skype_run/PC-3/20_alignasm/PC-3.utg.paf --test -t 128"
 # args = parser.parse_args(t.split()[1:])
 
 PREFIX = args.prefix

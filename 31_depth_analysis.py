@@ -87,7 +87,7 @@ def similar_check(v1, v2, ratio=TYPE2_SIM_COMPARE_RAITO):
     mi, ma = sorted([v1, v2])
     return False if mi == 0 else (ma / mi <= ratio) or ma - mi < NCLOSE_SIM_DIFF_THRESHOLD
 
-def check_near_bnd(chrom, inside_st, inside_nd):
+def exist_near_bnd(chrom, inside_st, inside_nd):
     # subset of df for the given chromosome
     df_chr = df[df['chr'] == chrom]
 
@@ -99,9 +99,7 @@ def check_near_bnd(chrom, inside_st, inside_nd):
     # for inside_st
     st_depth = mean_depth(inside_st - TYPE2_FLANKING_LENGTH, inside_st)
     nd_depth = mean_depth(inside_nd, inside_nd + TYPE2_FLANKING_LENGTH)
-    if (chrom, inside_st, inside_nd) == ('chr1', 145173190, 145173190):
-        print(st_depth, nd_depth)
-        print(not similar_check(st_depth, nd_depth))
+    
     if np.isnan(st_depth) or np.isnan(nd_depth):
         return True
 
@@ -967,8 +965,8 @@ def draw_circos_plot(weights, fig_prefix=''):
         v = weights[i]
         chrom = chr_nam1
         if abs(pos1-pos2) > TYPE2_FLANKING_LENGTH and v > NCLOSE_SIM_DIFF_THRESHOLD:
-            if check_near_bnd(chrom, pos1, pos1) or \
-            check_near_bnd(chrom, pos2, pos2):
+            if exist_near_bnd(chrom, pos1, pos1) or \
+            exist_near_bnd(chrom, pos2, pos2):
                 if indel_ind == 'front_jump':
                     display_indel[chrom].append(("d", pos1, pos2, v/meandepth * 2, chrom))
                 if indel_ind == 'back_jump':
@@ -1211,8 +1209,8 @@ for i, nclose_a in enumerate(nclose_list):
 significant_nclose = []
 for nclose in (nclose_set | conjoined_nclose_node_set):
     st, ed = nclose
-    if check_near_bnd(contig_data[st][CHR_NAM], contig_data[st][CHR_STR], contig_data[st][CHR_END]) or \
-       check_near_bnd(contig_data[ed][CHR_NAM], contig_data[ed][CHR_STR], contig_data[ed][CHR_END]):
+    if exist_near_bnd(contig_data[st][CHR_NAM], contig_data[st][CHR_STR], contig_data[st][CHR_END]) or \
+       exist_near_bnd(contig_data[ed][CHR_NAM], contig_data[ed][CHR_STR], contig_data[ed][CHR_END]):
         significant_nclose.append(nclose)
 
 significant_nclose = set(significant_nclose)
@@ -1259,8 +1257,8 @@ for i in range(rpll, len(weights)):
     v = weights[i]
     chrom = chr_nam1
     if abs(pos1-pos2) > TYPE2_FLANKING_LENGTH and v > NCLOSE_SIM_DIFF_THRESHOLD:
-        if check_near_bnd(chrom, pos1, pos1) or \
-        check_near_bnd(chrom, pos2, pos2):
+        if exist_near_bnd(chrom, pos1, pos1) or \
+        exist_near_bnd(chrom, pos2, pos2):
             if indel_ind == 'front_jump':
                 display_indel[chrom].append(("d", pos1, pos2, v/meandepth * 2, chrom))
             if indel_ind == 'back_jump':

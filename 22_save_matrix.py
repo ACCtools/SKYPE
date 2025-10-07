@@ -397,6 +397,7 @@ RATIO_OUTLIER_FOLDER = f"{PREFIX}/11_ref_ratio_outliers/"
 front_contig_path = RATIO_OUTLIER_FOLDER + "front_jump/"
 back_contig_path = RATIO_OUTLIER_FOLDER + "back_jump/"
 ecdna_contig_path = RATIO_OUTLIER_FOLDER + "ecdna/"
+type2_ins_contig_path = RATIO_OUTLIER_FOLDER + "type2_ins/"
 
 TELO_CONNECT_NODES_INFO_PATH = PREFIX + "/telomere_connected_list.txt"
 NCLOSE_FILE_PATH = f"{PREFIX}/nclose_nodes_index.txt"
@@ -533,8 +534,18 @@ for (chrf, chrfid), (chrb, chrbid) in default_path_list:
 tar_def_path_set = set(tar_def_path_list)
 
 ydf = df.query('chr == "chrY"')
-chry_nz_len = len(ydf.query('meandepth != 0'))
-no_chrY = (chry_nz_len / len(ydf)) < 0.5
+
+bed_intervals = pd.IntervalIndex.from_tuples(bed_data['chrY'], closed='left')
+y_mask = ydf.apply(
+    lambda row: bed_intervals.overlaps(pd.Interval(row['st'], row['nd'], closed='left')),
+    axis=1
+)
+
+correct_mask = y_mask.apply(any)
+ydf_not_censat = ydf[~correct_mask]
+
+chry_nz_len = len(ydf_not_censat.query('meandepth != 0'))
+no_chrY = (chry_nz_len / len(ydf_not_censat)) < chrY_MINIMUM_RATIO
 
 meandepth = np.median(df['meandepth'])
 chr_order_list = extract_groups(list(df['chr']))
@@ -723,7 +734,6 @@ fm = ncm + filter_len
 
 filter_vec_list = []
 tot_loc_list = []
-bv_loc_list = []
 
 tmp_n = np.zeros(ncm, dtype=np.float32)
 tmp_v = np.zeros(m, dtype=np.float32)
@@ -781,12 +791,17 @@ for path, key_int_list in tqdm(paf_ans_list, desc='Recover depth from separated 
 tmp_n.fill(0)
 for i in tqdm(range(1, fclen // 4 + 1), desc='Parse coverage from forward-directed outlier contig gz files',
               disable=not sys.stdout.isatty() and not args.progress):
-    bv_paf_loc = front_contig_path + f"{i}_base.paf"
     ov_loc = front_contig_path + f"{i}.win.stat.gz"
-    bv_loc = front_contig_path + f"{i}_base.win.stat.gz"
-    bv_loc_list.append(bv_paf_loc)
 
-    ov = get_vec_from_stat_loc(ov_loc)
+    if os.path.isfile(ov_loc):
+        ov = get_vec_from_stat_loc(ov_loc)
+    else:
+        ov_type2_loc = glob.glob(front_contig_path + f"{i}_type2_merge_*.win.stat.gz")[0]
+        type2_ins_idx = ov_type2_loc.split('/')[-1].split('.')[0].split('_')[-1]
+        type2_ins_loc = type2_ins_contig_path + f"{type2_ins_idx}.win.stat.gz"
+        ov = get_vec_from_stat_loc(ov_type2_loc) + get_vec_from_stat_loc(type2_ins_loc)
+
+    bv_loc = front_contig_path + f"{i}_base.win.stat.gz"
     bv = get_vec_from_stat_loc(bv_loc)
     
     if NCLOSE_WEIGHT_USE:
@@ -817,12 +832,18 @@ w_pri = nnls(A_pri, B[:filter_len])[0]
 # Process backward-directed outlier contigs
 for i in tqdm(range(1, bclen // 4 + 1), desc='Parse coverage from backward-directed outlier contig gz files',
               disable=not sys.stdout.isatty() and not args.progress):
-    bv_paf_loc = back_contig_path + f"{i}_base.paf"
     ov_loc = back_contig_path + f"{i}.win.stat.gz"
-    bv_loc = back_contig_path + f"{i}_base.win.stat.gz"
-    bv_loc_list.append(bv_paf_loc)
 
-    ov = get_vec_from_stat_loc(ov_loc)
+    if os.path.isfile(ov_loc):
+        ov = get_vec_from_stat_loc(ov_loc)
+    else:
+        ov_type2_loc = glob.glob(back_contig_path + f"{i}_type2_merge_*.win.stat.gz")[0]
+        type2_ins_idx = ov_type2_loc.split('/')[-1].split('.')[0].split('_')[-1]
+        type2_ins_loc = type2_ins_contig_path + f"{type2_ins_idx}.win.stat.gz"
+        ov = get_vec_from_stat_loc(ov_type2_loc) + get_vec_from_stat_loc(type2_ins_loc)
+
+    
+    bv_loc = back_contig_path + f"{i}_base.win.stat.gz"
     bv = get_vec_from_stat_loc(bv_loc)
 
     if NCLOSE_WEIGHT_USE:
@@ -890,7 +911,7 @@ with h5py.File(f'{PREFIX}/matrix.h5', 'w') as hf:
     hf.create_dataset('B_depth_start', data=ncm)
 
 with open(f"{PREFIX}/23_input.pkl", "wb") as f:
-    pkl.dump((chr_filt_st_list, path_nclose_dict_set, amplitude), f)
+    pkl.dump((chr_filt_st_list, path_nclose_dict_set, amplitude, bed_data), f)
 
 with open(f"{PREFIX}/tar_chr_data.pkl", "wb") as f:
     pkl.dump(tar_chr_data, f)
