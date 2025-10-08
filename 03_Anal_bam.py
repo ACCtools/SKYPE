@@ -32,6 +32,8 @@ HARD_COMPARE_RAITO = 1.1
 ABS_MAX_COVERAGE_RATIO = 3
 CENSAT_COMPRESSABLE_THRESHOLD = 1000 * K
 
+DEPTH_WINDOW_SIZE = 200 * K
+
 def import_censat_repeat_data(file_path : str) -> dict :
     fai_file = open(file_path, "r")
     repeat_data = defaultdict(list)
@@ -103,38 +105,59 @@ def preprocess_breakends(nclose_cord_list, df, repeat_censat_data) -> tuple:
 
 def postprocess_breakends(df, pre_cord_nclose_list) -> dict:
     both_end_depth_dict = defaultdict(list)
-    # Pre‐group by chromosome for faster lookup
+
+    # Pre-group by chromosome for faster lookup
     df_by_chr = {chrom: subdf.reset_index(drop=True) for chrom, subdf in df.groupby("chr")}
     chr_max_end = {chrom: subdf["nd"].max() for chrom, subdf in df_by_chr.items()}
 
+    def safe_mean(df_chr, coord, side="left"):
+        """Calculate mean depth in a 500kb window. If empty, fallback to nearest bin."""
+        if side == "left":
+            low_bound = max(0, coord - DEPTH_WINDOW_SIZE)
+            high_bound = coord
+            df_side = df_chr[(df_chr["nd"] > low_bound) & (df_chr["nd"] <= high_bound)]
+        else:  # side == "right"
+            low_bound = coord
+            high_bound = min(coord + DEPTH_WINDOW_SIZE, chr_max_end[df_chr["chr"].iloc[0]])
+            df_side = df_chr[(df_chr["st"] >= low_bound) & (df_chr["st"] < high_bound)]
+
+        if not df_side.empty:
+            return float(df_side["meandepth"].mean())
+
+        # fallback: nearest bin
+        idx = df_chr["st"].searchsorted(coord)
+        if idx == 0:
+            return float(df_chr.iloc[0]["meandepth"])
+        elif idx >= len(df_chr):
+            return float(df_chr.iloc[-1]["meandepth"])
+        else:
+            left_dist = abs(coord - df_chr.iloc[idx - 1]["nd"])
+            right_dist = abs(coord - df_chr.iloc[idx]["st"])
+            if left_dist <= right_dist:
+                return float(df_chr.iloc[idx - 1]["meandepth"])
+            else:
+                return float(df_chr.iloc[idx]["meandepth"])
+
     for bd in pre_cord_nclose_list:
         key = bd[-1]
-        both_dict_check = key in both_end_depth_dict
-        
-        for i in (0, 3):
+        vals = []
+
+        for i in (0, 3):  # two breakend positions
             chrom = bd[i]
             coord = bd[i + 1]
 
-            chrom_max = chr_max_end[chrom]
+            if chrom not in df_by_chr:
+                vals.extend([0.0, 0.0])
+                continue
 
-            assert(chrom in df_by_chr)
             df_chr = df_by_chr[chrom]
 
-            df_bin = df_chr[(df_chr["st"] <= coord) & (coord < df_chr["nd"])]
+            left_mean = safe_mean(df_chr, coord, side="left")
+            right_mean = safe_mean(df_chr, coord, side="right")
 
-            if not df_bin.empty:
-                low_bound       = max(0, coord - FLANK_LENGTH)
-                left_window_end = coord
-                right_window_start = coord
-                high_bound      = min(coord + FLANK_LENGTH, chrom_max)
+            vals.extend([round(left_mean, 2), round(right_mean, 2)])
 
-                df_left = df_chr[(df_chr["nd"] > low_bound) & (df_chr["nd"] <= left_window_end)].copy()
-                df_right = df_chr[(df_chr["st"] >= right_window_start) & (df_chr["st"] < high_bound)].copy()
-
-                left_mean = df_left["meandepth"].mean() if not df_left.empty else 0.0
-                right_mean = df_right["meandepth"].mean() if not df_right.empty else 0.0
-                if not both_dict_check:
-                    both_end_depth_dict[key].extend([round(left_mean, 2), round(right_mean, 2)])
+        both_end_depth_dict[key] = vals
 
     return both_end_depth_dict
 
