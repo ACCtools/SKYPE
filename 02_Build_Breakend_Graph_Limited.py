@@ -65,7 +65,6 @@ DIR_IN = 3
 DIR_OUT = 2
 INF = 1000000000
 BUFFER = 10000000
-CHROMOSOME_COUNT = 23
 
 CHUKJI_LIMIT = -1
 BND_CONTIG_BOUND = 0.1
@@ -103,7 +102,6 @@ NON_REPEAT_NOISE_RATIO=0.1
 CONTIG_MINIMUM_SIZE = 100*K
 BND_CONTIG_BOUND = 0.1
 RPT_BND_CONTIG_BOUND = 0.2
-CHROMOSOME_COUNT = 23
 MAPQ_BOUND = 60
 TELOMERE_EXPANSION = 5 * K
 TELOMERE_COMPRESS_RANGE = 100*K
@@ -553,6 +551,25 @@ def inclusive_checker_tuple(tuple_a : tuple, tuple_b : tuple) -> bool :
     else:
         return False
 
+def chr_correlation_maker(contig_data):
+    chr_corr = {}
+    chr_rev_corr = {}
+    contig_data_size = len(contig_data)
+    for i in range(1, CHROMOSOME_COUNT):
+        chr_corr['chr'+str(i)+'f'] = contig_data_size + i - 1
+        chr_rev_corr[contig_data_size + i - 1] = 'chr'+str(i)+'f'
+    chr_corr['chrXf'] = contig_data_size + CHROMOSOME_COUNT - 1
+    chr_corr['chrYf'] = contig_data_size + CHROMOSOME_COUNT - 1
+    chr_rev_corr[contig_data_size + CHROMOSOME_COUNT - 1] = 'chrXf'
+    for i in range(1, CHROMOSOME_COUNT):
+        chr_corr['chr'+str(i)+'b'] = contig_data_size + CHROMOSOME_COUNT + i - 1
+        chr_rev_corr[contig_data_size + CHROMOSOME_COUNT + i - 1] = 'chr'+str(i)+'b'
+    chr_corr['chrXb'] = contig_data_size + 2*CHROMOSOME_COUNT - 1
+    chr_corr['chrYb'] = contig_data_size + 2*CHROMOSOME_COUNT - 1
+    chr_rev_corr[contig_data_size + 2*CHROMOSOME_COUNT - 1] = 'chrXb'
+
+    return chr_corr, chr_rev_corr
+
 def extract_all_repeat_contig(contig_data : list, repeat_data : dict, ctg_index : int, baseline : float = 0) -> set:
     contig_data_size = len(contig_data)
     rpt_con = set()
@@ -989,21 +1006,7 @@ def initial_graph_build(contig_data : list, telo_data : dict) -> list :
     Initialize
     '''
     contig_data_size = len(contig_data)
-    chr_corr = {}
-    chr_rev_corr = {}
-    contig_data_size = len(contig_data)
-    for i in range(1, CHROMOSOME_COUNT):
-        chr_corr['chr'+str(i)+'f'] = contig_data_size + i - 1
-        chr_rev_corr[contig_data_size + i - 1] = 'chr'+str(i)+'f'
-    chr_corr['chrXf'] = contig_data_size + CHROMOSOME_COUNT - 1
-    chr_corr['chrYf'] = contig_data_size + CHROMOSOME_COUNT - 1
-    chr_rev_corr[contig_data_size + CHROMOSOME_COUNT - 1] = 'chrXf'
-    for i in range(1, CHROMOSOME_COUNT):
-        chr_corr['chr'+str(i)+'b'] = contig_data_size + CHROMOSOME_COUNT + i - 1
-        chr_rev_corr[contig_data_size + CHROMOSOME_COUNT + i - 1] = 'chr'+str(i)+'b'
-    chr_corr['chrXb'] = contig_data_size + 2*CHROMOSOME_COUNT - 1
-    chr_corr['chrYb'] = contig_data_size + 2*CHROMOSOME_COUNT - 1
-    chr_rev_corr[contig_data_size + 2*CHROMOSOME_COUNT - 1] = 'chrXb'
+    chr_corr, chr_rev_corr = chr_correlation_maker(contig_data)
 
     adjacency = [[[] for _ in range(contig_data_size+CHROMOSOME_COUNT*2)], [[] for _ in range(contig_data_size+CHROMOSOME_COUNT*2)]]
     '''
@@ -1043,41 +1046,53 @@ def initial_graph_build(contig_data : list, telo_data : dict) -> list :
     end_node_list = set()
     for i in contig_data:
         end_node_list.add((i[CTG_STRND], i[CTG_ENDND])) 
-    for i in range(contig_data_size, contig_data_size + CHROMOSOME_COUNT*2):
+    
+    now_telo_list = list(chr_corr.keys())
+
+    if no_chrY:
+        now_telo_list = [i for i in now_telo_list if i not in 'chrY']
+
+    for now_telo in now_telo_list:
+        now_telo_chr = now_telo[:-1]
         curr_telo_set = set()
-        now_telo = chr_rev_corr[i]
+        i = chr_corr[now_telo]
         flag = False
+
         mini_telo_dist = INF
         for j in range(2):
-            for _ in adjacency[j][i]:
-                # 10K 이내면 없애기
-                if i < contig_data_size + CHROMOSOME_COUNT:
-                    mini_telo_dist = min(mini_telo_dist, 0 if contig_data[_[1]][CHR_STR] < telo_data[now_telo][0] else contig_data[_[1]][CHR_STR] - telo_data[now_telo][0])
-                    if contig_data[_[1]][CHR_STR] < telo_data[now_telo][0]+FORCE_TELOMERE_THRESHOLD:
-                        flag = True
-                else:
-                    mini_telo_dist = min(mini_telo_dist, 0 if contig_data[_[1]][CHR_END] > telo_data[now_telo][1] else telo_data[now_telo][1] - contig_data[_[1]][CHR_END])
-                    if contig_data[_[1]][CHR_END] > telo_data[now_telo][1]-FORCE_TELOMERE_THRESHOLD:
-                        flag = True
-                curr_telo_set.add(_[1])
+            for connected_node in adjacency[j][i]:
+                if contig_data[connected_node[1]][CHR_NAM] == now_telo_chr:
+                    # 10K 이내면 없애기
+                    if i < contig_data_size + CHROMOSOME_COUNT:
+                        mini_telo_dist = min(mini_telo_dist, 0 if contig_data[connected_node[1]][CHR_STR] < telo_data[now_telo][0] else contig_data[connected_node[1]][CHR_STR] - telo_data[now_telo][0])
+                        if contig_data[connected_node[1]][CHR_STR] < telo_data[now_telo][0]+FORCE_TELOMERE_THRESHOLD:
+                            flag = True
+                    else:
+                        mini_telo_dist = min(mini_telo_dist, 0 if contig_data[connected_node[1]][CHR_END] > telo_data[now_telo][1] else telo_data[now_telo][1] - contig_data[connected_node[1]][CHR_END])
+                        if contig_data[connected_node[1]][CHR_END] > telo_data[now_telo][1]-FORCE_TELOMERE_THRESHOLD:
+                            flag = True
+                    curr_telo_set.add(connected_node[1])
+        
         if flag:
             continue
+
         telo_dist = mini_telo_dist
         telo_connect_node = INF
         telo_dir = 0
         temp_contig = (0, 0, 0, 0, 0, 0, 0, telo_data[now_telo][0], telo_data[now_telo][1])
+        
         #우리가 연결하는 텔로미어 노드
         if now_telo[-1]=='f':
             for st, ed in end_node_list:
                 # 텔로미어와 겹치지 않으며, 배제된 노드가 아니고, 중복이 아니며, + 방향이고, 거리가 갱신가능한 경우
-                if contig_data[st][CHR_NAM] == now_telo[0:-1] \
+                if contig_data[st][CHR_NAM] == now_telo_chr \
                 and st not in curr_telo_set \
                 and telo_dist > telo_distance_checker(contig_data[st], temp_contig) \
                 and contig_data[st][CTG_DIR]=='+':
                     telo_connect_node = st
                     telo_dist = telo_distance_checker(contig_data[st], temp_contig)
                     telo_dir = '+'
-                if contig_data[ed][CHR_NAM] == now_telo[0:-1] \
+                if contig_data[ed][CHR_NAM] == now_telo_chr \
                 and ed not in curr_telo_set \
                 and telo_dist > telo_distance_checker(contig_data[ed], temp_contig) \
                 and contig_data[ed][CTG_DIR]=='-':
@@ -1093,14 +1108,14 @@ def initial_graph_build(contig_data : list, telo_data : dict) -> list :
                     adjacency[DIR_FOR][telo_connect_node].append([DIR_FOR, i, telo_dist])
         else:
             for st, ed in end_node_list:
-                if contig_data[st][CHR_NAM] == now_telo[0:-1] \
+                if contig_data[st][CHR_NAM] == now_telo_chr \
                 and st not in curr_telo_set \
                 and telo_dist > telo_distance_checker(contig_data[st], temp_contig) \
                 and contig_data[st][CTG_DIR]=='-':
                     telo_connect_node = st
                     telo_dist = telo_distance_checker(contig_data[st], temp_contig)
                     telo_dir = '-'
-                if contig_data[ed][CHR_NAM] == now_telo[0:-1] \
+                if contig_data[ed][CHR_NAM] == now_telo_chr \
                 and ed not in curr_telo_set \
                 and telo_dist > telo_distance_checker(contig_data[ed], temp_contig) \
                 and contig_data[ed][CTG_DIR]=='+':
@@ -1116,25 +1131,13 @@ def initial_graph_build(contig_data : list, telo_data : dict) -> list :
                     adjacency[DIR_FOR][i].append([DIR_FOR, telo_connect_node, telo_dist])
                     adjacency[DIR_BAK][telo_connect_node].append([DIR_FOR, i, telo_dist])
                     adjacency[DIR_FOR][telo_connect_node].append([DIR_FOR, i, telo_dist])
+
     return adjacency
 
 def edge_optimization(contig_data : list, contig_adjacency : list, telo_dict : dict, asm2cov : dict) -> tuple :
-    chr_corr = {}
-    chr_rev_corr = {}
+
     contig_data_size = len(contig_data)
-    for i in range(1, CHROMOSOME_COUNT):
-        chr_corr['chr'+str(i)+'f'] = contig_data_size + i - 1
-        chr_rev_corr[contig_data_size + i - 1] = 'chr'+str(i)+'f'
-    chr_corr['chrXf'] = contig_data_size + CHROMOSOME_COUNT - 1
-    chr_corr['chrYf'] = contig_data_size + CHROMOSOME_COUNT - 1
-    chr_rev_corr[contig_data_size + CHROMOSOME_COUNT - 1] = 'chrXf'
-    for i in range(1, CHROMOSOME_COUNT):
-        chr_corr['chr'+str(i)+'b'] = contig_data_size + CHROMOSOME_COUNT + i - 1
-        chr_rev_corr[contig_data_size + CHROMOSOME_COUNT + i - 1] = 'chr'+str(i)+'b'
-    chr_corr['chrXb'] = contig_data_size + 2*CHROMOSOME_COUNT - 1
-    chr_corr['chrYb'] = contig_data_size + 2*CHROMOSOME_COUNT - 1
-    chr_rev_corr[contig_data_size + 2*CHROMOSOME_COUNT - 1] = 'chrXb'
-    
+    chr_corr, chr_rev_corr = chr_correlation_maker(contig_data)
     contig_pair_nodes = defaultdict(list)
     telo_coverage = Counter()
     optimized_adjacency = [[[] for _ in range(contig_data_size + CHROMOSOME_COUNT*2)], [[] for _ in range(contig_data_size + CHROMOSOME_COUNT*2)]]
@@ -2946,24 +2949,7 @@ def initialize_bnd_graph(contig_data : list, nclose_nodes : dict, telo_contig : 
     return bnd_adjacency
 
 def initialize_inversion_only_graph(contig_data : list, nclose_nodes_original : dict) -> dict:
-    contig_data_size = len(contig_data)
-    chr_corr = {}
-    chr_rev_corr = {}
-    contig_data_size = len(contig_data)
-    for i in range(1, CHROMOSOME_COUNT):
-        chr_corr['chr'+str(i)+'f'] = contig_data_size + i - 1
-        chr_rev_corr[contig_data_size + i - 1] = 'chr'+str(i)+'f'
-    chr_corr['chrXf'] = contig_data_size + CHROMOSOME_COUNT - 1
-    chr_corr['chrYf'] = contig_data_size + CHROMOSOME_COUNT - 1
-    chr_rev_corr[contig_data_size + CHROMOSOME_COUNT - 1] = 'chrXf'
-    for i in range(1, CHROMOSOME_COUNT):
-        chr_corr['chr'+str(i)+'b'] = contig_data_size + CHROMOSOME_COUNT + i - 1
-        chr_rev_corr[contig_data_size + CHROMOSOME_COUNT + i - 1] = 'chr'+str(i)+'b'
-    chr_corr['chrXb'] = contig_data_size + 2*CHROMOSOME_COUNT - 1
-    chr_corr['chrYb'] = contig_data_size + 2*CHROMOSOME_COUNT - 1
-    chr_rev_corr[contig_data_size + 2*CHROMOSOME_COUNT - 1] = 'chrXb'
     bnd_adjacency = defaultdict(list)
-
     nclose_nodes = defaultdict(list)
 
     for j in nclose_nodes_original:
@@ -3095,7 +3081,7 @@ def contig_preprocessing_00(PAF_FILE_PATH_ : list):
     repeat_data = import_repeat_data_00(REPEAT_INFO_FILE_PATH)
     repeat_censat_data = import_censat_repeat_data(CENSAT_PATH)
 
-    global df
+    global df, no_chrY
     df = pd.read_csv(main_stat_loc, compression='gzip', comment='#', sep='\t', names=['chr', 'st', 'nd', 'length', 'covsite', 'totaldepth', 'cov', 'meandepth'])
     df = df.query('chr != "chrM"')
 
@@ -3105,7 +3091,21 @@ def contig_preprocessing_00(PAF_FILE_PATH_ : list):
     for _ in telo_data:
         telo_dict[_[0]].append(_[1:])
 
+    bed_data = import_bed(args.censat_bed_path)
 
+    ydf = df.query('chr == "chrY"')
+
+    bed_intervals = pd.IntervalIndex.from_tuples(bed_data['chrY'], closed='left')
+    y_mask = ydf.apply(
+        lambda row: bed_intervals.overlaps(pd.Interval(row['st'], row['nd'], closed='left')),
+        axis=1
+    )
+
+    correct_mask = y_mask.apply(any)
+    ydf_not_censat = ydf[~correct_mask]
+
+    chry_nz_len = len(ydf_not_censat.query('meandepth != 0'))
+    no_chrY = (chry_nz_len / len(ydf_not_censat)) < chrY_MINIMUM_RATIO
 
     contig_data = import_data(PAF_FILE_PATH_[0])
 
@@ -3690,20 +3690,7 @@ def nclose_calc():
 
     contig_data_size = len(contig_data)
 
-    chr_corr = {}
-    chr_rev_corr = {}
-    for i in range(1, CHROMOSOME_COUNT):
-        chr_corr['chr'+str(i)+'f'] = contig_data_size + i - 1
-        chr_rev_corr[contig_data_size + i - 1] = 'chr'+str(i)+'f'
-    chr_corr['chrXf'] = contig_data_size + CHROMOSOME_COUNT - 1
-    chr_corr['chrYf'] = contig_data_size + CHROMOSOME_COUNT - 1
-    chr_rev_corr[contig_data_size + CHROMOSOME_COUNT - 1] = 'chrXf'
-    for i in range(1, CHROMOSOME_COUNT):
-        chr_corr['chr'+str(i)+'b'] = contig_data_size + CHROMOSOME_COUNT + i - 1
-        chr_rev_corr[contig_data_size + CHROMOSOME_COUNT + i - 1] = 'chr'+str(i)+'b'
-    chr_corr['chrXb'] = contig_data_size + 2*CHROMOSOME_COUNT - 1
-    chr_corr['chrYb'] = contig_data_size + 2*CHROMOSOME_COUNT - 1
-    chr_rev_corr[contig_data_size + 2*CHROMOSOME_COUNT - 1] = 'chrXb'
+    chr_corr, chr_rev_corr = chr_correlation_maker(contig_data)
 
     telo_contig = extract_telomere_connect_contig(TELO_CONNECT_NODES_INFO_PATH)
 
@@ -4060,7 +4047,16 @@ def get_ori_ctg_name_data(PAF_FILE_PATH : list) -> list:
         ori_ctg_name_data.append(ori_ctg_name_list)
 
     return ori_ctg_name_data
-            
+
+def import_bed(bed_path: str) -> dict:
+    bed_data_file = open(bed_path, "r")
+    chr_len: defaultdict[Any, list[Any]] = defaultdict(list)
+    for curr_data in bed_data_file:
+        curr_data = curr_data.split("\t")
+        chr_len[curr_data[0]].append((int(curr_data[1]), int(curr_data[2])))
+    bed_data_file.close()
+    return chr_len
+
 parser = argparse.ArgumentParser(description="Find breakend contigs with contig data and map data")
 
 # 위치 인자 정의
@@ -4136,11 +4132,9 @@ asm2cov = Counter()
 #     gfa_file_path, asm2cov = pkl.load(f)
 
 ori_ctg_name_data = get_ori_ctg_name_data(PAF_FILE_PATH)
-
 is_unitig_reduced = False
 telo_coverage = contig_preprocessing_00(PAF_FILE_PATH)
 globals().update(nclose_calc())
-
 
 telo_connected_node_tuple = extract_telomere_connect_contig_bytuple(PREFIX+"/telomere_connected_list.txt")
 chr_fb_len_dict = defaultdict(list)

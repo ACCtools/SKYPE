@@ -60,7 +60,6 @@ DEFAULT_NCLOSE_WEIGHT = 0.1
 ABS_MAX_COVERAGE_RATIO = 3
 MAX_PATH_CNT = 100
 
-CHROMOSOME_COUNT = 23
 DIR_FOR = 1
 TELOMERE_EXPANSION = 5 * K
 
@@ -135,25 +134,6 @@ def find_chr_len(file_path: str) -> dict:
         chr_len[curr_data[0]] = int(curr_data[1])
     chr_data_file.close()
     return chr_len
-
-
-def chr_correlation_maker(contig_data):
-    chr_corr = {}
-    chr_rev_corr = {}
-    contig_data_size = len(contig_data)
-    for i in range(1, CHROMOSOME_COUNT):
-        chr_corr['chr' + str(i) + 'f'] = contig_data_size + i - 1
-        chr_rev_corr[contig_data_size + i - 1] = 'chr' + str(i) + 'f'
-    chr_corr['chrXf'] = contig_data_size + CHROMOSOME_COUNT - 1
-    chr_corr['chrYf'] = contig_data_size + CHROMOSOME_COUNT - 1
-    chr_rev_corr[contig_data_size + CHROMOSOME_COUNT - 1] = 'chrXf'
-    for i in range(1, CHROMOSOME_COUNT):
-        chr_corr['chr' + str(i) + 'b'] = contig_data_size + CHROMOSOME_COUNT + i - 1
-        chr_rev_corr[contig_data_size + CHROMOSOME_COUNT + i - 1] = 'chr' + str(i) + 'b'
-    chr_corr['chrXb'] = contig_data_size + 2 * CHROMOSOME_COUNT - 1
-    chr_corr['chrYb'] = contig_data_size + 2 * CHROMOSOME_COUNT - 1
-    chr_rev_corr[contig_data_size + 2 * CHROMOSOME_COUNT - 1] = 'chrXb'
-    return chr_corr, chr_rev_corr
 
 
 def import_telo_data(file_path: str, chr_len: dict) -> dict:
