@@ -1,8 +1,6 @@
-from math import e
 import os
 import sys
 
-from matplotlib import axis
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from skype_utils import *

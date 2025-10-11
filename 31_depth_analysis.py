@@ -591,7 +591,7 @@ parser.add_argument("--progress",
 
 args = parser.parse_args()
 
-# t = "31_depth_analysis.py public_data/chm13v2.0_censat_v2.1.m.bed /home/hyunwoo/ACCtools-pipeline/90_skype_run/COLO829/20_alignasm/COLO829.ctg.aln.paf.ppc.paf /home/hyunwoo/ACCtools-pipeline/90_skype_run/COLO829/01_depth/COLO829_normalized.win.stat.gz public_data/chm13v2.0_telomere.bed public_data/chm13v2.0.fa.fai public_data/chm13v2.0_cytobands_allchrs.bed 30_skype_pipe/COLO829_22_36_47 -t 32"
+# t = "31_depth_analysis.py public_data/chm13v2.0_censat_v2.1.m.bed /home/hyunwoo/ACCtools-pipeline/90_skype_run/Caki-1/20_alignasm/Caki-1.ctg.aln.paf.ppc.paf /home/hyunwoo/ACCtools-pipeline/90_skype_run/Caki-1/01_depth/Caki-1_normalized.win.stat.gz public_data/chm13v2.0_telomere.bed public_data/chm13v2.0.fa.fai public_data/chm13v2.0_cytobands_allchrs.bed 30_skype_pipe/Caki-1_18_22_40 -t 128"
 # args = parser.parse_args(t.split()[1:])
 
 bed_data = import_bed(args.censat_bed_path)
@@ -715,8 +715,6 @@ def get_vec_from_ki(ki):
             v.append(chr_st_data[cs])
     
     return ki, np.asarray(v, dtype=np.float32)
-
-os.remove(f'{PREFIX}/matrix.h5')
 
 with open(f'{PREFIX}/contig_pat_vec_data.pkl', 'rb') as f:
     paf_ans_list, key_list, int2key, _ = pkl.load(f)
@@ -1274,9 +1272,10 @@ def make_bed_output(weights, output_prefix=''):
         cf.writerow(['#chrom', 'cordst', 'cordnd', 'type', 'weight (N)'])
 
     
-        for ind, v in nclose_cn.items():
+        for nclose_ind, v in nclose_cn.items():
             if v > BREAKEND_REMARKABLE_CN:
-                cf.writerow([contig_data[ind][CHR_NAM], contig_data[ind][CHR_STR], contig_data[ind][CHR_END],
+                for ind in reverse_nclose_dict[nclose_ind]:
+                    cf.writerow([contig_data[ind][CHR_NAM], contig_data[ind][CHR_STR], contig_data[ind][CHR_END],
                                 'Breakend', round(v / N, 2)])
 
         for i in range(rpll, len(weights)):
@@ -1324,4 +1323,5 @@ make_bed_output(weights)
 if use_julia_solver:
     make_bed_output(weights_cluster, '_cluster')
 
+os.remove(f'{PREFIX}/matrix.h5')
 logging.info("SKYPE pipeline end")
