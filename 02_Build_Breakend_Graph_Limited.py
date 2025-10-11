@@ -4581,7 +4581,7 @@ def init_worker(shared_graph):
 def run_graph_pipeline():
     tar_ind_list = []
     for i in range(contig_data_size, contig_data_size + 2*CHROMOSOME_COUNT):
-        for j in range(i, contig_data_size + 2*CHROMOSOME_COUNT):
+        for j in range(i + 1, contig_data_size + 2*CHROMOSOME_COUNT):
             tar_ind_list.append((i, j))
 
     limit_combinations = [
