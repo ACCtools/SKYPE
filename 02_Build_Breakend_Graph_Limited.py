@@ -82,7 +82,6 @@ NCLOSE_SIM_DIFF_THRESHOLD = 5
 TOT_PATH_LIMIT = 3*M
 PAT_PATH_LIMIT = 10*K
 
-CHR_CHANGE_LIMIT_ABS_MAX = 5
 DIR_CHANGE_LIMIT_ABS_MAX = 1
 CENSAT_VISIT_LIMIT = 2
 
@@ -4082,6 +4081,8 @@ parser.add_argument("--orignal_paf_loc", nargs='+',
                     help="Orignal paf location to detect location (primary, alternative paf location)")
 parser.add_argument("-t", "--thread", 
                     help="Number of thread", type=int)
+parser.add_argument("-d", "--graph_depth", 
+                    help="Depth of breakend graph", type=int, default=4)
 parser.add_argument("--progress", 
                     help="Show progress bar", action='store_true')
 parser.add_argument("--verbose", 
@@ -4117,6 +4118,7 @@ read_bam_loc = args.read_bam_loc
 PRINT_IDX_FILE = args.verbose
 THREAD=args.thread
 SKIP_BAM_ANAL=args.skip_bam_analysis
+CHR_CHANGE_LIMIT_ABS_MAX = args.graph_depth
 
 ORIGNAL_PAF_LOC_LIST = ORIGNAL_PAF_LOC_LIST_
 
