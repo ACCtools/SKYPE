@@ -47,6 +47,8 @@ VCF_FLANKING_LENGTH = 1*M
 NCLOSE_SIM_COMPARE_RAITO = 1.2
 NCLOSE_SIM_DIFF_THRESHOLD = 5
 
+CHROM_ERROR_FAIL_RATE = 1.0
+
 
 
 def similar_check(v1, v2, ratio):
@@ -167,13 +169,6 @@ if use_julia_solver:
     B = np.asarray(B_jl)
 
     weight_base_jl = jl.nnls_solve(A_jl, B_jl, THREAD, False)
-    # final_weights_fullsize = np.asarray(weight_base_jl)
-
-        
-    # predict_B_succ = np.asarray(A_jl * weight_base_jl)
-    # predict_B_fail = np.asarray(A_fail_jl * weight_base_jl)
-
-
     weight_base = np.asarray(weight_base_jl)
 
     final_weights_fullsize = np.zeros(len(weight_base))
@@ -186,20 +181,12 @@ if use_julia_solver:
         if abs(chrom_acc_sum_dict_base[chrom]) > chrom_acc_sum_dict_max_base[chrom]:
             chrom_acc_sum_dict_max_base[chrom] = abs(chrom_acc_sum_dict_base[chrom])
 
-    # print("="*50)
-    # print(f"Base acc sum max")
-    # for chrom, acc_sum_max in chrom_acc_sum_dict_max_base.items():
-    #     if chrom == 'chrY' and no_chrY:
-    #         continue
-    #     acc_sum_max_base = chrom_acc_sum_dict_max_base[chrom]
-    #     print(f"{chrom} : {acc_sum_max:.4f}")
-    # print("="*50)
-
     nclose_total_weight_dict = defaultdict(float)
     for i, v in enumerate(weight_base):
         for j in path_nclose_set_dict[i]:
             nclose_total_weight_dict[j] += v
 
+    # Phase 1 : inital nclose filtering
     div_nclose_set = set()
     for k, v in nclose_total_weight_dict.items():
         st, ed = k
@@ -215,13 +202,12 @@ if use_julia_solver:
             if (ppc_contig_data[st][CTG_CENSAT] != '0' or ppc_contig_data[ed][CTG_CENSAT] != '0') and not ppc_contig_data[st][CTG_NAM].startswith('virtual_censat_contig'):
                 div_nclose_set.add(k)
 
-
     int2nclose = dict()
 
     nclose_notusing_idx_dict = defaultdict(list)
     for nclose_pair in div_nclose_set:
         for k, path_nclose_usage in path_nclose_set_dict.items():
-            if (nclose_pair not in path_nclose_usage):
+            if nclose_pair not in path_nclose_usage:
                 nclose_notusing_idx_dict[nclose_pair].append(k)
 
     tar_nclose_list = []
@@ -231,11 +217,9 @@ if use_julia_solver:
         tar_nclose_list.append(k)
 
     weight_list = jl.run_nnls_map(A_jl, B_jl, thread_data_jl)
-
     not_essential_nclose = set()
 
     logging.info(f"Testing nclose pairs count : {len(tar_nclose_list)}")
-
     for nclose_pair, (weight_jl, predict_suc_B_jl) in zip(tar_nclose_list, weight_list):
         predict_suc_B = np.asarray(predict_suc_B_jl)
         predict_diff = predict_suc_B - predict_suc_B_base
@@ -247,9 +231,6 @@ if use_julia_solver:
             if abs(chrom_acc_sum_dict[chrom]) > chrom_acc_sum_dict_max[chrom]:
                 chrom_acc_sum_dict_max[chrom] = abs(chrom_acc_sum_dict[chrom])
 
-        # print("***********************************")
-        # print(nclose_pair)
-
         max_error_rate = 0
         for chrom, acc_sum_max in chrom_acc_sum_dict_max.items():
             if chrom == 'chrY' and no_chrY:
@@ -257,17 +238,6 @@ if use_julia_solver:
             acc_sum_max_base = chrom_acc_sum_dict_max_base[chrom]
             # print(f"{chrom} : {acc_sum_max:.4f} (error rate: {abs(acc_sum_max - acc_sum_max_base) / acc_sum_max_base:.4f})")
             max_error_rate = max(max_error_rate, abs(acc_sum_max - acc_sum_max_base) / acc_sum_max_base)
-        
-        # print(f"Max base ratio : {max_error_rate:.4f}")
-        
-        # print("***********************************")
-        # print(np.max(np.abs(predict_diff)))
-        # for i in range(10):
-        #     i = i + 1
-        #     print(f"{round(i / 20, 3)}", np.sum(np.abs(predict_diff) > i / 20 * meandepth))
-
-        # if np.sum(np.abs(predict_diff) > WINDOW_DEPTH_ERROR_THRESHOLD * meandepth) < DEPTH_ERROR_ALLOW_LEN / DEPTH_VECTOR_WINDOW:
-        #     print("Difference : This nclose pair is not essential.")
 
         if max_error_rate < BASE_ACCSUMABSMAX_RATIO:
             logging.debug(f"{nclose_pair} : Nclose removed")
@@ -294,6 +264,114 @@ if use_julia_solver:
 
     predict_B_succ = np.asarray(A_final_jl * final_weight_jl)
     predict_B_fail = np.asarray(A_fail_final_jl * final_weight_jl)
+
+    # Phase 2 : check diverse chromosome
+    predict_suc_B = predict_B_succ
+    predict_diff = predict_suc_B - predict_suc_B_base
+
+    chrom_acc_sum_dict = defaultdict(int)
+    chrom_acc_sum_dict_max = defaultdict(int)
+    for i, (chrom, st) in enumerate(chr_filt_st_list):
+        chrom_acc_sum_dict[chrom] += predict_suc_B[i] - B[i]
+        if abs(chrom_acc_sum_dict[chrom]) > chrom_acc_sum_dict_max[chrom]:
+            chrom_acc_sum_dict_max[chrom] = abs(chrom_acc_sum_dict[chrom])
+    
+    fail_chrom_list = []
+    for chrom, acc_sum_max in chrom_acc_sum_dict_max.items():
+        if chrom == 'chrY' and no_chrY:
+            continue
+        acc_sum_max_base = chrom_acc_sum_dict_max_base[chrom]
+
+        chrom_error_rate = abs(acc_sum_max - acc_sum_max_base) / acc_sum_max_base
+        if chrom_error_rate > CHROM_ERROR_FAIL_RATE:
+            fail_chrom_list.append(chrom)
+    
+    if len(fail_chrom_list) > 0:
+        logging.info(f'Fail filtering nclose chromosome : {', '.join(fail_chrom_list)}')
+
+        # Phase 3 : final nclose filtering
+        div_nclose_set = set()
+        for k, v in nclose_total_weight_dict.items():
+            st, ed = k
+            
+            # depth check, type 1 only
+            if v > 0.2 * meandepth \
+            and ppc_contig_data[st][CHR_NAM] != ppc_contig_data[ed][CHR_NAM] \
+            and ppc_contig_data[st][CHR_NAM] not in fail_chrom_list \
+            and ppc_contig_data[ed][CHR_NAM] not in fail_chrom_list:
+                # Check if at least one of endpoint have non-diverse depth & not a virtual censat contig
+                if (not exist_near_bnd(ppc_contig_data[st][CHR_NAM], ppc_contig_data[st][CHR_STR], ppc_contig_data[st][CHR_END]) or \
+                not exist_near_bnd(ppc_contig_data[ed][CHR_NAM], ppc_contig_data[ed][CHR_STR], ppc_contig_data[ed][CHR_END])) and \
+                not ppc_contig_data[st][CTG_NAM].startswith('virtual_censat_contig'):
+                    div_nclose_set.add(k)
+                # Check if at least one of endpoint is censat contig
+                if (ppc_contig_data[st][CTG_CENSAT] != '0' or ppc_contig_data[ed][CTG_CENSAT] != '0') and not ppc_contig_data[st][CTG_NAM].startswith('virtual_censat_contig'):
+                    div_nclose_set.add(k)
+
+        int2nclose = dict()
+
+        nclose_notusing_idx_dict = defaultdict(list)
+        for nclose_pair in div_nclose_set:
+            for k, path_nclose_usage in path_nclose_set_dict.items():
+                if nclose_pair not in path_nclose_usage:
+                    nclose_notusing_idx_dict[nclose_pair].append(k)
+
+        tar_nclose_list = []
+        thread_data_jl = jl.Vector[jl.Vector[jl.Int]]()
+        for k, v in nclose_notusing_idx_dict.items():
+            jl.push_b(thread_data_jl, jl.Vector[jl.Int](v))
+            tar_nclose_list.append(k)
+
+        weight_list = jl.run_nnls_map(A_jl, B_jl, thread_data_jl)
+
+        not_essential_nclose = set()
+
+        logging.info(f"Final testing nclose pairs count : {len(tar_nclose_list)}")
+
+        for nclose_pair, (weight_jl, predict_suc_B_jl) in zip(tar_nclose_list, weight_list):
+            predict_suc_B = np.asarray(predict_suc_B_jl)
+            predict_diff = predict_suc_B - predict_suc_B_base
+
+            chrom_acc_sum_dict = defaultdict(int)
+            chrom_acc_sum_dict_max = defaultdict(int)
+            for i, (chrom, st) in enumerate(chr_filt_st_list):
+                chrom_acc_sum_dict[chrom] += predict_suc_B[i] - B[i]
+                if abs(chrom_acc_sum_dict[chrom]) > chrom_acc_sum_dict_max[chrom]:
+                    chrom_acc_sum_dict_max[chrom] = abs(chrom_acc_sum_dict[chrom])
+            
+            max_error_rate = 0
+            for chrom, acc_sum_max in chrom_acc_sum_dict_max.items():
+                if chrom == 'chrY' and no_chrY:
+                    continue
+                acc_sum_max_base = chrom_acc_sum_dict_max_base[chrom]
+                # print(f"{chrom} : {acc_sum_max:.4f} (error rate: {abs(acc_sum_max - acc_sum_max_base) / acc_sum_max_base:.4f})")
+                max_error_rate = max(max_error_rate, abs(acc_sum_max - acc_sum_max_base) / acc_sum_max_base)
+
+            if max_error_rate < BASE_ACCSUMABSMAX_RATIO:
+                logging.debug(f"{nclose_pair} : Nclose removed")
+                not_essential_nclose.add(nclose_pair)
+
+        logging.info(f'Final filtered nclose count by depth : {len(not_essential_nclose)}')
+        # logging.info(f'{not_essential_nclose}')
+
+        using_idx_set = set(range(len(weight_base)))
+        for nclose_pair in not_essential_nclose:
+            using_idx_set &= set(nclose_notusing_idx_dict[nclose_pair])
+
+        final_idx_list = sorted(list(using_idx_set))
+        final_idx_array_jl = jl.Vector[jl.Int]([i + 1 for i in final_idx_list]) # 1-index
+
+        A_final_jl = jl.view(A_jl, jl.Colon(), final_idx_array_jl)
+        A_fail_final_jl = jl.view(A_fail_jl, jl.Colon(), final_idx_array_jl)
+
+        final_weight_jl = jl.nnls_solve(A_final_jl, B_jl, THREAD, False)
+        final_weight = np.asarray(final_weight_jl)
+
+        for i, v in enumerate(final_idx_list):
+            final_weights_fullsize[int(v)] = final_weight[i]
+
+        predict_B_succ = np.asarray(A_final_jl * final_weight_jl)
+        predict_B_fail = np.asarray(A_fail_final_jl * final_weight_jl)
 else:
     import h5py
 
@@ -329,7 +407,6 @@ else:
 
     predict_B_succ = A.dot(weights)
     predict_B_fail = A_fail.dot(weights)
-
 
 # clustering weight
 b_norm = np.linalg.norm(B)
