@@ -475,7 +475,47 @@ def inclusive_checker(tuple_a : tuple, tuple_b : tuple) -> bool :
         return True
     else:
         return False
-    
+
+def bnd_alt(t, mate_chr, mate_pos, form):
+    """
+    Build ALT per the 4 canonical breakend forms:
+        "t[p[", "t]p]", "]p]t", "[p[t"
+    """
+    p = f"{mate_chr}:{mate_pos}"
+    if form == "t[p[":
+        return f"{t}[{p}["
+    if form == "t]p]":
+        return f"]{p}]{t}"
+    if form == "]p]t":
+        return f"]{p}]{t}"
+    if form == "[p[t":
+        return f"[{p}[{t}"
+    assert(False)
+
+def choose_alt_forms(dir_a, dir_b):
+    """
+    Map (dir_a, dir_b) to a complementary ALT pair.
+    You can tweak this mapping to your exact strand semantics.
+    """
+    if dir_a == '+' and dir_b == '+':
+        return ("t[p[", "]p]t")
+    if dir_a == '-' and dir_b == '-':
+        return ("t]p]", "[p[t")
+    if dir_a == '+' and dir_b == '-':
+        return ("t[p[", "[p[t")
+    if dir_a == '-' and dir_b == '+':
+        return ("t]p]", "]p]t")
+    assert(False)
+
+def make_strands(dir_a, dir_b):
+    """
+    Compose STRANDS string as '<A><B>' where each is '+' or '-'.
+    Fallback to '.' if a direction is unknown.
+    """
+    a = dir_a if dir_a in ('+', '-') else '.'
+    b = dir_b if dir_b in ('+', '-') else '.'
+    return f"{a}{b}"
+
 def write_vcf_header(fh, contig_lengths):
     fh.write("##fileformat=VCFv4.3\n")
     fh.write('##ALT=<ID=BND,Description="Breakend">\n')
@@ -488,50 +528,43 @@ def write_vcf_header(fh, contig_lengths):
     fh.write("#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n")
 
 def pairs_to_vcf(pairs, contig_data, contig_lengths, display_indel, out_vcf_path):
-    tr_counter = 1
-    inv_counter = 1
-
     with open(out_vcf_path, 'w') as fo:
         # 1) 헤더 쓰기
         write_vcf_header(fo, contig_lengths)
 
         # 2) Translocation, Inversion 처리
+        tr_counter = 1
         for a_idx, b_idx in pairs:
             a = contig_data[a_idx]
             b = contig_data[b_idx]
 
             chr_a, chr_b = a[CHR_NAM], b[CHR_NAM]
-            pos_a = a[CHR_END]   # 첫 세그먼트의 reference end
-            pos_b = b[CHR_STR]   # 두 번째의 reference start
+            pos_a = a[CHR_END]
+            pos_b = b[CHR_STR]
 
-            if chr_a != chr_b:
-                sv_id = f"SKYPE.BND.{tr_counter}"
-                tr_counter += 1
+            dir_a = a[CTG_DIR]
+            dir_b = b[CTG_DIR]
 
-                fo.write(
-                    f"{chr_a}\t{pos_a}\t{sv_id}\tN\t"
-                    f"N[{chr_b}:{pos_b}[\t.\t.\t"
-                    f"SVTYPE=BND;MATEID={sv_id}\n"
-                )
-                fo.write(
-                    f"{chr_b}\t{pos_b}\t{sv_id}\tN\t"
-                    f"]{chr_a}:{pos_a}]N\t.\t.\t"
-                    f"SVTYPE=BND;MATEID={sv_id}\n"
-                )
+            strands = make_strands(dir_a, dir_b)
 
-            else:
-                sv_id = f"SKYPE.INV.{inv_counter}"
-                inv_counter += 1
-                if pos_a < pos_b:
-                    fpos = pos_a
-                    bpos = pos_b
-                else:
-                    bpos = pos_a
-                    fpos = pos_b
-                fo.write(
-                    f"{chr_a}\t{fpos}\t{sv_id}\tN\t<INV>\t.\t.\t"
-                    f"SVTYPE=INV;END={bpos}\n"
-                )
+            sv_id_a = f"SKYPE.BND.{tr_counter}_1"
+            sv_id_b = f"SKYPE.BND.{tr_counter}_2"
+            tr_counter += 1
+
+            form_a, form_b = choose_alt_forms(dir_a, dir_b)
+
+            ref = "N"
+            alt_a = bnd_alt("N", chr_b, pos_b, form_a)
+            alt_b = bnd_alt("N", chr_a, pos_a, form_b)
+
+            fo.write(
+                f"{chr_a}\t{pos_a}\t{sv_id_a}\t{ref}\t{alt_a}\t60\tPASS\t"
+                f"SVTYPE=BND;MATEID={sv_id_b};STRANDS={strands}\n"
+            )
+            fo.write(
+                f"{chr_b}\t{pos_b}\t{sv_id_b}\t{ref}\t{alt_b}\t60\tPASS\t"
+                f"SVTYPE=BND;MATEID={sv_id_a};STRANDS={strands}\n"
+            )
 
         # 3) indel 처리
         ins_counter = 1
@@ -556,7 +589,7 @@ def pairs_to_vcf(pairs, contig_data, contig_lengths, display_indel, out_vcf_path
                     assert(False)
 
                 fo.write(
-                    f"{chrom}\t{start}\t{sv_id}\tN\t{alt}\t.\t.\t"
+                    f"{chrom}\t{start}\t{sv_id}\tN\t{alt}\t60\tPASS\t"
                     f"SVTYPE={alt[1:-1]};END={end};SVLEN={svlen}\n"
                 )
 
