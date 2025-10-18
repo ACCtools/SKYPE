@@ -537,6 +537,13 @@ def pairs_to_vcf(nclose_pairs, contig_data, contig_lengths, display_indel, out_v
 
         # 2) Translocation, Inversion 처리
         for nclose in nclose_pairs:
+            if nclose in significant_nclose:
+                quality = 60
+                filter_str = 'PASS'
+            else:
+                quality = 0
+                filter_str = 'FAIL'
+
             a_idx, b_idx = nclose
             bnd_nclose_ind = nclose2idx[nclose]
             nclose_weight = nclose_cn_std[bnd_nclose_ind]
@@ -564,17 +571,17 @@ def pairs_to_vcf(nclose_pairs, contig_data, contig_lengths, display_indel, out_v
 
             if nclose not in nclose_set:
                 i1, i2 = conjoined_track_data[nclose]
-                merge_mate_id_str = f';MERGE_MATEID=SKYPE.BND.{i1},KYPE.BND.{i2}'
+                merge_mate_id_str = f';MERGE_MATEID=SKYPE.BND.{i1},SKYPE.BND.{i2}'
             else:
                 merge_mate_id_str = ''
 
             fo.write(
-                f"{chr_a}\t{pos_a}\t{sv_id_a}\t{ref}\t{alt_a}\t60\tPASS\t"
+                f"{chr_a}\t{pos_a}\t{sv_id_a}\t{ref}\t{alt_a}\t{quality}\t{filter_str}\t"
                 f"SVTYPE=BND;WEIGHT={round(nclose_weight / N, 2)};STRANDS={strands};"
                 f"MATEID={sv_id_b}{merge_mate_id_str}\n"
             )
             fo.write(
-                f"{chr_b}\t{pos_b}\t{sv_id_b}\t{ref}\t{alt_b}\t60\tPASS\t"
+                f"{chr_b}\t{pos_b}\t{sv_id_b}\t{ref}\t{alt_b}\t{quality}\t{filter_str}\t"
                 f"SVTYPE=BND;WEIGHT={round(nclose_weight / N, 2)};STRANDS={strands};"
                 f"MATEID={sv_id_a}{merge_mate_id_str}\n"
             )
@@ -1261,19 +1268,21 @@ for i, nclose_a in enumerate(nclose_list):
                     conjoined_nclose_node_set.add(conjoined_nclose_node)
                     conjoined_track_data[conjoined_nclose_node] = (nclose2idx[nclose_a], nclose2idx[nclose_b])
 
+all_nclose = []
 significant_nclose = []
 for nclose in (nclose_set | conjoined_nclose_node_set):
     if nclose_cn_std[nclose2idx[nclose]] > 0.1 * N:
         st, ed = nclose
+        all_nclose.append(nclose)
         if exist_near_bnd(contig_data[st][CHR_NAM], contig_data[st][CHR_STR], contig_data[st][CHR_END]) or \
         exist_near_bnd(contig_data[ed][CHR_NAM], contig_data[ed][CHR_STR], contig_data[ed][CHR_END]):
             significant_nclose.append(nclose)
 
 significant_nclose = set(significant_nclose)
-logging.info(f"Total called breakends (INS, DEL, BND, INV) : {len(significant_nclose) + len(display_indel)}")
+logging.info(f"Total called breakends (INS, DEL, BND, INV) : {len(all_nclose) + len(display_indel)}")
 
 vcf_path = f"{PREFIX}/SV_call_result.vcf"
-pairs_to_vcf(significant_nclose, contig_data, chr_len, display_indel, vcf_path)
+pairs_to_vcf(all_nclose, contig_data, chr_len, display_indel, vcf_path)
 
 # Bed output for further analysis
 
