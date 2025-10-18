@@ -419,3 +419,5 @@ logging.info(f'Relative error : {error/b_norm:.4f}')
 
 np.save(f'{PREFIX}/weight.npy', final_weights_fullsize)
 np.save(f'{PREFIX}/predict_B.npy', predict_B)
+
+os.remove(f'{PREFIX}/matrix.h5')

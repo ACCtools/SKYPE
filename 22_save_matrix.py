@@ -894,3 +894,5 @@ with open(f"{PREFIX}/23_input.pkl", "wb") as f:
 
 with open(f"{PREFIX}/tar_chr_data.pkl", "wb") as f:
     pkl.dump(tar_chr_data, f)
+
+np.save(f'{PREFIX}/B.npy', B[ncm:])

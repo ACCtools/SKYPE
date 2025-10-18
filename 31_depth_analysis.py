@@ -662,18 +662,7 @@ telo_connected_node = extract_telomere_connect_contig(TELO_CONNECT_NODES_INFO_PA
 with open(f'{PREFIX}/path_data.pkl', 'rb') as f:
     path_list_dict = pkl.load(f)
 
-with h5py.File(f"{PREFIX}/matrix.h5", "r") as f:
-    dB = f["B"]
-    B = np.empty(dB.shape, dtype=dB.dtype)
-    dB.read_direct(B)
-
-    dBf = f["B_fail"]
-    B_fail = np.empty(dBf.shape, dtype=dBf.dtype)
-    dBf.read_direct(B_fail)
-
-    b_start_ind = int(f["B_depth_start"][()])
-
-B = np.hstack([B, B_fail])[b_start_ind:]
+B = np.load(f'{PREFIX}/B.npy')
 
 df = pd.read_csv(main_stat_loc, compression='gzip', comment='#', sep='\t', names=['chr', 'st', 'nd', 'length', 'covsite', 'totaldepth', 'cov', 'meandepth'])
 df = df.query('chr != "chrM"')
@@ -1360,5 +1349,4 @@ make_bed_output(weights)
 if use_julia_solver:
     make_bed_output(weights_cluster, '_cluster')
 
-os.remove(f'{PREFIX}/matrix.h5')
 logging.info("SKYPE pipeline end")
