@@ -4020,6 +4020,11 @@ def nclose_calc():
     logging.info(f"Added directed NClose node with coverage : {task_cnt[1]}")
     logging.info(f"Translocation NClose node with coverage : {task_cnt[2]}")
 
+    if args.exclude_nclose_contig_loc is not None:
+        with open(args.exclude_nclose_contig_loc, 'r') as f:
+            for l in f:
+                nclose_nodes.pop(l.strip(), None) # For benchmarking other tools
+
     nclose_node_count = 0
     with open(f"{PREFIX}/nclose_nodes_index.txt", "wt") as f: 
         for j in nclose_nodes:
@@ -4049,7 +4054,7 @@ def get_ori_ctg_name_data(PAF_FILE_PATH : list) -> list:
 
 def import_bed(bed_path: str) -> dict:
     bed_data_file = open(bed_path, "r")
-    chr_len: defaultdict[Any, list[Any]] = defaultdict(list)
+    chr_len = defaultdict(list)
     for curr_data in bed_data_file:
         curr_data = curr_data.split("\t")
         chr_len[curr_data[0]].append((int(curr_data[1]), int(curr_data[2])))
@@ -4089,6 +4094,8 @@ parser.add_argument("--verbose",
                     help="Enable index, paf output (Could be slow at HDD)", action='store_true')
 parser.add_argument("--test", 
                     help=argparse.SUPPRESS, action='store_true')
+parser.add_argument("--exclude_nclose_contig_loc", 
+                    help=argparse.SUPPRESS, default=None)                 
 parser.add_argument("--skip_bam_analysis", 
                     help="Skip bam analysis", action='store_true')
 

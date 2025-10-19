@@ -523,6 +523,7 @@ def write_vcf_header(fh, contig_lengths):
     fh.write('##INFO=<ID=END,Number=1,Type=Integer,Description="End position of SV">\n')
     fh.write('##INFO=<ID=SVLEN,Number=1,Type=Integer,Description="Length of the SV">\n')
     fh.write('##INFO=<ID=WEIGHT,Number=1,Type=String,Description="Depth for breakend">\n')
+    fh.write('##INFO=<ID=CTG_NAME,Number=1,Type=String,Description="Name of contig for supporting variant">\n')
     fh.write('##INFO=<ID=STRANDS,Number=1,Type=String,Description="Breakpoint strandedness">\n')
     fh.write('##INFO=<ID=MATEID,Number=1,Type=String,Description="ID of mate breakend">\n')
     fh.write('##INFO=<ID=MERGE_MATEID,Number=1,Type=String,Description="ID of merged breakend">\n')
@@ -573,18 +574,20 @@ def pairs_to_vcf(nclose_pairs, contig_data, contig_lengths, display_indel, out_v
             if nclose not in nclose_set:
                 i1, i2 = conjoined_track_data[nclose]
                 merge_mate_id_str = f';MERGE_MATEID=SKYPE.BND.{i1},SKYPE.BND.{i2}'
+                ctg_name = f"{a[CTG_NAM]},{b[CTG_NAM]}"
             else:
                 merge_mate_id_str = ''
+                ctg_name = a[CTG_NAM]
 
             fo.write(
                 f"{chr_a}\t{pos_a}\t{sv_id_a}\t{ref}\t{alt_a}\t{quality}\t{filter_str}\t"
-                f"SVTYPE=BND;WEIGHT={round(nclose_weight / N, 2)};STRANDS={strands};"
-                f"MATEID={sv_id_b}{merge_mate_id_str}\n"
+                f"SVTYPE=BND;WEIGHT={round(nclose_weight / N, 2)};CTG_NAME={ctg_name};"
+                f"STRANDS={strands};MATEID={sv_id_b}{merge_mate_id_str}\n"
             )
             fo.write(
                 f"{chr_b}\t{pos_b}\t{sv_id_b}\t{ref}\t{alt_b}\t{quality}\t{filter_str}\t"
-                f"SVTYPE=BND;WEIGHT={round(nclose_weight / N, 2)};STRANDS={strands};"
-                f"MATEID={sv_id_a}{merge_mate_id_str}\n"
+                f"SVTYPE=BND;WEIGHT={round(nclose_weight / N, 2)};CTG_NAME={ctg_name};"
+                f"STRANDS={strands};MATEID={sv_id_a}{merge_mate_id_str}\n"
             )
 
         # 3) indel 처리
@@ -593,7 +596,7 @@ def pairs_to_vcf(nclose_pairs, contig_data, contig_lengths, display_indel, out_v
         
         for chrom, indel_list in display_indel.items():
             for indel in indel_list:
-                indel_type, start, end, w, _ = indel
+                indel_type, start, end, w, _, ctg_name = indel
                 if indel_type == 'd':
                     sv_id = f"SKYPE.DEL.{del_dounter}"
                     svlen = -(end - start)
@@ -1186,9 +1189,9 @@ for i in range(rpll, len(weights)):
         if exist_near_bnd(chrom, pos1, pos1) or \
         exist_near_bnd(chrom, pos2, pos2):
             if indel_ind == 'front_jump':
-                display_indel[chrom].append(("d", pos1, pos2, v / N, chrom))
+                display_indel[chrom].append(("d", pos1, pos2, v / N, chrom, l[CTG_NAM]))
             if indel_ind == 'back_jump':
-                display_indel[chrom].append(("i", pos1, pos2, v / N, chrom))
+                display_indel[chrom].append(("i", pos1, pos2, v / N, chrom, l[CTG_NAM]))
 
 for i, nclose_a in enumerate(nclose_list):
     for nclose_b in nclose_list[i+1:]: 
