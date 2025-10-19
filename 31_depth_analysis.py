@@ -1358,4 +1358,5 @@ make_bed_output(weights)
 if use_julia_solver:
     make_bed_output(weights_cluster, '_cluster')
 
+os.remove(f'{PREFIX}/matrix.h5')
 logging.info("SKYPE pipeline end")
