@@ -527,7 +527,7 @@ def write_vcf_header(fh, contig_lengths):
     fh.write('##INFO=<ID=STRANDS,Number=1,Type=String,Description="Breakpoint strandedness">\n')
     fh.write('##INFO=<ID=MATEID,Number=1,Type=String,Description="ID of mate breakend">\n')
     fh.write('##INFO=<ID=MERGE_MATEID,Number=1,Type=String,Description="ID of merged breakend">\n')
-    fh.write('##FILTER=<ID=FAIL,Description="No significant depth difference between flanking regions"\n')
+    fh.write('##FILTER=<ID=FAIL,Description="No significant depth difference between flanking regions">\n')
     for chrom, length in contig_lengths.items():
         fh.write(f"##contig=<ID={chrom},length={length}>\n")
     fh.write("#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n")

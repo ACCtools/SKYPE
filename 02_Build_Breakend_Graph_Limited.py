@@ -4020,10 +4020,16 @@ def nclose_calc():
     logging.info(f"Added directed NClose node with coverage : {task_cnt[1]}")
     logging.info(f"Translocation NClose node with coverage : {task_cnt[2]}")
 
-    if args.exclude_nclose_contig_loc is not None:
-        with open(args.exclude_nclose_contig_loc, 'r') as f:
+    if args.exclude_nclose_list_loc is not None:
+        with open(args.exclude_nclose_list_loc, 'r') as f:
+            name_list = []
             for l in f:
-                nclose_nodes.pop(l.strip(), None) # For benchmarking other tools
+                name = l.strip()
+                if nclose_nodes.pop(name, None) is not None:
+                    name_list.append(name)
+            
+            if name_list:
+                logging.warning(f"Skipped contig : {', '.join(name_list)}")
 
     nclose_node_count = 0
     with open(f"{PREFIX}/nclose_nodes_index.txt", "wt") as f: 
@@ -4094,7 +4100,7 @@ parser.add_argument("--verbose",
                     help="Enable index, paf output (Could be slow at HDD)", action='store_true')
 parser.add_argument("--test", 
                     help=argparse.SUPPRESS, action='store_true')
-parser.add_argument("--exclude_nclose_contig_loc", 
+parser.add_argument("--exclude_nclose_list_loc", 
                     help=argparse.SUPPRESS, default=None)                 
 parser.add_argument("--skip_bam_analysis", 
                     help="Skip bam analysis", action='store_true')
@@ -4131,7 +4137,7 @@ ORIGNAL_PAF_LOC_LIST = ORIGNAL_PAF_LOC_LIST_
 
 if args.test:
     logging.warning("Test mode is enabled. This mode is for debugging purposes only. The results may be inaccurate and should not be trusted.")
-    CHR_CHANGE_LIMIT_ABS_MAX = 2
+    CHR_CHANGE_LIMIT_ABS_MAX = 1
 
 assert(len(PAF_FILE_PATH) == len(ORIGNAL_PAF_LOC_LIST))
 
