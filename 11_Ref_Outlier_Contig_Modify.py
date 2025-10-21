@@ -79,7 +79,7 @@ def find_chr_len(file_path : str) -> dict:
     return chr_len
 
 
-def calculate_single_contig_ref_ratio(contig_data : list) -> float:
+def calculate_single_contig_ref_ratio(contig_data : list):
     total_ref_len = 0
     ref_st_ed = 0
     if contig_data[0][CTG_DIR] == '+':

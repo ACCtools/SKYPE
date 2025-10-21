@@ -127,6 +127,7 @@ MIN_PATH_REF_LEN = 5 * M
 
 TYPE2_CHUKJI_AS_TYPE4 = 5 * M
 TYPE2_CONJOIN_COMPRESS_LIMIT = 1 * M
+TYPE2_DIST_FLIP_THRESHOLD = 100 * K
 
 def import_data(file_path : str) -> list :
     contig_data = []
@@ -3641,42 +3642,72 @@ def similar_centromere_nclose_cluster(nclose_dict : dict, contig_data : list, re
 
     return centromere_nclose_master, slave_dict
 
-
-def conjoined_type4(contig_data : list, type2_nclose_node : dict):
+def conjoined_type4(contig_data, type2_nclose_node):
+    """
+    Detect type4 insertions/deletions by pairing type2 nodes within each chromosome.
+    If a contig's internal span >= 100 kb, also test its flipped orientation in a nested loop.
+    """
     conjoined_type4_ins = set()
     conjoined_type4_del = set()
 
+    def flip_dir(ctg):
+        flipped = list(ctg)
+        flipped[CTG_DIR] = '+' if ctg[CTG_DIR] == '-' else '-'
+        return flipped
+
     for chrom, type2_list in type2_nclose_node.items():
-        for i in range(len(type2_list)):
-            for j in range(i+1, len(type2_list)):
+        L = len(type2_list)
+        for i in range(L):
+            for j in range(i + 1, L):
                 t2n1 = type2_list[i]
                 t2n2 = type2_list[j]
-                contig_1_front = contig_data[t2n1[0]]
-                contig_1_back = contig_data[t2n1[1]]
-                contig_2_front = contig_data[t2n2[0]]
-                contig_2_back = contig_data[t2n2[1]]
-                if contig_1_back[CTG_DIR] == contig_2_front[CTG_DIR]:
-                    dist_for = distance_checker(contig_1_back, contig_2_front)
-                    dist_bak = distance_checker(contig_1_front, contig_2_back)
-                    if dist_for < TYPE2_CONJOIN_COMPRESS_LIMIT:
-                        ratio, total_ref_len = calculate_single_contig_ref_ratio([contig_data[t2n1[0]], contig_data[t2n2[1]]])
-                        estimated_ref_len = total_ref_len * ratio
-                        if abs(ratio - 1) > BND_CONTIG_BOUND and estimated_ref_len > TYPE2_CHUKJI_AS_TYPE4:
-                            if ratio < 0 :
-                                conjoined_type4_ins.add((*t2n1, *t2n2))
-                            else:
-                                conjoined_type4_del.add((*t2n1, *t2n2))
 
-                    if dist_bak < TYPE2_CONJOIN_COMPRESS_LIMIT:
-                        ratio, total_ref_len = calculate_single_contig_ref_ratio([contig_data[t2n2[0]], contig_data[t2n1[1]]])
-                        estimated_ref_len = total_ref_len * ratio
-                        if abs(ratio - 1) > BND_CONTIG_BOUND and estimated_ref_len > TYPE2_CHUKJI_AS_TYPE4:
-                            if ratio < 0 :
-                                conjoined_type4_ins.add((*t2n2, *t2n1))
-                            else:
-                                conjoined_type4_del.add((*t2n2, *t2n1))
-    
+                c1f = contig_data[t2n1[0]]
+                c1b = contig_data[t2n1[1]]
+                c2f = contig_data[t2n2[0]]
+                c2b = contig_data[t2n2[1]]
+
+                # Internal spans; switch to CHR_END if that's your convention
+                len_c1 = abs(c1f[CHR_STR] - c1b[CHR_STR])
+                len_c2 = abs(c2f[CHR_STR] - c2b[CHR_STR])
+
+                # Candidate orientations per contig (original, and flipped if span >= threshold)
+                c1_flips = [(c1f, c1b)]
+                c2_flips = [(c2f, c2b)]
+                if len_c1 >= TYPE2_DIST_FLIP_THRESHOLD:
+                    c1_flips.append((flip_dir(c1b), flip_dir(c1f)))
+                if len_c2 >= TYPE2_DIST_FLIP_THRESHOLD:
+                    c2_flips.append((flip_dir(c2b), flip_dir(c2f)))
+
+                # Test all combinations (original/flip × original/flip)
+                for c1f_use, c1b_use in c1_flips:
+                    for c2f_use, c2b_use in c2_flips:
+                        # Forward direction
+                        if c1b_use[CTG_DIR] == c2f_use[CTG_DIR]:
+                            dist_for = distance_checker(c1b_use, c2f_use)
+                            if dist_for is not None and dist_for < TYPE2_CONJOIN_COMPRESS_LIMIT:
+                                ratio, total_ref_len = calculate_single_contig_ref_ratio([c1f_use, c2b_use])
+                                abs_estimated = total_ref_len * abs(ratio)
+                                if abs(ratio - 1) > BND_CONTIG_BOUND and abs_estimated > TYPE2_CHUKJI_AS_TYPE4:
+                                    if ratio < 0:
+                                        conjoined_type4_ins.add((*t2n1, *t2n2))
+                                    else:
+                                        conjoined_type4_del.add((*t2n1, *t2n2))
+
+                        # Backward direction (covers the j→i ordering that the i<j loop skips)
+                        if c2b_use[CTG_DIR] == c1f_use[CTG_DIR]:
+                            dist_bak = distance_checker(c2b_use, c1f_use)
+                            if dist_bak is not None and dist_bak < TYPE2_CONJOIN_COMPRESS_LIMIT:
+                                ratio, total_ref_len = calculate_single_contig_ref_ratio([c2f_use, c1b_use])
+                                abs_estimated = total_ref_len * abs(ratio)
+                                if abs(ratio - 1) > BND_CONTIG_BOUND and abs_estimated > TYPE2_CHUKJI_AS_TYPE4:
+                                    if ratio < 0:
+                                        conjoined_type4_ins.add((*t2n2, *t2n1))
+                                    else:
+                                        conjoined_type4_del.add((*t2n2, *t2n1))
+
     return conjoined_type4_ins, conjoined_type4_del
+
 
 def nclose_calc():
     repeat_censat_data = import_censat_repeat_data(CENSAT_PATH)
@@ -3723,6 +3754,7 @@ def nclose_calc():
         for s, e in nclose_nodes[j]:
             curr_contig_first_fragment = contig_data[s]
             curr_contig_end_fragment = contig_data[e]
+
             if curr_contig_first_fragment[CHR_NAM] == curr_contig_end_fragment[CHR_NAM]:
                 type2_nclose_node[curr_contig_first_fragment[CHR_NAM]].append((s, e))
                 if curr_contig_first_fragment[CTG_DIR] == '+':
@@ -4107,7 +4139,7 @@ parser.add_argument("--skip_bam_analysis",
 
 args = parser.parse_args()
 
-# t = "02_Build_Breakend_Graph_Limited.py /home/hyunwoo/ACCtools-pipeline/90_skype_run/PC-3/20_alignasm/PC-3.ctg.aln.paf public_data/chm13v2.0.fa.fai public_data/chm13v2.0_telomere.bed public_data/chm13v2.0_repeat.m.bed public_data/chm13v2.0_censat_v2.1.m.bed /home/hyunwoo/ACCtools-pipeline/90_skype_run/PC-3/01_depth/PC-3_normalized.win.stat.gz 30_skype_pipe/PC-3_10_40_46 /home/hyunwoo/ACCtools-pipeline/90_skype_run/PC-3/01_depth/PC-3.bam --alt /home/hyunwoo/ACCtools-pipeline/90_skype_run/PC-3/20_alignasm/PC-3.utg.aln.paf --orignal_paf_loc /home/hyunwoo/ACCtools-pipeline/90_skype_run/PC-3/20_alignasm/PC-3.ctg.paf /home/hyunwoo/ACCtools-pipeline/90_skype_run/PC-3/20_alignasm/PC-3.utg.paf --test -t 128"
+# t = "02_Build_Breakend_Graph_Limited.py /home/hyunwoo/ACCtools-pipeline/90_skype_run/H1437/20_alignasm/H1437.ctg.aln.paf public_data/chm13v2.0.fa.fai public_data/chm13v2.0_telomere.bed public_data/chm13v2.0_repeat.m.bed public_data/chm13v2.0_censat_v2.1.m.bed /home/hyunwoo/ACCtools-pipeline/90_skype_run/H1437/01_depth/H1437_normalized.win.stat.gz 30_skype_pipe/H1437_23_00_00 /home/hyunwoo/ACCtools-pipeline/90_skype_run/H1437/01_depth/H1437.bam --alt /home/hyunwoo/ACCtools-pipeline/90_skype_run/H1437/20_alignasm/H1437.utg.aln.paf --orignal_paf_loc /home/hyunwoo/ACCtools-pipeline/90_skype_run/H1437/20_alignasm/H1437.ctg.paf /home/hyunwoo/ACCtools-pipeline/90_skype_run/H1437/20_alignasm/H1437.utg.paf --test --skip_bam_analysis -t 128"
 # args = parser.parse_args(t.split()[1:])
 
 PREFIX = args.prefix
@@ -4137,7 +4169,7 @@ ORIGNAL_PAF_LOC_LIST = ORIGNAL_PAF_LOC_LIST_
 
 if args.test:
     logging.warning("Test mode is enabled. This mode is for debugging purposes only. The results may be inaccurate and should not be trusted.")
-    CHR_CHANGE_LIMIT_ABS_MAX = 1
+    CHR_CHANGE_LIMIT_ABS_MAX = 2
 
 assert(len(PAF_FILE_PATH) == len(ORIGNAL_PAF_LOC_LIST))
 
