@@ -4186,7 +4186,7 @@ ORIGNAL_PAF_LOC_LIST = ORIGNAL_PAF_LOC_LIST_
 
 if args.test:
     logging.warning("Test mode is enabled. This mode is for debugging purposes only. The results may be inaccurate and should not be trusted.")
-    CHR_CHANGE_LIMIT_ABS_MAX = 1
+    CHR_CHANGE_LIMIT_ABS_MAX = 2
 
 assert(len(PAF_FILE_PATH) == len(ORIGNAL_PAF_LOC_LIST))
 
