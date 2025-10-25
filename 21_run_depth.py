@@ -1416,17 +1416,24 @@ with open(f'{PREFIX}/path_data.pkl', 'rb') as f:
     path_list_dict = pkl.load(f)
 chr_chr_folder_path = path_list_dict.keys()
 
-key_ord_list = []
-index_data_list = []
 with ProcessPoolExecutor(max_workers=THREAD) as executor:
-    futures = [executor.submit(get_key_from_index_folder, folder_path) for folder_path in chr_chr_folder_path]
+    futures = {executor.submit(get_key_from_index_folder, folder_path): folder_path
+               for folder_path in chr_chr_folder_path}
 
+    results = []
     for future in tqdm(as_completed(futures), total=len(futures), desc='Analyse index to split paf',
                        disable=not sys.stdout.isatty() and not args.progress):
         k, idd = future.result()
+        folder_path = futures[future]
+        results.append((folder_path, k, idd))
 
-        key_ord_list.append(k)
-        index_data_list.extend(idd)
+results.sort(key=lambda x: x[0])
+
+key_ord_list = []
+index_data_list = []
+for _, k, idd in results:
+    key_ord_list.append(k)
+    index_data_list.extend(idd)
 
 for _, key_list in index_data_list:
     key_ind_data = []

@@ -3662,26 +3662,30 @@ def conjoined_type4(contig_data, type2_nclose_node):
                 t2n1 = type2_list[i]
                 t2n2 = type2_list[j]
 
-                c1f = contig_data[t2n1[0]]
-                c1b = contig_data[t2n1[1]]
-                c2f = contig_data[t2n2[0]]
-                c2b = contig_data[t2n2[1]]
+                c1fi, c1bi = t2n1
+                c2fi, c2bi = t2n2
+
+                c1f = contig_data[c1fi]
+                c1b = contig_data[c1bi]
+                c2f = contig_data[c2fi]
+                c2b = contig_data[c2bi]
 
                 # Internal spans; switch to CHR_END if that's your convention
                 len_c1 = abs(c1f[CHR_STR] - c1b[CHR_STR])
                 len_c2 = abs(c2f[CHR_STR] - c2b[CHR_STR])
 
                 # Candidate orientations per contig (original, and flipped if span >= threshold)
-                c1_flips = [(c1f, c1b)]
-                c2_flips = [(c2f, c2b)]
+                c1_flips = [(c1f, c1fi, c1b, c1bi)]
+                c2_flips = [(c2f, c2fi, c2b, c2bi)]
+
                 if len_c1 >= TYPE2_DIST_FLIP_THRESHOLD:
-                    c1_flips.append((flip_dir(c1b), flip_dir(c1f)))
+                    c1_flips.append((flip_dir(c1b), c1bi, flip_dir(c1f), c1fi))
                 if len_c2 >= TYPE2_DIST_FLIP_THRESHOLD:
-                    c2_flips.append((flip_dir(c2b), flip_dir(c2f)))
+                    c2_flips.append((flip_dir(c2b), c2bi, flip_dir(c2f), c2fi))
 
                 # Test all combinations (original/flip × original/flip)
-                for c1f_use, c1b_use in c1_flips:
-                    for c2f_use, c2b_use in c2_flips:
+                for c1f_use, c1fi_, c1b_use, c1bi_ in c1_flips:
+                    for c2f_use, c2fi_, c2b_use, c2bi_ in c2_flips:
                         # Forward direction
                         if c1b_use[CTG_DIR] == c2f_use[CTG_DIR]:
                             dist_for = distance_checker(c1b_use, c2f_use)
@@ -3689,22 +3693,22 @@ def conjoined_type4(contig_data, type2_nclose_node):
                                 ratio, total_ref_len = calculate_single_contig_ref_ratio([c1f_use, c2b_use])
                                 abs_estimated = total_ref_len * abs(ratio)
                                 if abs(ratio - 1) > BND_CONTIG_BOUND and abs_estimated > TYPE2_CHUKJI_AS_TYPE4:
+                                    # Insertion
                                     if ratio < 0:
-                                        conjoined_type4_ins.add((*t2n1, *t2n2))
+                                        if contig_data[c1fi_][CHR_STR] > contig_data[c2bi_][CHR_STR]:
+                                            conjoined_type4_ins.add((c1fi_, c1bi_, c2fi_, c2bi_))
+                                        else:
+                                            conjoined_type4_ins.add((c2bi_, c2fi_, c1bi_, c1fi_))
+                                    # Deletion
                                     else:
-                                        conjoined_type4_del.add((*t2n1, *t2n2))
+                                        if contig_data[c1fi_][CHR_STR] < contig_data[c2bi_][CHR_STR]:
+                                            conjoined_type4_del.add((c1fi_, c1bi_, c2fi_, c2bi_))
+                                        else:
+                                            conjoined_type4_del.add((c2bi_, c2fi_, c1bi_, c1fi_))
 
-                        # Backward direction (covers the j→i ordering that the i<j loop skips)
-                        if c2b_use[CTG_DIR] == c1f_use[CTG_DIR]:
-                            dist_bak = distance_checker(c2b_use, c1f_use)
-                            if dist_bak is not None and dist_bak < TYPE2_CONJOIN_COMPRESS_LIMIT:
-                                ratio, total_ref_len = calculate_single_contig_ref_ratio([c2f_use, c1b_use])
-                                abs_estimated = total_ref_len * abs(ratio)
-                                if abs(ratio - 1) > BND_CONTIG_BOUND and abs_estimated > TYPE2_CHUKJI_AS_TYPE4:
-                                    if ratio < 0:
-                                        conjoined_type4_ins.add((*t2n2, *t2n1))
-                                    else:
-                                        conjoined_type4_del.add((*t2n2, *t2n1))
+
+    conjoined_type4_ins = sorted(conjoined_type4_ins)
+    conjoined_type4_del = sorted(conjoined_type4_del)
 
     return conjoined_type4_ins, conjoined_type4_del
 
@@ -4054,14 +4058,27 @@ def nclose_calc():
 
     if args.exclude_nclose_list_loc is not None:
         with open(args.exclude_nclose_list_loc, 'r') as f:
+            indel_exclude_idx_set = set()
             name_list = []
+
             for l in f:
-                name = l.strip()
-                if nclose_nodes.pop(name, None) is not None:
-                    name_list.append(name)
+                name: str = l.strip()
+                if name.startswith('INDEL_INDEX_'):
+                    indel_idx = int(name.removeprefix('INDEL_INDEX_'))
+                    indel_exclude_idx_set.add(indel_idx)
+                else:
+                    if nclose_nodes.pop(name, None) is not None:
+                        name_list.append(name)
             
             if name_list:
                 logging.warning(f"Skipped contig : {', '.join(name_list)}")
+            if len(indel_exclude_idx_set) > 0:
+                logging.warning(f"Skipped indel index : {', '.join(map(str, indel_exclude_idx_set))}")
+    else:
+        indel_exclude_idx_set = set()
+
+    with open(f'{PREFIX}/indel_exclude_idx_set.pkl', 'wb') as f:
+        pkl.dump(indel_exclude_idx_set, f)
 
     nclose_node_count = 0
     with open(f"{PREFIX}/nclose_nodes_index.txt", "wt") as f: 
@@ -4169,7 +4186,7 @@ ORIGNAL_PAF_LOC_LIST = ORIGNAL_PAF_LOC_LIST_
 
 if args.test:
     logging.warning("Test mode is enabled. This mode is for debugging purposes only. The results may be inaccurate and should not be trusted.")
-    CHR_CHANGE_LIMIT_ABS_MAX = 2
+    CHR_CHANGE_LIMIT_ABS_MAX = 1
 
 assert(len(PAF_FILE_PATH) == len(ORIGNAL_PAF_LOC_LIST))
 

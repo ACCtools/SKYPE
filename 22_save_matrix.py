@@ -395,7 +395,6 @@ nclose_nodes = extract_nclose_node(NCLOSE_FILE_PATH)
 with open(f'{PREFIX}/path_data.pkl', 'rb') as f:
     path_list_dict = pkl.load(f)
 
-
 if NCLOSE_WEIGHT_USE:
     try:
         with open(f'{PREFIX}/nclose2cov.pkl', 'rb') as f:
@@ -766,6 +765,11 @@ for path, key_int_list in tqdm(paf_ans_list, desc='Recover depth from separated 
         tar_def_path_ind_dict[path_rel] = ncnt
     ncnt += 1
 
+with open(f'{PREFIX}/indel_exclude_idx_set.pkl', 'rb') as f:
+    indel_exclude_idx_set = pkl.load( f)
+tv_empty = np.zeros(len(chr_filt_st_list) + len(chr_no_filt_st_list), dtype=np.float32)
+
+indel_idx = 0
 # Process forward-directed outlier contigs
 tmp_n.fill(0)
 for i in tqdm(range(1, fclen // 4 + 1), desc='Parse coverage from forward-directed outlier contig gz files',
@@ -789,13 +793,19 @@ for i in tqdm(range(1, fclen // 4 + 1), desc='Parse coverage from forward-direct
         else:
             A_arr[:ncm, ncnt] = tmp_n
 
-    if use_julia_solver:
-        A_arr[ncnt, ncm:] = ov - bv
+    if indel_idx in indel_exclude_idx_set:
+        tv = tv_empty
     else:
-        A_arr[ncm:, ncnt] = ov - bv
+        tv = ov - bv
+    
+    if use_julia_solver:
+        A_arr[ncnt, ncm:] = tv
+    else:
+        A_arr[ncm:, ncnt] = tv
         
     path_nclose_dict_set[ncnt] = set()
     ncnt += 1
+    indel_idx += 1
     
 init_cols = [tar_def_path_ind_dict[i] for i in tar_chr_data.values()]
 
@@ -830,14 +840,20 @@ for i in tqdm(range(1, bclen // 4 + 1), desc='Parse coverage from backward-direc
             A_arr[ncnt, :ncm] = tmp_n
         else:
             A_arr[:ncm, ncnt] = tmp_n
-            
-    if use_julia_solver:
-        A_arr[ncnt, ncm:] = ov + bv
+    
+    if indel_idx in indel_exclude_idx_set:
+        tv = tv_empty
     else:
-        A_arr[ncm:, ncnt] = ov + bv
+        tv = ov + bv
+    
+    if use_julia_solver:
+        A_arr[ncnt, ncm:] = tv
+    else:
+        A_arr[ncm:, ncnt] = tv
         
     path_nclose_dict_set[ncnt] = set()
     ncnt += 1
+    indel_idx += 1
 
 for i in range(1, eclen // 2 + 1):
     ov_loc = ecdna_contig_path + f"{i}.win.stat.gz"

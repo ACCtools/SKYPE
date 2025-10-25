@@ -596,7 +596,7 @@ def pairs_to_vcf(nclose_pairs, contig_data, contig_lengths, display_indel, out_v
         
         for chrom, indel_list in display_indel.items():
             for indel in indel_list:
-                indel_type, start, end, w, _, ctg_name = indel
+                indel_type, start, end, w, _, indel_idx = indel
                 if indel_type == 'd':
                     sv_id = f"SKYPE.DEL.{del_dounter}"
                     svlen = -(end - start)
@@ -614,7 +614,7 @@ def pairs_to_vcf(nclose_pairs, contig_data, contig_lengths, display_indel, out_v
 
                 fo.write(
                     f"{chrom}\t{start}\t{sv_id}\tN\t{alt}\t60\tPASS\t"
-                    f"SVTYPE={alt[1:-1]};END={end};SVLEN={svlen};WEIGHT={round(w, 2)}\n"
+                    f"SVTYPE={alt[1:-1]};END={end};SVLEN={svlen};WEIGHT={round(w, 2)};CTG_NAME=INDEL_INDEX_{indel_idx}\n"
                 )
 
 parser = argparse.ArgumentParser(description="SKYPE depth analysis")
@@ -1189,9 +1189,9 @@ for i in range(rpll, len(weights)):
         if exist_near_bnd(chrom, pos1, pos1) or \
         exist_near_bnd(chrom, pos2, pos2):
             if indel_ind == 'front_jump':
-                display_indel[chrom].append(("d", pos1, pos2, v / N, chrom, l[CTG_NAM]))
+                display_indel[chrom].append(("d", pos1, pos2, v / N, chrom, i - rpll))
             if indel_ind == 'back_jump':
-                display_indel[chrom].append(("i", pos1, pos2, v / N, chrom, l[CTG_NAM]))
+                display_indel[chrom].append(("i", pos1, pos2, v / N, chrom, i - rpll))
 
 for i, nclose_a in enumerate(nclose_list):
     for nclose_b in nclose_list[i+1:]: 
@@ -1278,6 +1278,7 @@ for nclose in (nclose_set | conjoined_nclose_node_set):
     if nclose_cn_std[nclose2idx[nclose]] > 0.1 * N:
         st, ed = nclose
         all_nclose.append(nclose)
+
         if exist_near_bnd(contig_data[st][CHR_NAM], contig_data[st][CHR_STR], contig_data[st][CHR_END]) or \
         exist_near_bnd(contig_data[ed][CHR_NAM], contig_data[ed][CHR_STR], contig_data[ed][CHR_END]):
             significant_nclose.append(nclose)
