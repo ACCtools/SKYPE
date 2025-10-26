@@ -1156,9 +1156,6 @@ for i, ctr in enumerate(path_nclose_usage):
     for j, v in ctr.items():
         nclose_cn_std[j] += v*weights[i]
 
-conjoined_nclose_node_set = set()
-conjoined_track_data = dict()
-
 type1_nclose_node = set()
 type2_nclose_node = set()
 
@@ -1193,6 +1190,10 @@ for i in range(rpll, len(weights)):
             if indel_ind == 'back_jump':
                 display_indel[chrom].append(("i", pos1, pos2, v / N, chrom, i - rpll))
 
+conjoined_nclose_node_set = set()
+conjoined_track_data = dict()
+
+"""
 for i, nclose_a in enumerate(nclose_list):
     for nclose_b in nclose_list[i+1:]: 
         nclose_cn_a = nclose_cn_std[nclose2idx[nclose_a]]
@@ -1271,6 +1272,7 @@ for i, nclose_a in enumerate(nclose_list):
 
                     conjoined_nclose_node_set.add(conjoined_nclose_node)
                     conjoined_track_data[conjoined_nclose_node] = (nclose2idx[nclose_a], nclose2idx[nclose_b])
+"""
 
 all_nclose = []
 significant_nclose = []
