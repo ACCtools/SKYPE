@@ -64,14 +64,6 @@ TYPE4_CLUSTER_SIZE = 10 * M
 def get_relative_path(p):
     return tuple(p.split('/')[-3:])
 
-def extract_nclose_node(nclose_path: str) -> list:
-    nclose_list = []
-    with open(nclose_path, "r") as f:
-        for line in f:
-            line = line.split()
-            nclose_list.append((int(line[1]), int(line[2])))
-    return nclose_list
-
 def import_ppc_data(file_path : str) -> list :
     paf_file = open(file_path, "r")
     contig_data = []
@@ -406,7 +398,6 @@ if core_num is None:
 else:
     THREAD = min(int(THREAD), core_num)
 
-nclose_nodes = set(extract_nclose_node(NCLOSE_FILE_PATH))
 ppc_data = import_ppc_data(PREPROCESSED_PAF_FILE_PATH)
 
 with open(f'{PREFIX}/path_data.pkl', 'rb') as f:

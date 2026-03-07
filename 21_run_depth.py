@@ -1217,15 +1217,6 @@ def extract_telomere_connect_contig(telo_info_path : str) -> list:
     
     return telomere_connect_contig
 
-def extract_nclose_node(nclose_path: str) -> list:
-    nclose_list = []
-    with open(nclose_path, "r") as f:
-        for line in f:
-            line = line.split()
-            nclose_list.append(int(line[1]))
-            nclose_list.append(int(line[2]))
-    return nclose_list
-
 def connect_nclose_telo(contig_data : list, using_node : list, type_3_graph : dict, nclose_nodes : list, telo_nodes : list) -> dict:
     # Telomere
     telo_nodes = telo_nodes + nclose_nodes
@@ -1349,7 +1340,14 @@ using_node = find_using_node(contig_data, link_label)
 
 bnd_contig = extract_bnd_contig(contig_data)
 telo_contig = extract_telomere_connect_contig(TELO_CONNECT_NODES_INFO_PATH)
-nclose_nodes = extract_nclose_node(NCLOSE_FILE_PATH)
+
+with open(f'{PREFIX}/nclose_chunk_data.pkl', 'rb') as f:
+    nclose_nodes_pkl, _, _ = pkl.load(f)
+
+nclose_nodes = []
+for vl in nclose_nodes_pkl.values():
+    for v in vl:
+        nclose_nodes.extend(list(v))
 
 bnd_connected_graph = connect_nclose_telo(contig_data, using_node, type_3_graph, nclose_nodes, telo_contig)
 

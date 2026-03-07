@@ -96,14 +96,6 @@ def import_index_cnt(file_path : str) -> list:
 
     return path_list_dict[key][cnt][1]
 
-def extract_nclose_node(nclose_path: str) -> list:
-    nclose_list = []
-    with open(nclose_path, "r") as f:
-        for line in f:
-            line = line.split()
-            nclose_list.append((int(line[1]), int(line[2])))
-    return nclose_list
-
 def extract_groups(lst):
     if not lst:
         return []
@@ -390,7 +382,14 @@ df = df.query('chr != "chrM"')
 
 contig_data = import_data2(PREPROCESSED_PAF_FILE_PATH)
 telo_connected_node = extract_telomere_connect_contig(TELO_CONNECT_NODES_INFO_PATH)
-nclose_nodes = extract_nclose_node(NCLOSE_FILE_PATH)
+
+with open(f'{PREFIX}/nclose_chunk_data.pkl', 'rb') as f:
+    nclose_nodes_pkl, _, _ = pkl.load(f)
+
+nclose_set = set()
+for vl in nclose_nodes_pkl.values():
+    for v in vl:
+        nclose_set.add(v)
 
 with open(f'{PREFIX}/path_data.pkl', 'rb') as f:
     path_list_dict = pkl.load(f)
@@ -406,9 +405,6 @@ if NCLOSE_WEIGHT_USE:
         NCLOSE_WEIGHT_USE = False
 else:
     nclose2cov = {}
-
-nclose_path = f"{PREFIX}/nclose_nodes_index.txt"
-nclose_set = extract_nclose_node(nclose_path)
 
 ncm = 0
 nclose2int = dict()

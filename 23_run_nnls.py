@@ -191,7 +191,7 @@ if use_julia_solver:
     for k, v in nclose_total_weight_dict.items():
         st, ed = k
         # depth check, type 1 only
-        if v > 0.2 * meandepth \
+        if v >= 0 * meandepth \
         and ppc_contig_data[st][CHR_NAM] != ppc_contig_data[ed][CHR_NAM]:
             # Check if at least one of endpoint have non-diverse depth & not a virtual censat contig
             if (not exist_near_bnd(ppc_contig_data[st][CHR_NAM], ppc_contig_data[st][CHR_STR], ppc_contig_data[st][CHR_END]) or \
@@ -295,7 +295,7 @@ if use_julia_solver:
             st, ed = k
             
             # depth check, type 1 only
-            if v > 0.2 * meandepth \
+            if v >= 0 * meandepth \
             and ppc_contig_data[st][CHR_NAM] != ppc_contig_data[ed][CHR_NAM] \
             and ppc_contig_data[st][CHR_NAM] not in fail_chrom_list \
             and ppc_contig_data[ed][CHR_NAM] not in fail_chrom_list:

@@ -808,17 +808,14 @@ amplitude = np.std(noise_array)
 chr_len = find_chr_len(CHROMOSOME_INFO_FILE_PATH)
 del chr_len['chrM']
 
-def extract_nclose_node(nclose_path: str) -> list:
-        nclose_list = []
-        with open(nclose_path, "r") as f:
-            for line in f:
-                line = line.split()
-                nclose_list.append((int(line[1]), int(line[2])))
-        return nclose_list
+with open(f'{PREFIX}/nclose_chunk_data.pkl', 'rb') as f:
+    nclose_nodes_pkl, _, _ = pkl.load(f)
 
-NCLOSE_FILE_PATH = f"{args.prefix}/nclose_nodes_index.txt"
+nclose_list = []
+for vl in nclose_nodes_pkl.values():
+    for v in vl:
+        nclose_list.append(v)
 
-nclose_list = extract_nclose_node(NCLOSE_FILE_PATH)
 nclose_set = set(nclose_list)
 
 nclose_idx = len(nclose_list)
@@ -973,33 +970,27 @@ def draw_circos_plot(weights, fig_prefix=''):
         if v > BREAKEND_REMARKABLE_CN:
             bnd_cn_data.append([(chr_nam1, pos1), (chr_nam2, pos2), v, virtual_flag])
 
-    display_indel = defaultdict(list)
-
     indel_val_list = []
     non_type4_cnt = len(bnd_cn_data)
     rpll = len(raw_path_list)
     for i in range(rpll, len(weights)):
         paf_loc = tot_loc_list[i]
         indel_ind = paf_loc.split('/')[-2]
-        with open(tot_loc_list[i], "r") as f:
-            l = f.readline()
-            l = l.rstrip()
-            l = l.split("\t")
-            chr_nam1 = l[CHR_NAM]
-            chr_nam2 = l[CHR_NAM]
-            pos1 = int(l[CHR_STR])
-            pos2 = int(l[CHR_END])
         v = weights[i]
-        chrom = chr_nam1
-        if abs(pos1-pos2) > TYPE2_FLANKING_LENGTH and v > NCLOSE_SIM_DIFF_THRESHOLD:
-            if exist_near_bnd(chrom, pos1, pos1) or \
-            exist_near_bnd(chrom, pos2, pos2):
-                if indel_ind == 'front_jump':
-                    display_indel[chrom].append(("d", pos1, pos2, v/meandepth * 2, chrom))
-                if indel_ind == 'back_jump':
-                    display_indel[chrom].append(("i", pos1, pos2, v/meandepth * 2, chrom))
+
+        if v > BREAKEND_REMARKABLE_CN:
+            with open(tot_loc_list[i], "r") as f:
+                l = f.readline()
+                l = l.rstrip()
+                l = l.split("\t")
+                chr_nam1 = l[CHR_NAM]
+                chr_nam2 = l[CHR_NAM]
+                pos1 = int(l[CHR_STR])
+                pos2 = int(l[CHR_END])
+            
+            bnd_cn_data.append([(chr_nam1, pos1), (chr_nam2, pos2), v, False])
+        
         indel_val_list.append(v / meandepth * 2)
-        bnd_cn_data.append([(chr_nam1, pos1), (chr_nam2, pos2), v, False])
 
     a = sorted(list(telo_cn.items()), key = lambda t:t[1])
     telo_zorder_dict = {}
@@ -1012,9 +1003,6 @@ def draw_circos_plot(weights, fig_prefix=''):
 
     cmap = sns.color_palette("rocket_r", as_cmap=True)
 
-    # bnd_cn_data = [[('chr1', 60 * M), ('chr2', 30 * M), 4.6, False],
-    #                [('chr13', 10 * M), ('chr21', 25 * M), 21.6, False],
-    #                [('chr1', 125 * M), ('chr9', 60 * M), 13.6, True]]
     bnd_cn_data = sorted(bnd_cn_data, key=lambda t: t[2])
 
     for i, (bnd_loc1, bnd_loc2, cn, is_vir) in enumerate(bnd_cn_data):

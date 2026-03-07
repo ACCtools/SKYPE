@@ -512,15 +512,6 @@ def mark_overlapping_texts_with_arrows(ax, texts, min_gap=5):
                         xytext=(5, original_y), textcoords='data',
                         arrowprops=dict(arrowstyle="-|>", color="black", lw=0.5))
 
-def extract_nclose_node(nclose_path: str) -> list:
-    nclose_list = []
-    with open(nclose_path, "r") as f:
-        for line in f:
-            line = line.split()
-            nclose_list.append((int(line[1]), int(line[2])))
-    return nclose_list
-
-
 def parse_chromosome_labels(s):
     """
     Parse '...<f|b>_...<f|b>' into a canonical tuple:
@@ -973,7 +964,6 @@ TELO_CONNECT_NODES_INFO_PATH = PREFIX+"/telomere_connected_list.txt"
 output_folder = f'{PREFIX}/21_pat_depth'
 NCLOSE_FILE_PATH = f"{args.prefix}/nclose_nodes_index.txt"
 
-nclose_nodes = set(extract_nclose_node(NCLOSE_FILE_PATH))
 ppc_data = import_ppc_data(PREPROCESSED_PAF_FILE_PATH)
 
 with open(f'{PREFIX}/path_data.pkl', 'rb') as f:

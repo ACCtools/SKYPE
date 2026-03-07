@@ -4,6 +4,8 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from skype_utils import *
 
+import re
+import glob
 import shutil
 import argparse
 import subprocess
@@ -22,10 +24,11 @@ import graph_tool
 import networkx as nx
 
 from collections import defaultdict, Counter
-
+from scipy.stats import mannwhitneyu
 from multiprocessing import Pool
 from tqdm import tqdm
 from functools import partial
+
 import logging
 
 logging.basicConfig(
@@ -128,6 +131,492 @@ MIN_PATH_REF_LEN = 5 * M
 TYPE2_CHUKJI_AS_TYPE4 = 5 * M
 TYPE2_CONJOIN_COMPRESS_LIMIT = 1 * M
 TYPE2_DIST_FLIP_THRESHOLD = 100 * K
+
+FILTER_P_VALUE = 1e-2
+
+### Add nclose filtering by Mann–Whitney U test using boundary of nclose
+def get_contig_pair(i, cd):
+    nclose_loc = i == 0
+    nclose_dir = '+' == cd[CTG_DIR]
+
+    chr_name = cd[CHR_NAM]
+    chr_cord = cd[CHR_STR if nclose_dir ^ nclose_loc else CHR_END]
+
+    return chr_name, chr_cord
+
+def get_chr_cord_dict(contig_data, nclose_nodes, type4_nclose_nodes, st_compress, ed_compress):
+    chr_cord_dict = defaultdict(list)
+    
+    for ctg_name, nclose_idx_pair_list in nclose_nodes.items():
+        for j, nclose_idx_pair in enumerate(nclose_idx_pair_list):
+            for i, idx in enumerate(nclose_idx_pair):
+                if i == 0 and idx in st_compress:
+                    continue
+                if i == 1 and idx in ed_compress:
+                    continue
+                chr_name, chr_cord = get_contig_pair(i, contig_data[idx])
+                chr_cord_dict[chr_name].append((chr_cord, (ctg_name, j)))
+
+    for type4_nclose_idx, (c1, i1, c2, i2) in type4_nclose_nodes.items():
+        chr_cord_dict[c1].append((i1, type4_nclose_idx))
+        chr_cord_dict[c2].append((i2, type4_nclose_idx))
+
+    for l in chr_cord_dict.values():
+        l.sort(key=lambda t: t[0])
+
+    return chr_cord_dict
+
+def group_close_coordinates(data_list, distance_threshold=100 * K):
+    """
+    Groups a list of tuples by their coordinate values.
+    
+    This function assumes the input data_list is already sorted by the 
+    coordinate (the first element of the tuple). Tuples are grouped together 
+    if the distance between consecutive coordinates is less than or equal 
+    to the distance_threshold (default is 100k).
+    
+    Args:
+        data_list: A list of tuples formatted as (cord, ctg_name, nclose_idx).
+        distance_threshold: Maximum distance between consecutive coordinates to be grouped.
+        
+    Returns:
+        A list of grouped tuples formatted as (group_start_cord, [(ctg_name, nclose_idx), ...]).
+    """
+    if not data_list:
+        return []
+
+    result = []
+    
+    # Initialize the first group using the first element in the list
+    first_cord = data_list[0][0]
+    last_cord = data_list[0][0]
+    current_group_items = [data_list[0][1]]
+
+    for i in range(1, len(data_list)):
+        cord, nclose_data = data_list[i]
+
+        # Check if the current coordinate is within the threshold from the previous one
+        if cord - last_cord <= distance_threshold:
+            current_group_items.append(nclose_data)
+        else:
+            # Save the completed group and start a new one
+            result.append((first_cord, current_group_items))
+            first_cord = cord
+            current_group_items = [nclose_data]
+            
+        # Update the last seen coordinate for the next iteration
+        last_cord = cord
+
+    # Append the final group after the loop finishes
+    result.append((first_cord, current_group_items))
+
+    return result
+
+def merge_regions_iteratively(df_cov, df_exclude,
+                              target_chr, chr_cord_dict,
+                              p_value):
+    """
+    Iteratively merges adjacent regions based on Mann-Whitney U test p-values.
+    It prevents merging only if the specific split point falls within any excluded areas.
+    """
+    split_points = group_close_coordinates(chr_cord_dict[target_chr])
+    out_split_points = []
+    
+    # Filter dataframes for the specific chromosome to speed up operations
+    df_cov_chr = df_cov[df_cov['chr'] == target_chr].copy()
+    df_excl_chr = df_exclude[df_exclude['chr'] == target_chr]
+    
+    # Filter out the excluded regions from the coverage data upfront
+    # Bins that overlap with any excluded region are completely removed
+    for _, excl_row in df_excl_chr.iterrows():
+        df_cov_chr = df_cov_chr[
+            (df_cov_chr['nd'] <= excl_row['st']) | 
+            (df_cov_chr['st'] >= excl_row['nd'])
+        ]
+        
+    # Copy the split points to safely modify the active list during iteration
+    active_splits = split_points.copy()
+    
+    # Determine the absolute maximum boundary from the remaining valid coverage data
+    max_nd = df_cov_chr['nd'].max() if not df_cov_chr.empty else 0
+    
+    while True:
+        merged_in_this_round = False
+        
+        for i in range(len(active_splits)):
+            current_split = active_splits[i][0]
+            
+            # Check if the specific split point itself falls within any excluded region
+            # Skip the merge process if the exact point is located inside an excluded area
+            is_split_point_excluded = (
+                (df_excl_chr['st'] <= current_split) & 
+                (df_excl_chr['nd'] >= current_split)
+            ).any()
+            
+            if is_split_point_excluded:
+                continue
+            
+            # Define boundaries for the left and right regions
+            left_start = active_splits[i-1][0] if i > 0 else 0
+            left_end = current_split
+            
+            right_start = current_split
+            right_end = active_splits[i+1][0] if i < len(active_splits) - 1 else max_nd
+            
+            # Extract coverage values for left and right regions based on bin coordinates
+            # Since df_cov_chr has already been filtered, excluded regions naturally won't be included
+            left_cov = list(df_cov_chr[
+                (df_cov_chr['nd'] > left_start) & 
+                (df_cov_chr['st'] < left_end)
+            ]['meandepth'])
+            
+            right_cov = list(df_cov_chr[
+                (df_cov_chr['nd'] > right_start) & 
+                (df_cov_chr['st'] < right_end)
+            ]['meandepth'])
+            
+            # Ensure both regions have at least 2 data points to perform the statistical test
+            # This naturally avoids statistical calculation errors
+            if len(left_cov) >= 2 and len(right_cov) >= 2:
+                stat, p_val = mannwhitneyu(left_cov, right_cov)
+
+                # If distributions are not significantly different, merge them
+                if p_val >= p_value and (not np.isnan(p_val)):
+                    out_split_points.append(active_splits[i])
+                    active_splits.pop(i)
+                    merged_in_this_round = True
+                    break # Break the inner loop to restart the while loop with updated regions
+                    
+        # If no merges occurred in the entire pass, the regions are stable
+        if not merged_in_this_round:
+            break
+            
+    return active_splits, out_split_points
+
+def filter_nclose_by_test(contig_data, nclose_nodes, st_compress, ed_compress):
+    type4_tot_loc_list = []
+    for bv_paf_loc in glob.glob(f'{RAW_RATIO_OUTLIER_FOLDER}/front_jump/*_base.paf'):
+        type4_tot_loc_list.append(bv_paf_loc)
+
+    for bv_paf_loc in glob.glob(f'{RAW_RATIO_OUTLIER_FOLDER}/back_jump/*_base.paf'):
+        type4_tot_loc_list.append(bv_paf_loc)
+
+    type4_nclose_nodes = dict()
+    for paf_loc in type4_tot_loc_list:
+        event_type = paf_loc.split('/')[-2]
+        event_idx = int(paf_loc.split('/')[-1].split('_')[0])
+
+        type2_merge_paf_idx = None
+        if not os.path.isfile(f'{RAW_RATIO_OUTLIER_FOLDER}/{event_type}/{event_idx}.paf'):
+            type2_merge_paf_loc = glob.glob(f'{RAW_RATIO_OUTLIER_FOLDER}/{event_type}/{event_idx}_type2_merge_*.paf')[0]
+            type2_merge_paf_idx = int(type2_merge_paf_loc.split('/')[-1].split('.')[0].split('_')[-1])
+
+        with open(paf_loc, "r") as f:
+            l = f.readline().rstrip().split("\t")
+            chr_nam1 = l[CHR_NAM]
+            chr_nam2 = l[CHR_NAM]
+            pos1 = int(l[CHR_STR])
+            pos2 = int(l[CHR_END])
+
+            type4_nclose_nodes[(event_type, event_idx, type2_merge_paf_idx)] = (chr_nam1, pos1, chr_nam2, pos2)
+
+
+    df = pd.read_csv(main_stat_loc, compression='gzip', comment='#', sep='\t', names=['chr', 'st', 'nd', 'length', 'covsite', 'totaldepth', 'cov', 'meandepth'])
+    df = df.query('chr != "chrM"')
+
+    cdf = pd.read_csv(REPEAT_INFO_FILE_PATH, sep='\t', names=['chr', 'st', 'nd'])
+
+    chr_cord_dict = get_chr_cord_dict(contig_data, nclose_nodes,
+                                      type4_nclose_nodes, st_compress, ed_compress)
+
+    in_cnt = defaultdict(lambda : [0, 0])
+    for chr_key in chr_cord_dict:
+        in_split, out_split = merge_regions_iteratively(df, cdf, chr_key, chr_cord_dict, p_value=0.01)
+
+        for ctg_idx, nclose_idx_list in in_split:
+            for nclose_idx in nclose_idx_list:
+                in_cnt[nclose_idx][0] += 1
+
+        for ctg_idx, nclose_idx_list in out_split:
+            for nclose_idx in nclose_idx_list:
+                in_cnt[nclose_idx][1] += 1
+
+    new_nclose_nodes = defaultdict(list)
+    new_type4_list = []
+
+    for nclose_key, nclose_cnt in in_cnt.items():
+        if nclose_cnt[0] >= 1:
+            if nclose_key[0] in nclose_nodes:
+                ctg_name, ni = nclose_key
+                new_nclose_nodes[ctg_name].append(nclose_nodes[ctg_name][ni])
+            else:
+                event_type, event_idx, type2_merge_paf_idx = nclose_key
+                assert event_type in {'front_jump', 'back_jump'}
+
+                new_type4_list.append((event_type, event_idx, type2_merge_paf_idx))
+
+    os.makedirs(f"{RATIO_OUTLIER_FOLDER}/front_jump", exist_ok=True)
+    os.makedirs(f"{RATIO_OUTLIER_FOLDER}/back_jump", exist_ok=True)
+
+    new_event_idx_cnt = Counter()
+    for event_type, event_idx, type2_merge_paf_idx in new_type4_list:
+        if type2_merge_paf_idx is None:
+            main_paf_loc_postfix = '.paf'
+        else:
+            main_paf_loc_postfix = f'_type2_merge_{type2_merge_paf_idx}.paf'
+
+        new_event_idx_cnt[event_type] += 1
+        new_event_idx = new_event_idx_cnt[event_type]
+        
+        shutil.copy(f'{RAW_RATIO_OUTLIER_FOLDER}/{event_type}/{event_idx}_base.paf',
+                    f'{RATIO_OUTLIER_FOLDER}/{event_type}/{new_event_idx}_base.paf')
+
+        shutil.copy(f'{RAW_RATIO_OUTLIER_FOLDER}/{event_type}/{event_idx}{main_paf_loc_postfix}',
+                    f'{RATIO_OUTLIER_FOLDER}/{event_type}/{new_event_idx}{main_paf_loc_postfix}')
+        
+
+    logging.info(f'Coverage equal by nclose boundary hypothesis test (p-value = {FILTER_P_VALUE})')
+    logging.info(f'BND Nclose count : {len(nclose_nodes)} -> {len(new_nclose_nodes)}')
+    logging.info(f'INDEL Nclose count : {len(type4_nclose_nodes)} -> {len(new_type4_list)}')
+
+    return new_nclose_nodes
+
+### Chunk end
+
+### 11_Ref_Outlier_Contig_Modify.py
+def import_origin_data(file_path : list) -> list :
+    contig_data = []
+    int_induce_idx = [1, 2, 3, 6, 7, 8, 9, 10, 11]
+    idx = 0
+    with open(file_path, "r") as paf_file:
+        for curr_contig in paf_file:
+            curr_contig = curr_contig.rstrip()
+            temp_list = curr_contig.split("\t")
+            for i in int_induce_idx:
+                temp_list[i] = int(temp_list[i])
+            contig_data.append(temp_list)
+    return contig_data
+
+def cs_to_cigar(cs_tag: str) -> str:
+   """
+   cs:Z: 태그의 값(접두어 "cs:Z:" 제외)을 받아서 표준 CIGAR 문자열로 변환합니다.
+
+   변환 규칙:
+     - ":<number>" : 매칭(=, M) 연산. 이전 연산이 'M'이면 길이를 누적하고,
+                    그렇지 않으면 이전 연산을 플러시한 후 'M'으로 시작합니다.
+     - "+<seq>"    : 삽입(Insertion). 이전에 누적된 연산이 있으면 먼저 플러시하고,
+                    삽입 길이는 해당 문자열의 길이로 계산합니다.
+     - "-<seq>"    : 결실(Deletion). 위와 유사하게 처리합니다.
+     - "*<base1><base2>": 치환(Mismatch). 연속되는 치환은 길이를 누적합니다.
+   """
+   pattern = re.compile(r"(:\d+|\*[a-z]{2}|[+\-][A-Za-z]+)")
+   cigar = ""
+   last_op = 'M'
+   last_len = 0
+
+   for match in pattern.finditer(cs_tag):
+       part = match.group(0)
+       op = part[0]
+       if op == ":":
+           # 예: ":10" → 매칭 10개
+           length = int(part[1:])
+           if last_op == 'M':
+               last_len += length
+           else:
+               if last_len > 0:
+                   cigar += f"{last_len}{last_op}"
+               last_op = 'M'
+               last_len = length
+       elif op == "-":
+           # 예: "-acgt" → deletion, 길이는 4
+           length = len(part[1:])
+           if last_len > 0:
+               cigar += f"{last_len}{last_op}"
+           cigar += f"{length}D"
+           last_len = 0
+           last_op = 'M'
+       elif op == "+":
+           # 예: "+ac" → insertion, 길이는 2
+           length = len(part[1:])
+           if last_len > 0:
+               cigar += f"{last_len}{last_op}"
+           cigar += f"{length}I"
+           last_len = 0
+           last_op = 'M'
+       elif op == "*":
+           # 예: "*at" : mismatch (치환)
+           if last_op == 'X':
+               last_len += 1
+           else:
+               if last_len > 0:
+                   cigar += f"{last_len}{last_op}"
+               last_op = 'X'
+               last_len = 1
+       else:
+           # 정의되지 않은 연산은 무시
+           continue
+
+   if last_len > 0:
+       cigar += f"{last_len}{last_op}"
+
+   return cigar
+
+def calculate_single_contig_ref_ratio_ref_st_ed(contig_data : list):
+    total_ref_len = 0
+    ref_st_ed = 0
+    if contig_data[0][CTG_DIR] == '+':
+        estimated_ref_len = contig_data[-1][CHR_END] - contig_data[0][CHR_STR]
+        ref_st_ed = (contig_data[0][CHR_STR], contig_data[-1][CHR_END])
+    else:
+        estimated_ref_len = contig_data[0][CHR_END] - contig_data[-1][CHR_STR]
+        ref_st_ed = (contig_data[-1][CHR_STR], contig_data[0][CHR_END])
+    
+    for node in contig_data:
+        total_ref_len += node[CHR_END] - node[CHR_STR]
+        
+    return estimated_ref_len/total_ref_len, ref_st_ed
+
+def pipeline_11_Ref_Outlier_Contig_Modify(chr_data, contig_data, type4_ins, type4_del):
+    logging.info("Referenc outlier contig modify start")
+    paf_file = []
+    if args.alt is None:
+        paf_file = [import_origin_data(args.paf_file_path)]
+    else:
+        paf_file = [import_origin_data(args.paf_file_path), import_origin_data(args.alt)]
+
+
+    os.makedirs(f"{RAW_RATIO_OUTLIER_FOLDER}/front_jump", exist_ok=True)
+    os.makedirs(f"{RAW_RATIO_OUTLIER_FOLDER}/back_jump", exist_ok=True)
+
+    contig_data_size = len(contig_data)
+
+    s = 0
+    cntfj = 0
+    cntbj = 0
+    while s<contig_data_size:
+        e = contig_data[s][CTG_ENDND]
+
+        if contig_data[s][CTG_TYP] == 4:
+            chr_name = contig_data[s][CHR_NAM]
+            chr_len = chr_data[chr_name]
+            rat, ref_st_ed = calculate_single_contig_ref_ratio_ref_st_ed(contig_data[s:e+1])
+            if abs(ref_st_ed[1]-ref_st_ed[0]) > CHUKJI_LIMIT or contig_data[s][CTG_LEN] > 2 * CHUKJI_LIMIT:
+                if rat > 0:
+                    cntfj += 1
+                    with open(f"{RAW_RATIO_OUTLIER_FOLDER}/front_jump/{cntfj}.paf", "wt") as f:
+                        for i in range(s, e+1):
+                            glob_paf_idx = int(contig_data[i][CTG_GLOBALIDX][0])
+                            glob_idx = int(contig_data[i][CTG_GLOBALIDX][2:])
+                            cigar_str = 'cg:Z:' + cs_to_cigar(paf_file[glob_paf_idx][glob_idx][-1][5:])
+                            for j in paf_file[glob_paf_idx][glob_idx]:
+                                print(j, end="\t", file=f)
+                            print(cigar_str, end="\t", file=f)
+                            print("", file=f)
+                    with open(f"{RAW_RATIO_OUTLIER_FOLDER}/front_jump/{cntfj}_base.paf", "wt") as f:
+                        N = ref_st_ed[1] - ref_st_ed[0]
+                        virtual_contig = ["base_contig_1", N, 0, N]
+                        virtual_contig += ['+', chr_name, chr_len, ref_st_ed[0], ref_st_ed[1]]
+                        virtual_contig += [N, N, 0]
+                        virtual_contig += ['tp:A:P', 'cs:Z:'+f":{N}"]
+                        cigar_str = 'cg:Z:' + cs_to_cigar(virtual_contig[-1][5:])
+                        virtual_contig += [cigar_str]
+                        for j in virtual_contig:
+                            print(j, end="\t", file=f)
+                        print("", file=f)
+                else:
+                    cntbj += 1
+                    with open(f"{RAW_RATIO_OUTLIER_FOLDER}/back_jump/{cntbj}.paf", "wt") as f:
+                        for i in range(s, e+1):
+                            glob_paf_idx = int(contig_data[i][CTG_GLOBALIDX][0])
+                            glob_idx = int(contig_data[i][CTG_GLOBALIDX][2:])
+                            cigar_str = 'cg:Z:' + cs_to_cigar(paf_file[glob_paf_idx][glob_idx][-1][5:])
+                            for j in paf_file[glob_paf_idx][glob_idx]:
+                                print(j, end="\t", file=f)
+                            print(cigar_str, end="\t", file=f)
+                            print("", file=f)
+                    with open(f"{RAW_RATIO_OUTLIER_FOLDER}/back_jump/{cntbj}_base.paf", "wt") as f:
+                        N = ref_st_ed[0] - ref_st_ed[1]
+                        virtual_contig = ["base_contig_1", N, 0, N]
+                        virtual_contig += ['+', chr_name, chr_len, ref_st_ed[1], ref_st_ed[0]]
+                        virtual_contig += [N, N, 0]
+                        virtual_contig += ['tp:A:P', 'cs:Z:'+f":{N}"]
+                        cigar_str = 'cg:Z:' + cs_to_cigar(virtual_contig[-1][5:])
+                        virtual_contig += [cigar_str]
+                        for j in virtual_contig:
+                            print(j, end="\t", file=f)
+                        print("", file=f)
+                
+        s = e+1
+
+    type2_indel_cnt = 0
+
+    for s1, e1, s2, e2 in type4_ins:
+        type2_indel_cnt += 1
+        chr_name = contig_data[s1][CHR_NAM]
+        chr_len = chr_data[chr_name]
+
+        ref_st = min(contig_data[s1][CHR_STR], contig_data[s1][CHR_END])
+        ref_nd = max(contig_data[e2][CHR_STR], contig_data[e2][CHR_END])
+
+        cntbj+=1
+        with open(f"{RAW_RATIO_OUTLIER_FOLDER}/back_jump/{cntbj}_type2_merge_{type2_indel_cnt}.paf", "wt") as f:
+            for i in (s1, e2):
+                glob_paf_idx = int(contig_data[i][CTG_GLOBALIDX][0])
+                glob_idx = int(contig_data[i][CTG_GLOBALIDX][2:])
+                cigar_str = 'cg:Z:' + cs_to_cigar(paf_file[glob_paf_idx][glob_idx][-1][5:])
+                for j in paf_file[glob_paf_idx][glob_idx]:
+                    print(j, end="\t", file=f)
+                print(cigar_str, end="\t", file=f)
+                print("", file=f)
+            
+        with open(f"{RAW_RATIO_OUTLIER_FOLDER}/back_jump/{cntbj}_base.paf", "wt") as f:
+                N = ref_st - ref_nd
+                virtual_contig = ["base_contig_1", N, 0, N]
+                virtual_contig += ['+', chr_name, chr_len, ref_nd, ref_st]
+                virtual_contig += [N, N, 0]
+                virtual_contig += ['tp:A:P', 'cs:Z:'+f":{N}"]
+                cigar_str = 'cg:Z:' + cs_to_cigar(virtual_contig[-1][5:])
+                virtual_contig += [cigar_str]
+                for j in virtual_contig:
+                    print(j, end="\t", file=f)
+                print("", file=f)
+
+    for s1, e1, s2, e2 in type4_del:
+        type2_indel_cnt += 1
+        chr_name = contig_data[s1][CHR_NAM]
+        chr_len = chr_data[chr_name]
+
+        ref_st = min(contig_data[s1][CHR_STR], contig_data[s1][CHR_END])
+        ref_nd = max(contig_data[e2][CHR_STR], contig_data[e2][CHR_END])
+
+        cntfj+=1
+        with open(f"{RAW_RATIO_OUTLIER_FOLDER}/front_jump/{cntfj}_type2_merge_{type2_indel_cnt}.paf", "wt") as f:
+            for i in (s1, e2):
+                glob_paf_idx = int(contig_data[i][CTG_GLOBALIDX][0])
+                glob_idx = int(contig_data[i][CTG_GLOBALIDX][2:])
+                cigar_str = 'cg:Z:' + cs_to_cigar(paf_file[glob_paf_idx][glob_idx][-1][5:])
+                for j in paf_file[glob_paf_idx][glob_idx]:
+                    print(j, end="\t", file=f)
+                print(cigar_str, end="\t", file=f)
+                print("", file=f)
+            
+        with open(f"{RAW_RATIO_OUTLIER_FOLDER}/front_jump/{cntfj}_base.paf", "wt") as f:
+                N = ref_nd - ref_st
+                virtual_contig = ["base_contig_1", N, 0, N]
+                virtual_contig += ['+', chr_name, chr_len, ref_st, ref_nd]
+                virtual_contig += [N, N, 0]
+                virtual_contig += ['tp:A:P', 'cs:Z:'+f":{N}"]
+                cigar_str = 'cg:Z:' + cs_to_cigar(virtual_contig[-1][5:])
+                virtual_contig += [cigar_str]
+                for j in virtual_contig:
+                    print(j, end="\t", file=f)
+                print("", file=f)
+
+    logging.info(f"Forward-directed outlier contig count : {cntfj}")
+    logging.info(f"Backward-directed outlier contig count : {cntbj}")
+    logging.info(f"Total count : {cntfj + cntbj}")
+
+### Chunk end
 
 def import_data(file_path : str) -> list :
     contig_data = []
@@ -2778,9 +3267,7 @@ def initialize_bnd_graph(contig_data : list, nclose_nodes : dict, telo_contig : 
         for i in nclose_nodes[j]:
             bnd_adjacency[(DIR_FOR, i[0])].append([DIR_FOR, i[1]])
             bnd_adjacency[(DIR_BAK, i[1])].append([DIR_BAK, i[0]])
-            if len(i)==4:
-                bnd_adjacency[(DIR_FOR, i[2])].append([DIR_FOR, i[3]])
-                bnd_adjacency[(DIR_BAK, i[3])].append([DIR_BAK, i[2]])
+
     nclose_nodes_key = list(nclose_nodes.keys())
     key_len = len(nclose_nodes)
     # nclose nodes connection.
@@ -3776,8 +4263,12 @@ def nclose_calc():
 
     _, centromere_slave = similar_centromere_nclose_cluster(nclose_nodes, contig_data, repeat_censat_data, chr_len)
 
+    type4_ins, type4_del = conjoined_type4(contig_data, type2_nclose_node)
     with open(f"{PREFIX}/conjoined_type4_ins_del.pkl", "wb") as f:
-        pkl.dump(conjoined_type4(contig_data, type2_nclose_node), f)
+        pkl.dump((type4_ins, type4_del), f)
+
+    # 11_Ref_Outlier_Contig_Modify.py
+    pipeline_11_Ref_Outlier_Contig_Modify(chr_len, contig_data, type4_ins, type4_del)
 
     saved_not_using_nclose_node = set()
     conjoined_nclose_node_set = set()
@@ -3815,10 +4306,6 @@ def nclose_calc():
                         conjoined_nclose_node_set.add((t1nn[1], nunclose[1]))
 
     not_using_nclose_node |= set(centromere_slave.keys())
-
-    for conjoined_nclose in conjoined_nclose_node_set:
-        pass
-        # do something
 
     virtual_ordinary_contig = make_virtual_ord_ctg(contig_data, vctg_dict)
     with open(f"{PREFIX}/virtual_ordinary_contig.txt", "wt") as f:
@@ -3907,7 +4394,11 @@ def nclose_calc():
             if j not in not_using_nclose_node or j in saved_not_using_nclose_node:
                 final_nclose_nodes[i].append(j)
     
-    nclose_nodes = final_nclose_nodes
+    if FILTER_P_VALUE is None:
+        nclose_nodes = final_nclose_nodes
+    else:
+        nclose_nodes = filter_nclose_by_test(contig_data, final_nclose_nodes,
+                                             st_compress, ed_compress)
 
     nclose_type = defaultdict(list)
     for j in nclose_nodes:
@@ -4183,6 +4674,9 @@ SKIP_BAM_ANAL=args.skip_bam_analysis
 CHR_CHANGE_LIMIT_ABS_MAX = args.graph_depth
 
 ORIGNAL_PAF_LOC_LIST = ORIGNAL_PAF_LOC_LIST_
+RAW_RATIO_OUTLIER_FOLDER = f"{PREFIX}/10_raw_ref_ratio_outliers"
+RATIO_OUTLIER_FOLDER = f"{PREFIX}/11_ref_ratio_outliers"
+
 
 if args.test:
     logging.warning("Test mode is enabled. This mode is for debugging purposes only. The results may be inaccurate and should not be trusted.")
@@ -4733,7 +5227,6 @@ def run_graph_pipeline():
             idx += 1
     return last_success
 
-
 last_success = run_graph_pipeline()
 if not last_success:
     logging.info('Breakend graph is too divergent.')
@@ -4826,3 +5319,6 @@ with open(f'{PREFIX}/report.txt', 'w') as f:
     for (st, nd), c in sorted(cnt_list, key=lambda x:-x[1]):
         if c > 0:
             print(st, nd, c, file=f)
+
+with open(f'{PREFIX}/nclose_chunk_data.pkl', 'wb') as f:
+    pkl.dump((nclose_nodes, st_compress, ed_compress), f)
