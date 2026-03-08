@@ -359,7 +359,7 @@ def filter_nclose_by_test(contig_data, nclose_nodes, st_compress, ed_compress):
     os.makedirs(f"{RATIO_OUTLIER_FOLDER}/back_jump", exist_ok=True)
 
     new_event_idx_cnt = Counter()
-    for event_type, event_idx, type2_merge_paf_idx in new_type4_list:
+    for event_type, event_idx, type2_merge_paf_idx in sorted(new_type4_list):
         if type2_merge_paf_idx is None:
             main_paf_loc_postfix = '.paf'
         else:

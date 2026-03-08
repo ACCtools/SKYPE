@@ -112,6 +112,9 @@ parser.add_argument("-t", "--thread", help="Number of threads", type=int)
 
 args = parser.parse_args()
 
+# t = "23_run_nnls.py /home/hyunwoo/ACCtools-pipeline/90_skype_run/H1437/20_alignasm/H1437.ctg.aln.paf.ppc.paf 30_skype_pipe/H1437_00_45_24 /home/hyunwoo/ACCtools-pipeline/90_skype_run/H1437/01_depth/H1437_normalized.win.stat.gz -t 128"
+# args = parser.parse_args(t.split()[1:])
+
 PREPROCESSED_PAF_FILE_PATH = args.ppc_paf_file_path
 PREFIX = args.prefix
 main_stat_loc = args.main_stat_path
@@ -227,7 +230,7 @@ if use_julia_solver:
         chrom_acc_sum_dict = defaultdict(int)
         chrom_acc_sum_dict_max = defaultdict(int)
         for i, (chrom, st) in enumerate(chr_filt_st_list):
-            chrom_acc_sum_dict[chrom] += predict_suc_B[i] - B[i]
+            chrom_acc_sum_dict[chrom] += predict_suc_B[i] - predict_suc_B_base[i] 
             if abs(chrom_acc_sum_dict[chrom]) > chrom_acc_sum_dict_max[chrom]:
                 chrom_acc_sum_dict_max[chrom] = abs(chrom_acc_sum_dict[chrom])
 
@@ -236,8 +239,7 @@ if use_julia_solver:
             if chrom == 'chrY' and no_chrY:
                 continue
             acc_sum_max_base = chrom_acc_sum_dict_max_base[chrom]
-            # print(f"{chrom} : {acc_sum_max:.4f} (error rate: {abs(acc_sum_max - acc_sum_max_base) / acc_sum_max_base:.4f})")
-            max_error_rate = max(max_error_rate, abs(acc_sum_max - acc_sum_max_base) / acc_sum_max_base)
+            max_error_rate = max(max_error_rate, acc_sum_max / acc_sum_max_base)
 
         if max_error_rate < BASE_ACCSUMABSMAX_RATIO:
             logging.debug(f"{nclose_pair} : Nclose removed")
