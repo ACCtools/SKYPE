@@ -225,7 +225,6 @@ if use_julia_solver:
     logging.info(f"Testing nclose pairs count : {len(tar_nclose_list)}")
     for nclose_pair, (weight_jl, predict_suc_B_jl) in zip(tar_nclose_list, weight_list):
         predict_suc_B = np.asarray(predict_suc_B_jl)
-        predict_diff = predict_suc_B - predict_suc_B_base
 
         chrom_acc_sum_dict = defaultdict(int)
         chrom_acc_sum_dict_max = defaultdict(int)
@@ -269,12 +268,11 @@ if use_julia_solver:
 
     # Phase 2 : check diverse chromosome
     predict_suc_B = predict_B_succ
-    predict_diff = predict_suc_B - predict_suc_B_base
 
     chrom_acc_sum_dict = defaultdict(int)
     chrom_acc_sum_dict_max = defaultdict(int)
     for i, (chrom, st) in enumerate(chr_filt_st_list):
-        chrom_acc_sum_dict[chrom] += predict_suc_B[i] - B[i]
+        chrom_acc_sum_dict[chrom] += predict_suc_B[i] - predict_suc_B_base[i]
         if abs(chrom_acc_sum_dict[chrom]) > chrom_acc_sum_dict_max[chrom]:
             chrom_acc_sum_dict_max[chrom] = abs(chrom_acc_sum_dict[chrom])
     
@@ -283,8 +281,8 @@ if use_julia_solver:
         if chrom == 'chrY' and no_chrY:
             continue
         acc_sum_max_base = chrom_acc_sum_dict_max_base[chrom]
-
-        chrom_error_rate = abs(acc_sum_max - acc_sum_max_base) / acc_sum_max_base
+        chrom_error_rate = acc_sum_max / acc_sum_max_base
+        
         if chrom_error_rate > CHROM_ERROR_FAIL_RATE:
             fail_chrom_list.append(chrom)
     
@@ -332,12 +330,11 @@ if use_julia_solver:
 
         for nclose_pair, (weight_jl, predict_suc_B_jl) in zip(tar_nclose_list, weight_list):
             predict_suc_B = np.asarray(predict_suc_B_jl)
-            predict_diff = predict_suc_B - predict_suc_B_base
 
             chrom_acc_sum_dict = defaultdict(int)
             chrom_acc_sum_dict_max = defaultdict(int)
             for i, (chrom, st) in enumerate(chr_filt_st_list):
-                chrom_acc_sum_dict[chrom] += predict_suc_B[i] - B[i]
+                chrom_acc_sum_dict[chrom] += predict_suc_B[i] - predict_suc_B_base[i]
                 if abs(chrom_acc_sum_dict[chrom]) > chrom_acc_sum_dict_max[chrom]:
                     chrom_acc_sum_dict_max[chrom] = abs(chrom_acc_sum_dict[chrom])
             
@@ -346,8 +343,7 @@ if use_julia_solver:
                 if chrom == 'chrY' and no_chrY:
                     continue
                 acc_sum_max_base = chrom_acc_sum_dict_max_base[chrom]
-                # print(f"{chrom} : {acc_sum_max:.4f} (error rate: {abs(acc_sum_max - acc_sum_max_base) / acc_sum_max_base:.4f})")
-                max_error_rate = max(max_error_rate, abs(acc_sum_max - acc_sum_max_base) / acc_sum_max_base)
+                max_error_rate = max(max_error_rate, acc_sum_max / acc_sum_max_base)
 
             if max_error_rate < BASE_ACCSUMABSMAX_RATIO:
                 logging.debug(f"{nclose_pair} : Nclose removed")
