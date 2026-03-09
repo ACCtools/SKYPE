@@ -293,6 +293,16 @@ def merge_regions_iteratively(df_cov, df_exclude,
             
     return active_splits, out_split_points
 
+def get_censet_count(cdf, contig_data, nclose_idx_pair):
+    cnt = 0
+    for i, idx in enumerate(nclose_idx_pair):
+        chr_name, chr_cord = get_contig_pair(i, contig_data[idx])
+        mask = (cdf['chr'] == chr_name) & (cdf['st'] <= chr_cord) & (cdf['nd'] >= chr_cord)
+        if mask.any():
+            cnt += 1
+
+    return cnt
+
 def filter_nclose_by_test(contig_data, nclose_nodes, st_compress, ed_compress):
     type4_tot_loc_list = []
     for bv_paf_loc in glob.glob(f'{RAW_RATIO_OUTLIER_FOLDER}/front_jump/*_base.paf'):
@@ -324,14 +334,14 @@ def filter_nclose_by_test(contig_data, nclose_nodes, st_compress, ed_compress):
     df = pd.read_csv(main_stat_loc, compression='gzip', comment='#', sep='\t', names=['chr', 'st', 'nd', 'length', 'covsite', 'totaldepth', 'cov', 'meandepth'])
     df = df.query('chr != "chrM"')
 
-    cdf = pd.read_csv(REPEAT_INFO_FILE_PATH, sep='\t', names=['chr', 'st', 'nd'])
+    cdf = pd.read_csv(CENSAT_PATH, sep='\t', names=['chr', 'st', 'nd'])
 
     chr_cord_dict = get_chr_cord_dict(contig_data, nclose_nodes,
                                       type4_nclose_nodes, st_compress, ed_compress)
 
     in_cnt = defaultdict(lambda : [0, 0])
     for chr_key in chr_cord_dict:
-        in_split, out_split = merge_regions_iteratively(df, cdf, chr_key, chr_cord_dict, p_value=0.01)
+        in_split, out_split = merge_regions_iteratively(df, cdf, chr_key, chr_cord_dict, p_value=FILTER_P_VALUE)
 
         for ctg_idx, nclose_idx_list in in_split:
             for nclose_idx in nclose_idx_list:
@@ -348,7 +358,13 @@ def filter_nclose_by_test(contig_data, nclose_nodes, st_compress, ed_compress):
         if nclose_cnt[0] >= 1:
             if nclose_key[0] in nclose_nodes:
                 ctg_name, ni = nclose_key
-                new_nclose_nodes[ctg_name].append(nclose_nodes[ctg_name][ni])
+                if ctg_name == 'utg004465l':
+                    t = 1
+
+                censat_count = get_censet_count(cdf, contig_data, nclose_nodes[ctg_name][ni])
+
+                if censat_count == 2 or (nclose_cnt[0] - censat_count >= 1):
+                    new_nclose_nodes[ctg_name].append(nclose_nodes[ctg_name][ni])
             else:
                 event_type, event_idx, type2_merge_paf_idx = nclose_key
                 assert event_type in {'front_jump', 'back_jump'}
@@ -4394,6 +4410,10 @@ def nclose_calc():
             if j not in not_using_nclose_node or j in saved_not_using_nclose_node:
                 final_nclose_nodes[i].append(j)
     
+    with open(f'{PREFIX}/nclose_chunk_data.pkl', 'wb') as f:
+        pkl.dump((nclose_nodes, st_compress, ed_compress), f)
+
+
     if FILTER_P_VALUE is None:
         nclose_nodes = final_nclose_nodes
     else:
@@ -4645,10 +4665,10 @@ parser.add_argument("--exclude_nclose_list_loc",
 parser.add_argument("--skip_bam_analysis", 
                     help="Skip bam analysis", action='store_true')
 
-args = parser.parse_args()
+# args = parser.parse_args()
 
-# t = "02_Build_Breakend_Graph_Limited.py /home/hyunwoo/ACCtools-pipeline/90_skype_run/H1437/20_alignasm/H1437.ctg.aln.paf public_data/chm13v2.0.fa.fai public_data/chm13v2.0_telomere.bed public_data/chm13v2.0_repeat.m.bed public_data/chm13v2.0_censat_v2.1.m.bed /home/hyunwoo/ACCtools-pipeline/90_skype_run/H1437/01_depth/H1437_normalized.win.stat.gz 30_skype_pipe/H1437_23_00_00 /home/hyunwoo/ACCtools-pipeline/90_skype_run/H1437/01_depth/H1437.bam --alt /home/hyunwoo/ACCtools-pipeline/90_skype_run/H1437/20_alignasm/H1437.utg.aln.paf --orignal_paf_loc /home/hyunwoo/ACCtools-pipeline/90_skype_run/H1437/20_alignasm/H1437.ctg.paf /home/hyunwoo/ACCtools-pipeline/90_skype_run/H1437/20_alignasm/H1437.utg.paf --test --skip_bam_analysis -t 128"
-# args = parser.parse_args(t.split()[1:])
+t = "02_Build_Breakend_Graph_Limited.py /home/hyunwoo/ACCtools-pipeline/90_skype_run/Caki-1/20_alignasm/Caki-1.ctg.aln.paf public_data/chm13v2.0.fa.fai public_data/chm13v2.0_telomere.bed public_data/chm13v2.0_repeat.m.bed public_data/chm13v2.0_censat_v2.1.m.bed /home/hyunwoo/ACCtools-pipeline/90_skype_run/Caki-1/01_depth/Caki-1.win.stat.gz 30_skype_pipe/Caki-1_08_20_44 /home/hyunwoo/ACCtools-pipeline/90_skype_run/Caki-1/01_depth/Caki-1.bam --alt /home/hyunwoo/ACCtools-pipeline/90_skype_run/Caki-1/20_alignasm/Caki-1.utg.aln.paf --orignal_paf_loc /home/hyunwoo/ACCtools-pipeline/90_skype_run/Caki-1/20_alignasm/Caki-1.ctg.paf /home/hyunwoo/ACCtools-pipeline/90_skype_run/Caki-1/20_alignasm/Caki-1.utg.paf --test --skip_bam_analysis -t 128"
+args = parser.parse_args(t.split()[1:])
 
 PREFIX = args.prefix
 
@@ -5319,6 +5339,3 @@ with open(f'{PREFIX}/report.txt', 'w') as f:
     for (st, nd), c in sorted(cnt_list, key=lambda x:-x[1]):
         if c > 0:
             print(st, nd, c, file=f)
-
-with open(f'{PREFIX}/nclose_chunk_data.pkl', 'wb') as f:
-    pkl.dump((nclose_nodes, st_compress, ed_compress), f)
