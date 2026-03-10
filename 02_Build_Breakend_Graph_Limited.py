@@ -4410,7 +4410,7 @@ def nclose_calc():
             if j not in not_using_nclose_node or j in saved_not_using_nclose_node:
                 final_nclose_nodes[i].append(j)
     
-    with open(f'{PREFIX}/nclose_chunk_data.pkl', 'wb') as f:
+    with open(f'{PREFIX}/nclose_chunk_test_data.pkl', 'wb') as f:
         pkl.dump((nclose_nodes, st_compress, ed_compress), f)
 
 
@@ -4665,10 +4665,10 @@ parser.add_argument("--exclude_nclose_list_loc",
 parser.add_argument("--skip_bam_analysis", 
                     help="Skip bam analysis", action='store_true')
 
-# args = parser.parse_args()
+args = parser.parse_args()
 
-t = "02_Build_Breakend_Graph_Limited.py /home/hyunwoo/ACCtools-pipeline/90_skype_run/Caki-1/20_alignasm/Caki-1.ctg.aln.paf public_data/chm13v2.0.fa.fai public_data/chm13v2.0_telomere.bed public_data/chm13v2.0_repeat.m.bed public_data/chm13v2.0_censat_v2.1.m.bed /home/hyunwoo/ACCtools-pipeline/90_skype_run/Caki-1/01_depth/Caki-1.win.stat.gz 30_skype_pipe/Caki-1_08_20_44 /home/hyunwoo/ACCtools-pipeline/90_skype_run/Caki-1/01_depth/Caki-1.bam --alt /home/hyunwoo/ACCtools-pipeline/90_skype_run/Caki-1/20_alignasm/Caki-1.utg.aln.paf --orignal_paf_loc /home/hyunwoo/ACCtools-pipeline/90_skype_run/Caki-1/20_alignasm/Caki-1.ctg.paf /home/hyunwoo/ACCtools-pipeline/90_skype_run/Caki-1/20_alignasm/Caki-1.utg.paf --test --skip_bam_analysis -t 128"
-args = parser.parse_args(t.split()[1:])
+# t = "02_Build_Breakend_Graph_Limited.py /home/hyunwoo/ACCtools-pipeline/90_skype_run/Caki-1/20_alignasm/Caki-1.ctg.aln.paf public_data/chm13v2.0.fa.fai public_data/chm13v2.0_telomere.bed public_data/chm13v2.0_repeat.m.bed public_data/chm13v2.0_censat_v2.1.m.bed /home/hyunwoo/ACCtools-pipeline/90_skype_run/Caki-1/01_depth/Caki-1.win.stat.gz 30_skype_pipe/Caki-1_08_20_44 /home/hyunwoo/ACCtools-pipeline/90_skype_run/Caki-1/01_depth/Caki-1.bam --alt /home/hyunwoo/ACCtools-pipeline/90_skype_run/Caki-1/20_alignasm/Caki-1.utg.aln.paf --orignal_paf_loc /home/hyunwoo/ACCtools-pipeline/90_skype_run/Caki-1/20_alignasm/Caki-1.ctg.paf /home/hyunwoo/ACCtools-pipeline/90_skype_run/Caki-1/20_alignasm/Caki-1.utg.paf --test --skip_bam_analysis -t 128"
+# args = parser.parse_args(t.split()[1:])
 
 PREFIX = args.prefix
 
@@ -5339,3 +5339,6 @@ with open(f'{PREFIX}/report.txt', 'w') as f:
     for (st, nd), c in sorted(cnt_list, key=lambda x:-x[1]):
         if c > 0:
             print(st, nd, c, file=f)
+
+with open(f'{PREFIX}/nclose_chunk_data.pkl', 'wb') as f:
+        pkl.dump((nclose_nodes, st_compress, ed_compress), f)

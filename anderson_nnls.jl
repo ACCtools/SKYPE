@@ -444,15 +444,45 @@ function nnls_solve(X::AbstractMatrix{T}, y::AbstractVector{T}, thread::Int=1, v
     return w_sol
 end
 
+function get_transpose_matrix(hf_dst::HDF5.Dataset)
+    dims = size(hf_dst)
+    out_dims = reverse(dims)
+    T = eltype(hf_dst)
+
+    # Allocate the final output matrix
+    A_out = Matrix{T}(undef, out_dims...)
+    
+    chunk_cols = 1000
+    
+    # Pre-allocate a single buffer matrix outside the loop
+    buffer = Matrix{T}(undef, dims[1], chunk_cols)
+
+    for i in 1:chunk_cols:dims[2]
+        idx_end = min(i + chunk_cols - 1, dims[2])
+        current_cols = idx_end - i + 1
+        
+        # Create a contiguous view of the buffer for the current chunk size
+        buffer_view = view(buffer, :, 1:current_cols)
+
+        # Perform zero-allocation direct read from HDF5 to the buffer
+        copyto!(buffer_view, hf_dst, :, i:idx_end)
+
+        # Write the transposed chunk into the pre-allocated output matrix
+        @views A_out[i:idx_end, :] .= transpose(buffer_view)
+    end
+
+    return A_out
+end
+
 function load_nnls_array(filename::String)
     h5open(filename, "r") do file
-        return read(file["A"]), read(file["B"]), read(file["B_depth_start"])
+        return get_transpose_matrix(file["A"]), read(file["B"]), read(file["B_depth_start"])
     end
 end
 
 function load_fail_array(filename::String)
     h5open(filename, "r") do file
-        return read(file["A_fail"])
+        return get_transpose_matrix(file["A_fail"])
     end
 end
 

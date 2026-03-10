@@ -1,5 +1,5 @@
 {
-    "julia": "1.11",
+    "julia": "1",
     "packages": {
         "XAM": {
             "uuid": "d759349c-bcba-11e9-07c2-5b90f8f05f7c"
