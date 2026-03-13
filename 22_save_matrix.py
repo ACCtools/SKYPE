@@ -766,6 +766,7 @@ for i in tqdm(range(1, fclen // 4 + 1), desc='Parse coverage from forward-direct
               disable=not sys.stdout.isatty() and not args.progress):
     ov_loc = front_contig_path + f"{i}.win.stat.gz"
 
+    type2_ins_idx = -1
     if os.path.isfile(ov_loc):
         ov = get_vec_from_stat_loc(ov_loc)
     else:
@@ -787,7 +788,7 @@ for i in tqdm(range(1, fclen // 4 + 1), desc='Parse coverage from forward-direct
     
     A_arr[ncm:, ncnt] = tv
         
-    path_nclose_dict_set[ncnt] = set((ov_loc.split('/')[-2], i))
+    path_nclose_dict_set[ncnt].add((ov_loc.split('/')[-2], i, type2_ins_idx))
     ncnt += 1
     indel_idx += 1
     
@@ -803,6 +804,7 @@ for i in tqdm(range(1, bclen // 4 + 1), desc='Parse coverage from backward-direc
               disable=not sys.stdout.isatty() and not args.progress):
     ov_loc = back_contig_path + f"{i}.win.stat.gz"
 
+    type2_ins_idx = -1
     if os.path.isfile(ov_loc):
         ov = get_vec_from_stat_loc(ov_loc)
     else:
@@ -825,20 +827,21 @@ for i in tqdm(range(1, bclen // 4 + 1), desc='Parse coverage from backward-direc
     
     A_arr[ncm:, ncnt] = tv
         
-    path_nclose_dict_set[ncnt] = set((ov_loc.split('/')[-2], i))
+    path_nclose_dict_set[ncnt].add((ov_loc.split('/')[-2], i, type2_ins_idx))
     ncnt += 1
     indel_idx += 1
 
 for i in range(1, eclen // 2 + 1):
     ov_loc = ecdna_contig_path + f"{i}.win.stat.gz"
     ov = get_vec_from_stat_loc(ov_loc)
+    type2_ins_idx = -1
 
     if NCLOSE_WEIGHT_USE:
         A_arr[:ncm, ncnt] = tmp_n
             
     A_arr[ncm:, ncnt] = ov
         
-    path_nclose_dict_set[ncnt] = set((ov_loc.split('/')[-2], i))
+    path_nclose_dict_set[ncnt].add((ov_loc.split('/')[-2], i, type2_ins_idx))
     ncnt += 1
 
 B = np.hstack((B_nclose, B))

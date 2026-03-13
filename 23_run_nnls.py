@@ -41,7 +41,7 @@ CTG_GLOBALIDX = 21
 DEPTH_VECTOR_WINDOW = 100 * K
 DEPTH_ERROR_ALLOW_LEN = 500 * K
 
-BASE_ACCSUMABSMAX_RATIO = 0.1
+BASE_ACCSUMABSMAX_RATIO = 1
 
 VCF_FLANKING_LENGTH = 1*M
 NCLOSE_SIM_COMPARE_RAITO = 1.2
@@ -52,23 +52,19 @@ CHROM_ERROR_FAIL_RATE = 1.0
 
 
 def similar_check(v1, v2, ratio):
-    try:
-        assert(v1 >= 0 and v2 >= 0)
-    except:
+    if not (v1 >= 0 and v2 >= 0):
         logging.error(f"Invalid values for similarity check: v1={v1}, v2={v2}")
+        return False
     mi, ma = sorted([v1, v2])
     return True if mi == 0 else (ma / mi <= ratio) or ma-mi < NCLOSE_SIM_DIFF_THRESHOLD
 
 def exist_near_bnd(chrom, inside_st, inside_nd):
-    # subset of df for the given chromosome
     df_chr = df[df['chr'] == chrom]
 
     def mean_depth(start, end):
-        """Return mean meandepth over windows overlapping [start, end)."""
         mask = (df_chr['nd'] > start) & (df_chr['st'] < end)
         return df_chr.loc[mask, 'meandepth'].mean()
 
-    # for inside_st
     st_depth = mean_depth(inside_st - VCF_FLANKING_LENGTH, inside_st)
     nd_depth = mean_depth(inside_nd, inside_nd + VCF_FLANKING_LENGTH)
     if np.isnan(st_depth) or np.isnan(nd_depth):
@@ -112,9 +108,6 @@ parser.add_argument("-t", "--thread", help="Number of threads", type=int)
 
 args = parser.parse_args()
 
-# t = "23_run_nnls.py /home/hyunwoo/ACCtools-pipeline/90_skype_run/H1437/20_alignasm/H1437.ctg.aln.paf.ppc.paf 30_skype_pipe/H1437_00_45_24 /home/hyunwoo/ACCtools-pipeline/90_skype_run/H1437/01_depth/H1437_normalized.win.stat.gz -t 128"
-# args = parser.parse_args(t.split()[1:])
-
 PREPROCESSED_PAF_FILE_PATH = args.ppc_paf_file_path
 PREFIX = args.prefix
 main_stat_loc = args.main_stat_path
@@ -135,8 +128,6 @@ meandepth = df['meandepth'].median()
 
 
 with open(f'{PREFIX}/23_input.pkl', 'rb') as f:
-#     dep_list, init_cols, w_pri, using_ncnt_array, \
-#     div_nclose_set, each_nclose_notusing_path_dict, \
     chr_filt_st_list, path_nclose_set_dict, amplitude, bed_data = pkl.load(f)
 
 ydf = df.query('chr == "chrY"')
@@ -162,7 +153,6 @@ use_julia_solver = path_cnt <= HARD_PATH_COUNT_BASELINE
 if use_julia_solver:
     from juliacall import Main as jl
 
-    # Julia solver
     jl.include(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'anderson_nnls.jl'))
     jl.seval("using HDF5, LinearAlgebra")
 
@@ -189,126 +179,30 @@ if use_julia_solver:
         for j in path_nclose_set_dict[i]:
             nclose_total_weight_dict[j] += v
 
-    # Phase 1 : inital nclose filtering
-    div_nclose_set = set()
-    for k, v in nclose_total_weight_dict.items():
-        st, ed = k
-        # depth check, type 1 only
-        if v >= 0 * meandepth \
-        and ppc_contig_data[st][CHR_NAM] != ppc_contig_data[ed][CHR_NAM]:
-            # Check if at least one of endpoint have non-diverse depth & not a virtual censat contig
-            if (not exist_near_bnd(ppc_contig_data[st][CHR_NAM], ppc_contig_data[st][CHR_STR], ppc_contig_data[st][CHR_END]) or \
-            not exist_near_bnd(ppc_contig_data[ed][CHR_NAM], ppc_contig_data[ed][CHR_STR], ppc_contig_data[ed][CHR_END])) and \
-            not ppc_contig_data[st][CTG_NAM].startswith('virtual_censat_contig'):
-                div_nclose_set.add(k)
-            # Check if at least one of endpoint is censat contig
-            if (ppc_contig_data[st][CTG_CENSAT] != '0' or ppc_contig_data[ed][CTG_CENSAT] != '0') and not ppc_contig_data[st][CTG_NAM].startswith('virtual_censat_contig'):
-                div_nclose_set.add(k)
-
-    int2nclose = dict()
-
-    nclose_notusing_idx_dict = defaultdict(list)
-    for nclose_pair in div_nclose_set:
-        for k, path_nclose_usage in path_nclose_set_dict.items():
-            if nclose_pair not in path_nclose_usage:
-                nclose_notusing_idx_dict[nclose_pair].append(k)
-
-    tar_nclose_list = []
-    thread_data_jl = jl.Vector[jl.Vector[jl.Int]]()
-    for k, v in nclose_notusing_idx_dict.items():
-        jl.push_b(thread_data_jl, jl.Vector[jl.Int](v))
-        tar_nclose_list.append(k)
-
-    weight_list = jl.run_nnls_map(A_jl, B_jl, thread_data_jl)
-    not_essential_nclose = set()
-
-    logging.info(f"Testing nclose pairs count : {len(tar_nclose_list)}")
-    for nclose_pair, (weight_jl, predict_suc_B_jl) in zip(tar_nclose_list, weight_list):
-        predict_suc_B = np.asarray(predict_suc_B_jl)
-
-        chrom_acc_sum_dict = defaultdict(int)
-        chrom_acc_sum_dict_max = defaultdict(int)
-        for i, (chrom, st) in enumerate(chr_filt_st_list):
-            chrom_acc_sum_dict[chrom] += predict_suc_B[i] - predict_suc_B_base[i] 
-            if abs(chrom_acc_sum_dict[chrom]) > chrom_acc_sum_dict_max[chrom]:
-                chrom_acc_sum_dict_max[chrom] = abs(chrom_acc_sum_dict[chrom])
-
-        max_error_rate = 0
-        for chrom, acc_sum_max in chrom_acc_sum_dict_max.items():
-            if chrom == 'chrY' and no_chrY:
-                continue
-            acc_sum_max_base = chrom_acc_sum_dict_max_base[chrom]
-            max_error_rate = max(max_error_rate, acc_sum_max / acc_sum_max_base)
-
-        if max_error_rate < BASE_ACCSUMABSMAX_RATIO:
-            logging.debug(f"{nclose_pair} : Nclose removed")
-            not_essential_nclose.add(nclose_pair)
-
-    logging.info(f'Filtered nclose count by depth : {len(not_essential_nclose)}')
-    # logging.info(f'{not_essential_nclose}')
-
-    using_idx_set = set(range(len(weight_base)))
-    for nclose_pair in not_essential_nclose:
-        using_idx_set &= set(nclose_notusing_idx_dict[nclose_pair])
-
-    final_idx_list = sorted(list(using_idx_set))
-    final_idx_array_jl = jl.Vector[jl.Int]([i + 1 for i in final_idx_list]) # 1-index
-
-    A_final_jl = jl.view(A_jl, jl.Colon(), final_idx_array_jl)
-    A_fail_final_jl = jl.view(A_fail_jl, jl.Colon(), final_idx_array_jl)
-
-    final_weight_jl = jl.nnls_solve(A_final_jl, B_jl, THREAD, False)
-    final_weight = np.asarray(final_weight_jl)
-
-    for i, v in enumerate(final_idx_list):
-        final_weights_fullsize[int(v)] = final_weight[i]
-
-    predict_B_succ = np.asarray(A_final_jl * final_weight_jl)
-    predict_B_fail = np.asarray(A_fail_final_jl * final_weight_jl)
-
-    # Phase 2 : check diverse chromosome
-    predict_suc_B = predict_B_succ
-
-    chrom_acc_sum_dict = defaultdict(int)
-    chrom_acc_sum_dict_max = defaultdict(int)
-    for i, (chrom, st) in enumerate(chr_filt_st_list):
-        chrom_acc_sum_dict[chrom] += predict_suc_B[i] - predict_suc_B_base[i]
-        if abs(chrom_acc_sum_dict[chrom]) > chrom_acc_sum_dict_max[chrom]:
-            chrom_acc_sum_dict_max[chrom] = abs(chrom_acc_sum_dict[chrom])
-    
+    # Iterate filtering process until failing chromosomes stabilize
     fail_chrom_list = []
-    for chrom, acc_sum_max in chrom_acc_sum_dict_max.items():
-        if chrom == 'chrY' and no_chrY:
-            continue
-        acc_sum_max_base = chrom_acc_sum_dict_max_base[chrom]
-        chrom_error_rate = acc_sum_max / acc_sum_max_base
-        
-        if chrom_error_rate > CHROM_ERROR_FAIL_RATE:
-            fail_chrom_list.append(chrom)
-    
-    if len(fail_chrom_list) > 0:
-        logging.info(f'Fail filtering nclose chromosome : {', '.join(fail_chrom_list)}')
+    prev_fail_chrom_set = None
 
-        # Phase 3 : final nclose filtering
+    while True:
+        # Check termination condition: Break if fail_chrom_list has not changed
+        if prev_fail_chrom_set is not None and (set(fail_chrom_list) == prev_fail_chrom_set or not fail_chrom_list):
+            break
+        prev_fail_chrom_set = set(fail_chrom_list)
+
         div_nclose_set = set()
         for k, v in nclose_total_weight_dict.items():
-            st, ed = k
-            
-            # depth check, type 1 only
-            if v >= 0 * meandepth \
-            and ppc_contig_data[st][CHR_NAM] != ppc_contig_data[ed][CHR_NAM] \
-            and ppc_contig_data[st][CHR_NAM] not in fail_chrom_list \
-            and ppc_contig_data[ed][CHR_NAM] not in fail_chrom_list:
-                # Check if at least one of endpoint have non-diverse depth & not a virtual censat contig
-                if (not exist_near_bnd(ppc_contig_data[st][CHR_NAM], ppc_contig_data[st][CHR_STR], ppc_contig_data[st][CHR_END]) or \
-                not exist_near_bnd(ppc_contig_data[ed][CHR_NAM], ppc_contig_data[ed][CHR_STR], ppc_contig_data[ed][CHR_END])) and \
-                not ppc_contig_data[st][CTG_NAM].startswith('virtual_censat_contig'):
-                    div_nclose_set.add(k)
-                # Check if at least one of endpoint is censat contig
-                if (ppc_contig_data[st][CTG_CENSAT] != '0' or ppc_contig_data[ed][CTG_CENSAT] != '0') and not ppc_contig_data[st][CTG_NAM].startswith('virtual_censat_contig'):
-                    div_nclose_set.add(k)
-
-        int2nclose = dict()
+            if len(k) == 2:
+                st, ed = k
+                if v >= 0 * meandepth \
+                and ppc_contig_data[st][CHR_NAM] != ppc_contig_data[ed][CHR_NAM] \
+                and ppc_contig_data[st][CHR_NAM] not in fail_chrom_list \
+                and ppc_contig_data[ed][CHR_NAM] not in fail_chrom_list:
+                    if (not exist_near_bnd(ppc_contig_data[st][CHR_NAM], ppc_contig_data[st][CHR_STR], ppc_contig_data[st][CHR_END]) or \
+                    not exist_near_bnd(ppc_contig_data[ed][CHR_NAM], ppc_contig_data[ed][CHR_STR], ppc_contig_data[ed][CHR_END])) and \
+                    not ppc_contig_data[st][CTG_NAM].startswith('virtual_censat_contig'):
+                        div_nclose_set.add(k)
+                    if (ppc_contig_data[st][CTG_CENSAT] != '0' or ppc_contig_data[ed][CTG_CENSAT] != '0') and not ppc_contig_data[st][CTG_NAM].startswith('virtual_censat_contig'):
+                        div_nclose_set.add(k)
 
         nclose_notusing_idx_dict = defaultdict(list)
         for nclose_pair in div_nclose_set:
@@ -323,21 +217,19 @@ if use_julia_solver:
             tar_nclose_list.append(k)
 
         weight_list = jl.run_nnls_map(A_jl, B_jl, thread_data_jl)
-
         not_essential_nclose = set()
 
-        logging.info(f"Final testing nclose pairs count : {len(tar_nclose_list)}")
-
+        logging.info(f"Testing nclose pairs count : {len(tar_nclose_list)}")
         for nclose_pair, (weight_jl, predict_suc_B_jl) in zip(tar_nclose_list, weight_list):
             predict_suc_B = np.asarray(predict_suc_B_jl)
 
             chrom_acc_sum_dict = defaultdict(int)
             chrom_acc_sum_dict_max = defaultdict(int)
             for i, (chrom, st) in enumerate(chr_filt_st_list):
-                chrom_acc_sum_dict[chrom] += predict_suc_B[i] - predict_suc_B_base[i]
+                chrom_acc_sum_dict[chrom] += predict_suc_B[i] - predict_suc_B_base[i] 
                 if abs(chrom_acc_sum_dict[chrom]) > chrom_acc_sum_dict_max[chrom]:
                     chrom_acc_sum_dict_max[chrom] = abs(chrom_acc_sum_dict[chrom])
-            
+
             max_error_rate = 0
             for chrom, acc_sum_max in chrom_acc_sum_dict_max.items():
                 if chrom == 'chrY' and no_chrY:
@@ -349,15 +241,14 @@ if use_julia_solver:
                 logging.debug(f"{nclose_pair} : Nclose removed")
                 not_essential_nclose.add(nclose_pair)
 
-        logging.info(f'Final filtered nclose count by depth : {len(not_essential_nclose)}')
-        # logging.info(f'{not_essential_nclose}')
+        logging.info(f'Filtered nclose count by depth : {len(not_essential_nclose)}')
 
         using_idx_set = set(range(len(weight_base)))
         for nclose_pair in not_essential_nclose:
             using_idx_set &= set(nclose_notusing_idx_dict[nclose_pair])
 
         final_idx_list = sorted(list(using_idx_set))
-        final_idx_array_jl = jl.Vector[jl.Int]([i + 1 for i in final_idx_list]) # 1-index
+        final_idx_array_jl = jl.Vector[jl.Int]([i + 1 for i in final_idx_list])
 
         A_final_jl = jl.view(A_jl, jl.Colon(), final_idx_array_jl)
         A_fail_final_jl = jl.view(A_fail_jl, jl.Colon(), final_idx_array_jl)
@@ -365,11 +256,35 @@ if use_julia_solver:
         final_weight_jl = jl.nnls_solve(A_final_jl, B_jl, THREAD, False)
         final_weight = np.asarray(final_weight_jl)
 
+        # Update final weights
+        final_weights_fullsize = np.zeros(len(weight_base))
         for i, v in enumerate(final_idx_list):
             final_weights_fullsize[int(v)] = final_weight[i]
 
         predict_B_succ = np.asarray(A_final_jl * final_weight_jl)
         predict_B_fail = np.asarray(A_fail_final_jl * final_weight_jl)
+
+        # Calculate error rates to identify failing chromosomes for next iteration
+        chrom_acc_sum_dict = defaultdict(int)
+        chrom_acc_sum_dict_max = defaultdict(int)
+        for i, (chrom, st) in enumerate(chr_filt_st_list):
+            chrom_acc_sum_dict[chrom] += predict_B_succ[i] - predict_suc_B_base[i]
+            if abs(chrom_acc_sum_dict[chrom]) > chrom_acc_sum_dict_max[chrom]:
+                chrom_acc_sum_dict_max[chrom] = abs(chrom_acc_sum_dict[chrom])
+        
+        fail_chrom_list = []
+        for chrom, acc_sum_max in chrom_acc_sum_dict_max.items():
+            if chrom == 'chrY' and no_chrY:
+                continue
+            acc_sum_max_base = chrom_acc_sum_dict_max_base[chrom]
+            chrom_error_rate = acc_sum_max / acc_sum_max_base
+            
+            if chrom_error_rate > CHROM_ERROR_FAIL_RATE:
+                fail_chrom_list.append(chrom)
+        
+        if len(fail_chrom_list) > 0:
+            logging.info(f'Fail filtering nclose chromosome : {", ".join(fail_chrom_list)}')
+
 else:
     import h5py
 
@@ -406,7 +321,6 @@ else:
     predict_B_succ = A.dot(weights)
     predict_B_fail = A_fail.dot(weights)
 
-# clustering weight
 b_norm = np.linalg.norm(B)
 
 error = np.linalg.norm(predict_B_succ - B)
