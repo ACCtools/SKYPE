@@ -724,6 +724,7 @@ for path, key_int_list in tqdm(paf_ans_list, desc='Recover depth from separated 
 
     idx_path = import_index_path(path)
 
+    path_nclose_dict_set[ncnt] = set()
     s = 1
     while s < len(idx_path)-2:
         nclose_cand = tuple(sorted([idx_path[s][1], idx_path[s+1][1]]))

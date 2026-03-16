@@ -41,7 +41,7 @@ CTG_GLOBALIDX = 21
 DEPTH_VECTOR_WINDOW = 100 * K
 DEPTH_ERROR_ALLOW_LEN = 500 * K
 
-BASE_ACCSUMABSMAX_RATIO = 1
+BASE_ACCSUMABSMAX_RATIO = 0.1
 
 VCF_FLANKING_LENGTH = 1*M
 NCLOSE_SIM_COMPARE_RAITO = 1.2
@@ -272,7 +272,6 @@ if use_julia_solver:
             if abs(chrom_acc_sum_dict[chrom]) > chrom_acc_sum_dict_max[chrom]:
                 chrom_acc_sum_dict_max[chrom] = abs(chrom_acc_sum_dict[chrom])
         
-        fail_chrom_list = []
         for chrom, acc_sum_max in chrom_acc_sum_dict_max.items():
             if chrom == 'chrY' and no_chrY:
                 continue
