@@ -709,7 +709,8 @@ def ecdna_format(x:int) -> str:
     else:
         return str(x)
 
-def build_karyotype_diagram(weights, fig_prefix : str = '', filter_depth_N : float = 0):
+def build_karyotype_diagram(fig_prefix : str = '', filter_depth_N : float = TARGET_DEPTH):
+    weights = np.load(f'{PREFIX}/weight{fig_prefix}.npy')
     loc2weight = dict(zip(tot_loc_list, weights))
     weights_sorted_data = sorted(enumerate(weights), key=lambda t:t[1], reverse=True)
     
@@ -1054,9 +1055,7 @@ for node_id, telo_len, chr_dir in telo_len_data:
 
 weights = np.load(f'{PREFIX}/weight.npy')
 
-build_karyotype_diagram(weights, "_raw")
-
-build_karyotype_diagram(weights, filter_depth_N=TARGET_DEPTH)
+build_karyotype_diagram()
 
 with open(f"{PREFIX}/report.txt", 'r') as f:
     f.readline()
@@ -1065,5 +1064,5 @@ with open(f"{PREFIX}/report.txt", 'r') as f:
 use_julia_solver = path_cnt <= HARD_PATH_COUNT_BASELINE
 
 if use_julia_solver:
-    weights_cluster = np.load(f'{PREFIX}/weight_cluster.npy')
-    build_karyotype_diagram(weights_cluster, '_cluster')
+    build_karyotype_diagram(fig_prefix='_filter')
+    build_karyotype_diagram(fig_prefix='_cluster')

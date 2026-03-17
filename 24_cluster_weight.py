@@ -5,7 +5,6 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from skype_utils import *
 
 from collections import defaultdict
-from juliacall import Main as jl
 
 import ast
 import glob
@@ -34,9 +33,10 @@ CTG_TELCHR = 13
 CTG_TELDIR = 14
 CTG_TELCON = 15
 CTG_RPTCHR = 16
-CTG_RPTCASE = 17
-CTG_MAINFLOWDIR = 18
-CTG_MAINFLOWCHR = 19
+CTG_CENSAT = 18
+CTG_MAINFLOWDIR = 19
+CTG_MAINFLOWCHR = 20
+CTG_GLOBALIDX = 21
 
 NODE_NAME = 1
 CHR_CHANGE_IDX = 2
@@ -58,8 +58,14 @@ JOIN_DIFF_CHR_BASELINE = 0.9
 TELOMERE_EXPANSION = 5 * K
 KARYOTYPE_SECTION_MINIMUM_LENGTH = 100*K
 
-
 TYPE4_CLUSTER_SIZE = 10 * M
+
+BASE_ACCSUMABSMAX_RATIO = 1.0
+CHROM_ERROR_FAIL_RATE = 2.0
+
+VCF_FLANKING_LENGTH = 1*M
+NCLOSE_SIM_COMPARE_RAITO = 1.2
+NCLOSE_SIM_DIFF_THRESHOLD = 5
 
 def get_relative_path(p):
     return tuple(p.split('/')[-3:])
@@ -134,6 +140,27 @@ def find_chr_len(file_path : str) -> dict:
         chr_len[curr_data[0]] = int(curr_data[1])
     chr_data_file.close()
     return chr_len
+
+def similar_check(v1, v2, ratio):
+    if not (v1 >= 0 and v2 >= 0):
+        logging.error(f"Invalid values for similarity check: v1={v1}, v2={v2}")
+        return False
+    mi, ma = sorted([v1, v2])
+    return True if mi == 0 else (ma / mi <= ratio) or ma-mi < NCLOSE_SIM_DIFF_THRESHOLD
+
+def exist_near_bnd(chrom, inside_st, inside_nd):
+    df_chr = df[df['chr'] == chrom]
+
+    def mean_depth(start, end):
+        mask = (df_chr['nd'] > start) & (df_chr['st'] < end)
+        return df_chr.loc[mask, 'meandepth'].mean()
+
+    st_depth = mean_depth(inside_st - VCF_FLANKING_LENGTH, inside_st)
+    nd_depth = mean_depth(inside_nd, inside_nd + VCF_FLANKING_LENGTH)
+    if np.isnan(st_depth) or np.isnan(nd_depth):
+        return True
+    
+    return not similar_check(st_depth, nd_depth, NCLOSE_SIM_COMPARE_RAITO)
 
 def parse_chromosome_labels(s):
     """
@@ -366,7 +393,6 @@ args = parser.parse_args()
 # """
 # args = parser.parse_args(t.strip().split()[1:])
 
-
 PREFIX = args.prefix
 CHROMOSOME_INFO_FILE_PATH = args.reference_fai_path
 main_stat_loc = args.main_stat_loc
@@ -414,9 +440,179 @@ meandepth = np.median(df['meandepth'])
 N = meandepth / 2
 
 chr_len = find_chr_len(CHROMOSOME_INFO_FILE_PATH)
+
+# Julia remove small nclose
+with open(f'{PREFIX}/23_input.pkl', 'rb') as f:
+    chr_filt_st_list, path_nclose_set_dict, amplitude, bed_data = pkl.load(f)
+
+ydf = df.query('chr == "chrY"')
+
+bed_intervals = pd.IntervalIndex.from_tuples(bed_data['chrY'], closed='left')
+y_mask = ydf.apply(
+    lambda row: bed_intervals.overlaps(pd.Interval(row['st'], row['nd'], closed='left')),
+    axis=1
+)
+
+correct_mask = y_mask.apply(any)
+ydf_not_censat = ydf[~correct_mask]
+
+chry_nz_len = len(ydf_not_censat.query('meandepth != 0'))
+no_chrY = (chry_nz_len / len(ydf_not_censat)) < chrY_MINIMUM_RATIO
+
+from juliacall import Main as jl
+
+jl.include(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'anderson_nnls.jl'))
+jl.seval("using HDF5, LinearAlgebra")
+
+A_jl, B_jl, b_start_ind = jl.load_nnls_array(f'{PREFIX}/matrix.h5')
+A_fail_jl = jl.load_fail_array(f'{PREFIX}/matrix.h5')
+B = np.asarray(B_jl)
+
+# Get weight from 23_run_nnls.py
+weight_base = np.load(f'{PREFIX}/weight.npy')
+weight_base_jl = jl.Vector[jl.eltype(B_jl)](weight_base)
+
+final_weights_fullsize = np.zeros(len(weight_base))
+predict_suc_B_base = np.asarray(A_jl * weight_base_jl)
+
+chrom_acc_sum_dict_base = defaultdict(int)
+chrom_acc_sum_dict_max_base = defaultdict(int)
+for i, (chrom, st) in enumerate(chr_filt_st_list):
+    chrom_acc_sum_dict_base[chrom] += predict_suc_B_base[i] - B[i]
+    if abs(chrom_acc_sum_dict_base[chrom]) > chrom_acc_sum_dict_max_base[chrom]:
+        chrom_acc_sum_dict_max_base[chrom] = abs(chrom_acc_sum_dict_base[chrom])
+
+nclose_total_weight_dict = defaultdict(float)
+for i, v in enumerate(weight_base):
+    for j in path_nclose_set_dict[i]:
+        nclose_total_weight_dict[j] += v
+
+with open('A_idx_list.pkl', 'rb') as f:
+    A_idx_list = pkl.load(f)
+
+# Iterate filtering process until failing chromosomes stabilize
+fail_chrom_list = []
+prev_fail_chrom_set = None
+
+while True:
+    # Check termination condition: Break if fail_chrom_list has not changed
+    if prev_fail_chrom_set is not None and (set(fail_chrom_list) == prev_fail_chrom_set or not fail_chrom_list):
+        break
+    prev_fail_chrom_set = set(fail_chrom_list)
+
+    div_nclose_set = set()
+    for k, v in nclose_total_weight_dict.items():
+        if len(k) == 2:
+            st, ed = k
+            if v >= 0 * meandepth \
+            and ppc_data[st][CHR_NAM] != ppc_data[ed][CHR_NAM] \
+            and ppc_data[st][CHR_NAM] not in fail_chrom_list \
+            and ppc_data[ed][CHR_NAM] not in fail_chrom_list:
+                if (not exist_near_bnd(ppc_data[st][CHR_NAM], ppc_data[st][CHR_STR], ppc_data[st][CHR_END]) or \
+                not exist_near_bnd(ppc_data[ed][CHR_NAM], ppc_data[ed][CHR_STR], ppc_data[ed][CHR_END])) and \
+                not ppc_data[st][CTG_NAM].startswith('virtual_censat_contig'):
+                    div_nclose_set.add(k)
+                if (ppc_data[st][CTG_CENSAT] != '0' or ppc_data[ed][CTG_CENSAT] != '0') and not ppc_data[st][CTG_NAM].startswith('virtual_censat_contig'):
+                    div_nclose_set.add(k)
+
+    nclose_notusing_idx_dict = defaultdict(list)
+    for nclose_pair in div_nclose_set:
+        for k, path_nclose_usage in path_nclose_set_dict.items():
+            if nclose_pair not in path_nclose_usage:
+                nclose_notusing_idx_dict[nclose_pair].append(k)
+
+    tar_nclose_list = []
+    thread_data_jl = jl.Vector[jl.Vector[jl.Int]]()
+    for k, v in nclose_notusing_idx_dict.items():
+        jl.push_b(thread_data_jl, jl.Vector[jl.Int](v))
+        tar_nclose_list.append(k)
+
+    weight_list = jl.run_nnls_map(A_jl, B_jl, thread_data_jl)
+    not_essential_nclose = set()
+
+    logging.info(f"Testing nclose pairs count : {len(tar_nclose_list)}")
+    for nclose_pair, (weight_jl, predict_suc_B_jl) in zip(tar_nclose_list, weight_list):
+        predict_suc_B = np.asarray(predict_suc_B_jl)
+
+        chrom_acc_sum_dict = defaultdict(int)
+        chrom_acc_sum_dict_max = defaultdict(int)
+        for i, (chrom, st) in enumerate(chr_filt_st_list):
+            chrom_acc_sum_dict[chrom] += predict_suc_B[i] - predict_suc_B_base[i] 
+            if abs(chrom_acc_sum_dict[chrom]) > chrom_acc_sum_dict_max[chrom]:
+                chrom_acc_sum_dict_max[chrom] = abs(chrom_acc_sum_dict[chrom])
+
+        max_error_rate = 0
+        for chrom, acc_sum_max in chrom_acc_sum_dict_max.items():
+            if chrom == 'chrY' and no_chrY:
+                continue
+            acc_sum_max_base = chrom_acc_sum_dict_max_base[chrom]
+            max_error_rate = max(max_error_rate, acc_sum_max / acc_sum_max_base)
+        
+        if max_error_rate < BASE_ACCSUMABSMAX_RATIO:
+            logging.debug(f"{nclose_pair} : Nclose removed")
+            not_essential_nclose.add(nclose_pair)
+
+    logging.info(f'Filtered nclose count by depth : {len(not_essential_nclose)}')
+
+    using_idx_set = set(A_idx_list)
+    for nclose_pair in not_essential_nclose:
+        using_idx_set &= set(nclose_notusing_idx_dict[nclose_pair])
+
+    final_idx_list = sorted(list(using_idx_set))
+    final_idx_array_jl = jl.Vector[jl.Int]([i + 1 for i in final_idx_list])
+
+    A_final_jl = jl.view(A_jl, jl.Colon(), final_idx_array_jl)
+    A_fail_final_jl = jl.view(A_fail_jl, jl.Colon(), final_idx_array_jl)
+
+    final_weight_jl = jl.nnls_solve(A_final_jl, B_jl, THREAD, False)
+    final_weight = np.asarray(final_weight_jl)
+
+    # Update final weights
+    final_weights_fullsize = np.zeros(len(weight_base))
+    for i, v in enumerate(final_idx_list):
+        final_weights_fullsize[int(v)] = final_weight[i]
+
+    predict_B_succ = np.asarray(A_final_jl * final_weight_jl)
+    predict_B_fail = np.asarray(A_fail_final_jl * final_weight_jl)
+
+    # Calculate error rates to identify failing chromosomes for next iteration
+    chrom_acc_sum_dict = defaultdict(int)
+    chrom_acc_sum_dict_max = defaultdict(int)
+    for i, (chrom, st) in enumerate(chr_filt_st_list):
+        chrom_acc_sum_dict[chrom] += predict_B_succ[i] - predict_suc_B_base[i]
+        if abs(chrom_acc_sum_dict[chrom]) > chrom_acc_sum_dict_max[chrom]:
+            chrom_acc_sum_dict_max[chrom] = abs(chrom_acc_sum_dict[chrom])
+    
+    new_fail_chrom_list = []
+    for chrom, acc_sum_max in chrom_acc_sum_dict_max.items():
+        if chrom == 'chrY' and no_chrY:
+            continue
+        acc_sum_max_base = chrom_acc_sum_dict_max_base[chrom]
+        chrom_error_rate = acc_sum_max / acc_sum_max_base
+        
+        if chrom_error_rate > CHROM_ERROR_FAIL_RATE:
+            new_fail_chrom_list.append(chrom)
+    new_fail_chrom_list.extend(fail_chrom_list)
+
+    if len(fail_chrom_list) > 0:
+        logging.info(f'Fail filtering nclose chromosome : {", ".join(new_fail_chrom_list)}')
+
+if len(fail_chrom_list) > 0:
+    logging.info(f'Final fail filtering nclose chromosome : {", ".join(fail_chrom_list)}')
+
+b_norm = np.linalg.norm(B)
+
+error = np.linalg.norm(predict_B_succ - B)
+predict_B = np.concatenate((predict_B_succ, predict_B_fail))[b_start_ind:]
+
+logging.info(f'Filter Error : {error:.4f}')
+logging.info(f'Filter relative error : {error/b_norm:.4f}')
+
+np.save(f'{PREFIX}/weight_filter.npy', final_weights_fullsize)
+np.save(f'{PREFIX}/predict_B_filter.npy', predict_B)
+
 weights = np.load(f'{PREFIX}/weight.npy')
 weights_sorted_data = sorted(enumerate(weights), key=lambda t:t[1], reverse=True)
-
 
 chr_inf = max(chr_len.values())
 chr_fb_len_dict = defaultdict(list)
@@ -564,12 +760,7 @@ for ncnt, (paf_loc, w) in enumerate(loc2weight.items()):
 using_merge_ncnt_list.sort()
 using_merge_ncnt_arr = np.asarray(using_merge_ncnt_list)
 
-jl.include(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'anderson_nnls.jl'))
-jl.seval("using HDF5, LinearAlgebra")
-
-A_jl, B_jl, b_start_ind = jl.load_nnls_array(f'{PREFIX}/matrix.h5')
-A_fail_jl = jl.load_fail_array(f'{PREFIX}/matrix.h5')
-B = np.asarray(B_jl)
+# Julia run partial NNLS by using_merge_ncnt_list
 
 final_idx_array_jl = jl.Vector[jl.Int]([i + 1 for i in using_merge_ncnt_list])
 A_final_jl = jl.view(A_jl, jl.Colon(), final_idx_array_jl)

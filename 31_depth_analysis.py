@@ -38,6 +38,7 @@ logging.info("31_depth_analysis start")
 
 BREAKEND_REMARKABLE_CN_RATIO = 0.05
 TELOMERE_REMARKABLE_CN_RATIO = 0.05
+VCF_FILTER_DEPTH_N = 0.1
 
 CTG_NAM = 0
 CTG_LEN = 1
@@ -532,7 +533,7 @@ def write_vcf_header(fh, contig_lengths):
         fh.write(f"##contig=<ID={chrom},length={length}>\n")
     fh.write("#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n")
 
-def pairs_to_vcf(nclose_pairs, contig_data, contig_lengths, display_indel, out_vcf_path):
+def _pairs_to_vcf(nclose_pairs, contig_data, contig_lengths, display_indel, out_vcf_path, significant_nclose, nclose_cn_std):
     with open(out_vcf_path, 'w') as fo:
         # 1) 헤더 쓰기
         write_vcf_header(fo, contig_lengths)
@@ -571,13 +572,13 @@ def pairs_to_vcf(nclose_pairs, contig_data, contig_lengths, display_indel, out_v
             alt_a = bnd_alt("N", chr_b, pos_b, form_a)
             alt_b = bnd_alt("N", chr_a, pos_a, form_b)
 
-            if nclose not in nclose_set:
-                i1, i2 = conjoined_track_data[nclose]
-                merge_mate_id_str = f';MERGE_MATEID=SKYPE.BND.{i1},SKYPE.BND.{i2}'
-                ctg_name = f"{a[CTG_NAM]},{b[CTG_NAM]}"
-            else:
-                merge_mate_id_str = ''
-                ctg_name = a[CTG_NAM]
+            # if nclose not in nclose_set:
+            #     i1, i2 = conjoined_track_data[nclose]
+            #     merge_mate_id_str = f';MERGE_MATEID=SKYPE.BND.{i1},SKYPE.BND.{i2}'
+            #     ctg_name = f"{a[CTG_NAM]},{b[CTG_NAM]}"
+            # else:
+            merge_mate_id_str = ''
+            ctg_name = a[CTG_NAM]
 
             fo.write(
                 f"{chr_a}\t{pos_a}\t{sv_id_a}\t{ref}\t{alt_a}\t{quality}\t{filter_str}\t"
@@ -771,7 +772,7 @@ for i, ll in paf_ans_list:
     cnt = il[-1].split('.')[0]
     chr2chr = il[-2]
     raw_path_list.append(f'{PREFIX}/00_raw/{chr2chr}/{cnt}.index.txt')
-
+rpll = len(raw_path_list)
 
 with open(f'{PREFIX}/tot_loc_list.pkl', 'rb') as f:
     tot_loc_list = pkl.load(f)
@@ -854,7 +855,8 @@ for i, raw_path in enumerate(raw_path_list):
     path_telo_usage.append(using_telo)          
 
 
-def draw_circos_plot(weights, fig_prefix=''):
+def draw_circos_plot(fig_prefix=''):
+    weights = np.load(f'{PREFIX}/weight{fig_prefix}.npy')
     smooth_B = rebin_dataframe_B(df, 10)[chr_filt_idx_list + chr_no_filt_idx_list]
     predicted_B = np.maximum(np.load(f'{PREFIX}/predict_B{fig_prefix}.npy'), 0)
     diff = predicted_B - smooth_B
@@ -870,7 +872,7 @@ def draw_circos_plot(weights, fig_prefix=''):
     if fig_prefix == '':
         msg_prefix = 'Fail'
     else:
-        msg_prefix = 'Cluster fail'
+        msg_prefix = f'{fig_prefix[1:].capitalize()} fail'
 
     logging.info(f'{msg_prefix} ratio : {round(sum(color_label[miss_B] == 3) / len(B) * 100, 3)}%')
 
@@ -1125,7 +1127,6 @@ def draw_circos_plot(weights, fig_prefix=''):
     fig.savefig(f"{PREFIX}/total_cov{fig_prefix}.png")
 
 weights = np.load(f'{PREFIX}/weight.npy')
-draw_circos_plot(weights)
 
 with open(f"{PREFIX}/report.txt", 'r') as f:
     f.readline()
@@ -1133,151 +1134,71 @@ with open(f"{PREFIX}/report.txt", 'r') as f:
 
 use_julia_solver = path_cnt <= HARD_PATH_COUNT_BASELINE
 
+draw_circos_plot()
 if use_julia_solver:
-    weights_cluster = np.load(f'{PREFIX}/weight_cluster.npy')
-    draw_circos_plot(weights_cluster, '_cluster')
+    draw_circos_plot('_filter')
+    draw_circos_plot('_cluster')
 
 # Parse as vcf
+def pairs_to_vcf(out_prefix=''):
+    weights = np.load(f'{PREFIX}/weight{out_prefix}.npy')
+    nclose_cn_std = defaultdict(float)
+    for i, ctr in enumerate(path_nclose_usage):
+        for j, v in ctr.items():
+            nclose_cn_std[j] += v*weights[i]
 
-nclose_cn_std = defaultdict(float)
-for i, ctr in enumerate(path_nclose_usage):
-    for j, v in ctr.items():
-        nclose_cn_std[j] += v*weights[i]
+    type1_nclose_node = set()
+    type2_nclose_node = set()
 
-type1_nclose_node = set()
-type2_nclose_node = set()
+    for nclose in nclose_set:
+        s, e = nclose
+        if contig_data[s][CHR_NAM] != contig_data[e][CHR_NAM]:
+            type1_nclose_node.add(nclose)
+        else:
+            type2_nclose_node.add(nclose)
 
-for nclose in nclose_set:
-    s, e = nclose
-    if contig_data[s][CHR_NAM] != contig_data[e][CHR_NAM]:
-        type1_nclose_node.add(nclose)
-    else:
-        type2_nclose_node.add(nclose)
+    display_indel = defaultdict(list)
 
-display_indel = defaultdict(list)
-
-rpll = len(raw_path_list)
-for i in range(rpll, len(weights)):
-    paf_loc = tot_loc_list[i]
-    indel_ind = paf_loc.split('/')[-2]
-    with open(tot_loc_list[i], "r") as f:
-        l = f.readline()
-        l = l.rstrip()
-        l = l.split("\t")
-        chr_nam1 = l[CHR_NAM]
-        chr_nam2 = l[CHR_NAM]
-        pos1 = int(l[CHR_STR])
-        pos2 = int(l[CHR_END])
-    v = weights[i]
-    chrom = chr_nam1
-    if abs(pos1-pos2) > TYPE2_FLANKING_LENGTH and v > NCLOSE_SIM_DIFF_THRESHOLD:
-        if exist_near_bnd(chrom, pos1, pos1) or \
-        exist_near_bnd(chrom, pos2, pos2):
+    rpll = len(raw_path_list)
+    for i in range(rpll, len(weights)):
+        paf_loc = tot_loc_list[i]
+        indel_ind = paf_loc.split('/')[-2]
+        with open(tot_loc_list[i], "r") as f:
+            l = f.readline()
+            l = l.rstrip()
+            l = l.split("\t")
+            chr_nam1 = l[CHR_NAM]
+            chr_nam2 = l[CHR_NAM]
+            pos1 = int(l[CHR_STR])
+            pos2 = int(l[CHR_END])
+        v = weights[i]
+        chrom = chr_nam1
+        if abs(pos1-pos2) > TYPE2_FLANKING_LENGTH and v > NCLOSE_SIM_DIFF_THRESHOLD:
             if indel_ind == 'front_jump':
                 display_indel[chrom].append(("d", pos1, pos2, v / N, chrom, i - rpll))
             if indel_ind == 'back_jump':
                 display_indel[chrom].append(("i", pos1, pos2, v / N, chrom, i - rpll))
+    
+    all_nclose = []
+    significant_nclose = []
+    for nclose in nclose_set:
+        if nclose_cn_std[nclose2idx[nclose]] > VCF_FILTER_DEPTH_N * N:
+            st, ed = nclose
+            all_nclose.append(nclose)
 
-conjoined_nclose_node_set = set()
-conjoined_track_data = dict()
+            if exist_near_bnd(contig_data[st][CHR_NAM], contig_data[st][CHR_STR], contig_data[st][CHR_END]) or \
+            exist_near_bnd(contig_data[ed][CHR_NAM], contig_data[ed][CHR_STR], contig_data[ed][CHR_END]):
+                significant_nclose.append(nclose)
 
-"""
-for i, nclose_a in enumerate(nclose_list):
-    for nclose_b in nclose_list[i+1:]: 
-        nclose_cn_a = nclose_cn_std[nclose2idx[nclose_a]]
-        nclose_cn_b = nclose_cn_std[nclose2idx[nclose_b]]
+    logging.info(f"f'{out_prefix[1:].capitalize()} Total called breakends (INS, DEL, BND, INV) : {len(all_nclose) + len(display_indel)}")
 
-        if similar_check(nclose_cn_a, nclose_cn_b, ratio=SIM_COMPARE_RAITO) \
-            and min(nclose_cn_a, nclose_cn_b) > NCLOSE_SIM_DIFF_THRESHOLD:
-            flag = True # To check if nclose_a and nclose_b can be conjoined
-            connecting_nclosea_node = -1
-            chrom = None
-            for idx in (0, 1):
-                curr_chrom = contig_data[nclose_a[idx]][CHR_NAM]
-                if contig_data[nclose_b[0]][CHR_NAM] == curr_chrom or contig_data[nclose_b[1]][CHR_NAM] == curr_chrom:
-                    flag = False
-                    if connecting_nclosea_node < 0:
-                        connecting_nclosea_node = idx
-                        chrom = curr_chrom  # chrom : sharing chromosome type
-                    else:
-                        flag = True # Pass if same chromosome component
-            if not flag:
-                nclose_cn = (nclose_cn_a + nclose_cn_b) / 2
-                # Only two cases:
-                # 1. nclose_a is type2, nclose_b is type1
-                # 2. nclose_a is type1, nclose_b is type1
-                nclosea_contig_front = contig_data[nclose_a[0]]
-                nclosea_contig_back = contig_data[nclose_a[1]]
-                front_is_connectable = nclosea_contig_front[CHR_NAM] == chrom
-                back_is_connectable = nclosea_contig_back[CHR_NAM] == chrom
+    vcf_path = f"{PREFIX}/SV_call_result{out_prefix}.vcf"
+    _pairs_to_vcf(all_nclose, contig_data, chr_len, display_indel, vcf_path, significant_nclose, nclose_cn_std)
 
-                conjoined_nclose_node = None
-                if contig_data[nclose_b[0]][CHR_NAM] == chrom:
-                    template_contig = contig_data[nclose_b[0]]
-                    if template_contig[CTG_DIR] == '+':
-                        if nclosea_contig_back[CTG_DIR] == '+' and back_is_connectable:
-                            dist = distance_checker(nclosea_contig_back, template_contig)
-                            if (nclosea_contig_back[CHR_END] < template_contig[CHR_STR] and dist < CONJOINED_CONTIG_MINIMUM_LENGTH) or dist == 0:
-                                conjoined_nclose_node = (nclose_b[1], nclose_a[0])
-                        elif nclosea_contig_front[CTG_DIR] == '-' and front_is_connectable:
-                            dist = distance_checker(nclosea_contig_front, template_contig)
-                            if (nclosea_contig_front[CHR_END] < template_contig[CHR_STR] and dist < CONJOINED_CONTIG_MINIMUM_LENGTH) or dist == 0:
-                                conjoined_nclose_node = (nclose_b[1], nclose_a[1])
-                    else:
-                        if nclosea_contig_back[CTG_DIR] == '-' and back_is_connectable:
-                            dist = distance_checker(nclosea_contig_back, template_contig)
-                            if (nclosea_contig_back[CHR_STR] > template_contig[CHR_END] and dist < CONJOINED_CONTIG_MINIMUM_LENGTH) or dist == 0:
-                                conjoined_nclose_node = (nclose_b[1], nclose_a[0])
-                        elif nclosea_contig_front[CTG_DIR] == '+' and front_is_connectable:
-                            dist = distance_checker(nclosea_contig_front, template_contig)
-                            if (nclosea_contig_front[CHR_STR] > template_contig[CHR_END] and dist < CONJOINED_CONTIG_MINIMUM_LENGTH) or dist == 0:
-                                conjoined_nclose_node = (nclose_b[1], nclose_a[1])
-                elif contig_data[nclose_b[1]][CHR_NAM] == chrom:
-                    template_contig = contig_data[nclose_b[1]]  
-                    if template_contig[CTG_DIR] == '+':
-                        if nclosea_contig_back[CTG_DIR] == '-' and back_is_connectable:
-                            dist = distance_checker(nclosea_contig_back, template_contig)
-                            if (nclosea_contig_back[CHR_STR] > template_contig[CHR_END] and dist < CONJOINED_CONTIG_MINIMUM_LENGTH) or dist == 0:
-                                conjoined_nclose_node = (nclose_b[0], nclose_a[0])
-                        elif nclosea_contig_front[CTG_DIR] == '+' and front_is_connectable:
-                            dist = distance_checker(nclosea_contig_front, template_contig)
-                            if (nclosea_contig_front[CHR_STR] > template_contig[CHR_END] and dist < CONJOINED_CONTIG_MINIMUM_LENGTH) or dist == 0:
-                                conjoined_nclose_node = (nclose_b[0], nclose_a[1])
-                    else:
-                        if nclosea_contig_back[CTG_DIR] == '+' and back_is_connectable:
-                            dist = distance_checker(nclosea_contig_back, template_contig)
-                            if (nclosea_contig_back[CHR_END] < template_contig[CHR_STR] and dist < CONJOINED_CONTIG_MINIMUM_LENGTH) or dist == 0:
-                                conjoined_nclose_node = (nclose_b[0], nclose_a[0])
-                        elif nclosea_contig_front[CTG_DIR] == '-' and front_is_connectable:
-                            dist = distance_checker(nclosea_contig_front, template_contig)
-                            if (nclosea_contig_front[CHR_END] < template_contig[CHR_STR] and dist < CONJOINED_CONTIG_MINIMUM_LENGTH) or dist == 0:
-                                conjoined_nclose_node = (nclose_b[0], nclose_a[1])
-                
-                if conjoined_nclose_node is not None:
-                    nclose_idx += 1
-                    nclose2idx[conjoined_nclose_node] = nclose_idx
-                    nclose_cn_std[nclose_idx] = nclose_cn
-
-                    conjoined_nclose_node_set.add(conjoined_nclose_node)
-                    conjoined_track_data[conjoined_nclose_node] = (nclose2idx[nclose_a], nclose2idx[nclose_b])
-"""
-
-all_nclose = []
-significant_nclose = []
-for nclose in (nclose_set | conjoined_nclose_node_set):
-    if nclose_cn_std[nclose2idx[nclose]] > 0.1 * N:
-        st, ed = nclose
-        all_nclose.append(nclose)
-
-        if exist_near_bnd(contig_data[st][CHR_NAM], contig_data[st][CHR_STR], contig_data[st][CHR_END]) or \
-        exist_near_bnd(contig_data[ed][CHR_NAM], contig_data[ed][CHR_STR], contig_data[ed][CHR_END]):
-            significant_nclose.append(nclose)
-
-significant_nclose = set(significant_nclose)
-logging.info(f"Total called breakends (INS, DEL, BND, INV) : {len(all_nclose) + len(display_indel)}")
-
-vcf_path = f"{PREFIX}/SV_call_result.vcf"
-pairs_to_vcf(all_nclose, contig_data, chr_len, display_indel, vcf_path)
+pairs_to_vcf()
+if use_julia_solver:
+    pairs_to_vcf('_filter')
+    pairs_to_vcf('_cluster')
 
 # Bed output for further analysis
 
@@ -1290,7 +1211,8 @@ n = len(paf_ans_list) + fclen // 4 + bclen // 4 + eclen // 2
 with open(f'{PREFIX}/ecdna_circuit_data.pkl', 'rb') as f:
     ecdna_circuit, _ = pkl.load(file=f)
 
-def make_bed_output(weights, output_prefix=''):
+def make_bed_output(output_prefix=''):
+    weights = np.load(f'{PREFIX}/weight{output_prefix}.npy')
     nclose_cn = defaultdict(float)
 
     for i, ctr in enumerate(path_nclose_usage):
@@ -1348,10 +1270,10 @@ def make_bed_output(weights, output_prefix=''):
                     assert(False)
 
 
-make_bed_output(weights)
-
+make_bed_output()
 if use_julia_solver:
-    make_bed_output(weights_cluster, '_cluster')
+    make_bed_output('_cluster')
+    make_bed_output('_filter')
 
 os.remove(f'{PREFIX}/matrix.h5')
 logging.info("SKYPE pipeline end")
