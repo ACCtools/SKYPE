@@ -222,7 +222,7 @@ task_cnt = Counter()
 task_dict = dict()
 run_k_set = set()
 
-jl.nclose_cord_vec = jl.Vector[jl.Vector[jl.Any]]()
+jl.seval("global nclose_cord_vec = Vector{Vector{Any}}()")
 for l in pre_nclose_cord_list:
     run_k_set.add(l[-1])
     jl.push_b(jl.nclose_cord_vec, jl.Vector[jl.Any](l))

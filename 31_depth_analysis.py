@@ -1190,7 +1190,7 @@ def pairs_to_vcf(out_prefix=''):
             exist_near_bnd(contig_data[ed][CHR_NAM], contig_data[ed][CHR_STR], contig_data[ed][CHR_END]):
                 significant_nclose.append(nclose)
 
-    logging.info(f"f'{out_prefix[1:].capitalize()} Total called breakends (INS, DEL, BND, INV) : {len(all_nclose) + len(display_indel)}")
+    logging.info(f"{out_prefix[1:].capitalize()} Total called breakends (INS, DEL, BND, INV) : {len(all_nclose) + len(display_indel)}")
 
     vcf_path = f"{PREFIX}/SV_call_result{out_prefix}.vcf"
     _pairs_to_vcf(all_nclose, contig_data, chr_len, display_indel, vcf_path, significant_nclose, nclose_cn_std)
