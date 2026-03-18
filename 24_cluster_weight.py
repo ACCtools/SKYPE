@@ -592,9 +592,9 @@ while True:
         
         if chrom_error_rate > CHROM_ERROR_FAIL_RATE:
             new_fail_chrom_list.append(chrom)
-    new_fail_chrom_list.extend(fail_chrom_list)
+    fail_chrom_list.extend(new_fail_chrom_list)
 
-    if len(fail_chrom_list) > 0:
+    if len(new_fail_chrom_list) > 0:
         logging.info(f'Fail filtering nclose chromosome : {", ".join(new_fail_chrom_list)}')
 
 if len(fail_chrom_list) > 0:
