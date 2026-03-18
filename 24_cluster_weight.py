@@ -487,8 +487,62 @@ for i, v in enumerate(weight_base):
     for j in path_nclose_set_dict[i]:
         nclose_total_weight_dict[j] += v
 
-with open('A_idx_list.pkl', 'rb') as f:
+with open(f'{PREFIX}/A_idx_list.pkl', 'rb') as f:
     A_idx_list = pkl.load(f)
+
+# Pre-calculate max error rates for all possible candidate nclose pairs
+nclose_max_error_dict = {}
+pre_tar_nclose_list = []
+pre_thread_data_jl = jl.Vector[jl.Vector[jl.Int]]()
+
+# Collect all potential candidate pairs ignoring the fail_chrom_list filter for now
+for k, v in nclose_total_weight_dict.items():
+    if len(k) == 2:
+        st, ed = k
+        if v >= 0 * meandepth and ppc_data[st][CHR_NAM] != ppc_data[ed][CHR_NAM]:
+            is_candidate = False
+            if (not exist_near_bnd(ppc_data[st][CHR_NAM], ppc_data[st][CHR_STR], ppc_data[st][CHR_END]) or \
+            not exist_near_bnd(ppc_data[ed][CHR_NAM], ppc_data[ed][CHR_STR], ppc_data[ed][CHR_END])) and \
+            not ppc_data[st][CTG_NAM].startswith('virtual_censat_contig'):
+                is_candidate = True
+            if (ppc_data[st][CTG_CENSAT] != '0' or ppc_data[ed][CTG_CENSAT] != '0') and not ppc_data[st][CTG_NAM].startswith('virtual_censat_contig'):
+                is_candidate = True
+            
+            if is_candidate:
+                pre_tar_nclose_list.append(k)
+
+pre_nclose_notusing_idx_dict = defaultdict(list)
+for nclose_pair in pre_tar_nclose_list:
+    for path_k, path_nclose_usage in path_nclose_set_dict.items():
+        if nclose_pair not in path_nclose_usage:
+            pre_nclose_notusing_idx_dict[nclose_pair].append(path_k)
+    
+    jl.push_b(pre_thread_data_jl, jl.Vector[jl.Int](pre_nclose_notusing_idx_dict[nclose_pair]))
+
+logging.info(f"Pre-calculating max error rate for pairs count : {len(pre_tar_nclose_list)}")
+pre_weight_list = jl.run_nnls_map(A_jl, B_jl, pre_thread_data_jl)
+
+# Store pre-calculated max error rates in dictionary
+for nclose_pair, (weight_jl, predict_suc_B_jl) in zip(pre_tar_nclose_list, pre_weight_list):
+    predict_suc_B = np.asarray(predict_suc_B_jl)
+
+    chrom_acc_sum_dict = defaultdict(int)
+    chrom_acc_sum_dict_max = defaultdict(int)
+    for i, (chrom, st) in enumerate(chr_filt_st_list):
+        chrom_acc_sum_dict[chrom] += predict_suc_B[i] - predict_suc_B_base[i] 
+        if abs(chrom_acc_sum_dict[chrom]) > chrom_acc_sum_dict_max[chrom]:
+            chrom_acc_sum_dict_max[chrom] = abs(chrom_acc_sum_dict[chrom])
+
+    max_error_rate = 0.0
+    for chrom, acc_sum_max in chrom_acc_sum_dict_max.items():
+        if chrom == 'chrY' and no_chrY:
+            continue
+        acc_sum_max_base = chrom_acc_sum_dict_max_base[chrom]
+        # Calculate error rate only if base is not zero
+        if acc_sum_max_base != 0:
+            max_error_rate = max(max_error_rate, acc_sum_max / acc_sum_max_base)
+    
+    nclose_max_error_dict[nclose_pair] = max_error_rate
 
 # Iterate filtering process until failing chromosomes stabilize
 fail_chrom_list = []
@@ -521,32 +575,11 @@ while True:
             if nclose_pair not in path_nclose_usage:
                 nclose_notusing_idx_dict[nclose_pair].append(k)
 
-    tar_nclose_list = []
-    thread_data_jl = jl.Vector[jl.Vector[jl.Int]]()
-    for k, v in nclose_notusing_idx_dict.items():
-        jl.push_b(thread_data_jl, jl.Vector[jl.Int](v))
-        tar_nclose_list.append(k)
-
-    weight_list = jl.run_nnls_map(A_jl, B_jl, thread_data_jl)
     not_essential_nclose = set()
-
-    logging.info(f"Testing nclose pairs count : {len(tar_nclose_list)}")
-    for nclose_pair, (weight_jl, predict_suc_B_jl) in zip(tar_nclose_list, weight_list):
-        predict_suc_B = np.asarray(predict_suc_B_jl)
-
-        chrom_acc_sum_dict = defaultdict(int)
-        chrom_acc_sum_dict_max = defaultdict(int)
-        for i, (chrom, st) in enumerate(chr_filt_st_list):
-            chrom_acc_sum_dict[chrom] += predict_suc_B[i] - predict_suc_B_base[i] 
-            if abs(chrom_acc_sum_dict[chrom]) > chrom_acc_sum_dict_max[chrom]:
-                chrom_acc_sum_dict_max[chrom] = abs(chrom_acc_sum_dict[chrom])
-
-        max_error_rate = 0
-        for chrom, acc_sum_max in chrom_acc_sum_dict_max.items():
-            if chrom == 'chrY' and no_chrY:
-                continue
-            acc_sum_max_base = chrom_acc_sum_dict_max_base[chrom]
-            max_error_rate = max(max_error_rate, acc_sum_max / acc_sum_max_base)
+    
+    # Use cached max error rates instead of recalculating
+    for nclose_pair in div_nclose_set:
+        max_error_rate = nclose_max_error_dict.get(nclose_pair, float('inf'))
         
         if max_error_rate < BASE_ACCSUMABSMAX_RATIO:
             logging.debug(f"{nclose_pair} : Nclose removed")
@@ -592,6 +625,7 @@ while True:
         
         if chrom_error_rate > CHROM_ERROR_FAIL_RATE:
             new_fail_chrom_list.append(chrom)
+            
     fail_chrom_list.extend(new_fail_chrom_list)
 
     if len(new_fail_chrom_list) > 0:

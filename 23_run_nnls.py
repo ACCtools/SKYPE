@@ -518,6 +518,6 @@ logging.info(f'Relative error : {error/b_norm:.4f}')
 np.save(f'{PREFIX}/weight.npy', final_weights_fullsize)
 np.save(f'{PREFIX}/predict_B.npy', predict_B)
 
-with open('A_idx_list.pkl', 'wb') as f:
+with open(f'{PREFIX}/A_idx_list.pkl', 'wb') as f:
     pkl.dump(A_idx_list, f)
 
