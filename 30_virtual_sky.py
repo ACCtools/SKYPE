@@ -334,6 +334,7 @@ def plot_virtual_chromosome(ax, segments_data, maxh, cell_col, def_cell_col, lab
     # 가상 염색체 라벨 (옵션)
     if label:
         ax.text(x_center, -5, label, ha='center', va='top', fontsize=10)
+    ax.text(x_center, -10, '/'.join(path.split('/')[-2:]), ha='center', va='top', fontsize=10)
 
     ax.set_xlim(0, 60 * cell_col / def_cell_col)
     ax.set_ylim(0, 100)
@@ -654,37 +655,50 @@ def should_join_by_baseline(
     score = max_aligned_match_length(seq_a, seq_b)
     return (score / denom) >= JOIN_BASELINE
 
-def get_karyotype_summary(non_type4_path_list : list):
+def get_karyotype_summary(non_type4_path_list: list):
+    """
+    Summarizes karyotype data by parsing the given path list.
+    Ignores dummy nodes at the start and end of each path (e.g., 'chrXf') 
+    and calculates the reference coordinates based on the first and last 
+    actual nodes to account for telomeres appearing in the middle.
+    """
     karyotypes_data_direction_include = {}
     
     for path_path in non_type4_path_list:
         pieces = []
         path = import_index_path(path_path)
-
-        # padding for easier calculation
+        
+        # Padding for easier calculation
         if len(path[0]) < 4:
             path[0] = tuple([0] + list(path[0]))
         if len(path[-1]) < 4:
             path[-1] = tuple([0] + list(path[-1]))
-        
-        curr_ref = 0 if path[0][NODE_NAME][-1] =='f' else chr_len[path[0][NODE_NAME][:-1]]
-        curr_incr = '+' if path[0][NODE_NAME][-1] =='f' else '-'
+            
+        # Initialize direction and chromosome from the first dummy node
+        curr_incr = '+' if path[0][NODE_NAME][-1] == 'f' else '-'
         curr_chr = [path[0][NODE_NAME][:-1], curr_incr]
+        
+        # Set the starting reference using the first real node (index 1)
+        # instead of assuming the absolute ends of the chromosome (0 or chr_len)
+        first_real_node = ppc_data[path[1][NODE_NAME]]
+        curr_ref = first_real_node[CHR_STR] if curr_incr == '+' else first_real_node[CHR_END]
         
         nclose_use_cnt = 0
         for i in range(1, len(path)-1):
             if path[i][CHR_CHANGE_IDX] > path[i-1][CHR_CHANGE_IDX] \
             or path[i][DIR_CHANGE_IDX] > path[i-1][DIR_CHANGE_IDX]:
                 nclose_use_cnt += 1
+                
                 last_node = ppc_data[path[i-1][NODE_NAME]]
                 curr_node = ppc_data[path[i][NODE_NAME]]
-                # add last piece
-                if curr_incr == '+':
-                    pieces.append((tuple(curr_chr), last_node[CHR_END] - curr_ref))
-                else:
-                    pieces.append((tuple(curr_chr), curr_ref - last_node[CHR_STR]))
                 
-                # update info of new piece (starting ref, chromosome type, increment ..)
+                # Add last piece
+                if curr_incr == '+':
+                    pieces.append((tuple(curr_chr), abs(last_node[CHR_END] - curr_ref)))
+                else:
+                    pieces.append((tuple(curr_chr), abs(curr_ref - last_node[CHR_STR])))
+                            
+                # Update info of new piece (starting ref, chromosome type, increment ..)
                 if path[i][NODE_NAME] > path[i-1][NODE_NAME]:
                     curr_incr = curr_node[CTG_DIR]
                     curr_chr = [curr_node[CHR_NAM], curr_incr]
@@ -693,11 +707,21 @@ def get_karyotype_summary(non_type4_path_list : list):
                     curr_incr = '-' if curr_node[CTG_DIR] == '+' else '+'
                     curr_chr = [curr_node[CHR_NAM], curr_incr]
                     curr_ref = curr_node[CHR_STR] if curr_incr == '+' else curr_node[CHR_END]
-
-        pieces.append((tuple(curr_chr), chr_len[curr_chr[0]] - curr_ref if curr_incr == '+' else curr_ref))
+        
+        # Process the final piece using the last real node (index -2)
+        # instead of extending it to absolute end
+        last_real_node = ppc_data[path[-2][NODE_NAME]]
+        if curr_incr == '+':
+            final_length = last_real_node[CHR_END] - curr_ref
+        else:
+            final_length = curr_ref - last_real_node[CHR_STR]
+            
+        pieces.append((tuple(curr_chr), abs(final_length)))
+        
         karyotypes_data_direction_include[path_path] = pieces
-
+        
     return karyotypes_data_direction_include
+
 
 def ecdna_format(x:int) -> str:
     if x >= 1_000_000_000:
@@ -946,7 +970,7 @@ parser.add_argument("cell_line_name",
 args = parser.parse_args()
 
 # t = """
-# 30_virtual_sky.py /home/hyunwoo/ACCtools-pipeline/90_skype_run/Caki-1/20_alignasm/Caki-1.ctg.aln.paf.ppc.paf /home/hyunwoo/ACCtools-pipeline/90_skype_run/Caki-1/01_depth/Caki-1_normalized.win.stat.gz public_data/chm13v2.0_telomere.bed public_data/chm13v2.0.fa.fai 30_skype_pipe/Caki-1_14_35_45 Caki-1
+# 30_virtual_sky.py /home/hyunwoo/ACCtools-pipeline/90_skype_run/U2OS/20_alignasm/U2OS.ctg.aln.paf.ppc.paf /home/hyunwoo/ACCtools-pipeline/90_skype_run/U2OS/01_depth/U2OS_normalized.win.stat.gz public_data/chm13v2.0_telomere.bed public_data/chm13v2.0.fa.fai 30_skype_pipe/U2OS_20_58_22 U2OS
 # """
 # args = parser.parse_args(t.strip().split()[1:])
 
