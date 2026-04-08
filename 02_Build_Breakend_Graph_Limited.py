@@ -2768,6 +2768,26 @@ def extract_telomere_connect_contig_bytuple(telo_info_path : str) -> list:
     return telomere_connect_contig
     
 def initialize_bnd_graph(contig_data : list, nclose_nodes : dict, telo_contig : dict) -> dict:
+    # Build telo direction lookup: telo_idx → 'f' or 'b'
+    telo_dir_map = {}
+    for telo_name in telo_contig:
+        for edge in telo_contig[telo_name]:
+            telo_dir_map[edge[1]] = telo_name[-1]
+
+    def is_telo_dir_consistent(telo_idx, approach_dir):
+        """
+        Check if approach direction is consistent with telomere position.
+        'b' telomere (chr end): consistent direction = "dec" (from right)
+        'f' telomere (chr start): consistent direction = "inc" (from left)
+        "mixed" is always inconsistent.
+        Applies to both DIR_IN and DIR_OUT edges.
+        """
+        telo_side = telo_dir_map.get(telo_idx)
+        if telo_side is None:
+            return True
+        return (telo_side == 'b' and approach_dir == "dec") or \
+               (telo_side == 'f' and approach_dir == "inc")
+
     bnd_adjacency = defaultdict(list)
     for i in telo_contig:
         for j in telo_contig[i]:
@@ -2886,42 +2906,47 @@ def initialize_bnd_graph(contig_data : list, nclose_nodes : dict, telo_contig : 
                             dir2 = "dec"
                         # if both end have consistency
                         if dir1 == dir2:
+                            consistent = is_telo_dir_consistent(telo_idx, dir1)
                             if dir1 == "inc":
                                 if curr_contig[CTG_DIR]=='+' and k_ind=='f+': # +
-                                    bnd_adjacency[(DIR_OUT, telo_idx)].append([DIR_FOR, nclose_idx])
-                                    bnd_adjacency[(DIR_BAK, nclose_idx)].append([DIR_IN, telo_idx])
+                                    if consistent:
+                                        bnd_adjacency[(DIR_OUT, telo_idx)].append([DIR_FOR, nclose_idx])
+                                        bnd_adjacency[(DIR_BAK, nclose_idx)].append([DIR_IN, telo_idx])
                                 elif curr_contig[CTG_DIR]=='-' and k_ind=='b-':
-                                    bnd_adjacency[(DIR_FOR, nclose_idx)].append([DIR_IN, telo_idx])
-                                    bnd_adjacency[(DIR_OUT, telo_idx)].append([DIR_BAK, nclose_idx])
+                                    if consistent:
+                                        bnd_adjacency[(DIR_FOR, nclose_idx)].append([DIR_IN, telo_idx])
+                                        bnd_adjacency[(DIR_OUT, telo_idx)].append([DIR_BAK, nclose_idx])
                                 elif curr_contig[CTG_DIR]=='+' and k_ind=='b-':
-                                    bnd_adjacency[(DIR_OUT, telo_idx)].append([DIR_BAK, nclose_idx])
-                                    bnd_adjacency[(DIR_FOR, nclose_idx)].append([DIR_IN, telo_idx])
+                                    if consistent:
+                                        bnd_adjacency[(DIR_OUT, telo_idx)].append([DIR_BAK, nclose_idx])
+                                        bnd_adjacency[(DIR_FOR, nclose_idx)].append([DIR_IN, telo_idx])
                                 elif curr_contig[CTG_DIR]=='-' and k_ind=='f+': # +
-                                    bnd_adjacency[(DIR_OUT, telo_idx)].append([DIR_FOR, nclose_idx])
-                                    bnd_adjacency[(DIR_BAK, nclose_idx)].append([DIR_IN, telo_idx])
+                                    if consistent:
+                                        bnd_adjacency[(DIR_OUT, telo_idx)].append([DIR_FOR, nclose_idx])
+                                        bnd_adjacency[(DIR_BAK, nclose_idx)].append([DIR_IN, telo_idx])
                             else:
                                 if curr_contig[CTG_DIR]=='+' and k_ind=='b+': # +
-                                    bnd_adjacency[(DIR_FOR, nclose_idx)].append([DIR_IN, telo_idx])
-                                    bnd_adjacency[(DIR_OUT, telo_idx)].append([DIR_BAK, nclose_idx])
+                                    if consistent:
+                                        bnd_adjacency[(DIR_FOR, nclose_idx)].append([DIR_IN, telo_idx])
+                                        bnd_adjacency[(DIR_OUT, telo_idx)].append([DIR_BAK, nclose_idx])
                                 elif curr_contig[CTG_DIR]=='-' and k_ind=='f-':
-                                    bnd_adjacency[(DIR_OUT, telo_idx)].append([DIR_FOR, nclose_idx])
-                                    bnd_adjacency[(DIR_BAK, nclose_idx)].append([DIR_IN, telo_idx])
+                                    if consistent:
+                                        bnd_adjacency[(DIR_OUT, telo_idx)].append([DIR_FOR, nclose_idx])
+                                        bnd_adjacency[(DIR_BAK, nclose_idx)].append([DIR_IN, telo_idx])
                                 elif curr_contig[CTG_DIR]=='+' and k_ind=='f-':
-                                    bnd_adjacency[(DIR_OUT, telo_idx)].append([DIR_FOR, nclose_idx])
-                                    bnd_adjacency[(DIR_BAK, nclose_idx)].append([DIR_IN, telo_idx])
+                                    if consistent:
+                                        bnd_adjacency[(DIR_OUT, telo_idx)].append([DIR_FOR, nclose_idx])
+                                        bnd_adjacency[(DIR_BAK, nclose_idx)].append([DIR_IN, telo_idx])
                                 elif curr_contig[CTG_DIR]=='-' and k_ind=='b+': # +
-                                    bnd_adjacency[(DIR_OUT, telo_idx)].append([DIR_BAK, nclose_idx])
-                                    bnd_adjacency[(DIR_FOR, nclose_idx)].append([DIR_IN, telo_idx])
+                                    if consistent:
+                                        bnd_adjacency[(DIR_OUT, telo_idx)].append([DIR_BAK, nclose_idx])
+                                        bnd_adjacency[(DIR_FOR, nclose_idx)].append([DIR_IN, telo_idx])
                         # else: each end have different sign of increment
                         # -> one node is included in the other
                         # thus, we should determine by mean val.
                         else:
-                            if k_ind[0]=='f':
-                                bnd_adjacency[(DIR_OUT, telo_idx)].append([DIR_FOR, nclose_idx])
-                                bnd_adjacency[(DIR_BAK, nclose_idx)].append([DIR_IN, telo_idx])
-                            else:
-                                bnd_adjacency[(DIR_OUT, telo_idx)].append([DIR_BAK, nclose_idx])
-                                bnd_adjacency[(DIR_FOR, nclose_idx)].append([DIR_IN, telo_idx])
+                            # mixed direction is always inconsistent → skip both DIR_IN and DIR_OUT
+                            pass
                             
 
     
