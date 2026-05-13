@@ -691,8 +691,12 @@ fclen = len(glob.glob(front_contig_path + "*"))
 bclen = len(glob.glob(back_contig_path + "*"))
 eclen = len(glob.glob(ecdna_contig_path + "*"))
 
+with open(f'{PREFIX}/cen_fragment_data.pkl', 'rb') as f:
+    cen_fragment_meta = pkl.load(f)
+cen_fragment_list = sorted(cen_fragment_meta.items(), key=lambda kv: chr2int(kv[0]))
+
 m = np.shape(B)[0]
-n = len(paf_ans_list) + fclen // 4 + bclen // 4 + eclen // 2
+n = len(paf_ans_list) + fclen // 4 + bclen // 4 + eclen // 2 + len(cen_fragment_list)
 ncnt = 0
 
 with open(f"{PREFIX}/report.txt", 'r') as f:
@@ -845,9 +849,34 @@ for i in range(1, eclen // 2 + 1):
     path_nclose_dict_set[ncnt].add((ov_loc.split('/')[-2], i, type2_ins_idx))
     ncnt += 1
 
+# Centromere depth-difference fragment chromosomes
+# 02번에서 detect 된 (chrom, dir, mid_censat) 기반으로 fragment 1개 = column 1개.
+# 단위 indicator vector(0/1)로 채우면 NNLS weight ≈ 추가 copy 수.
+all_st_list = chr_filt_st_list + chr_no_filt_st_list
+tmp_n.fill(0)
+for chrom, info in cen_fragment_list:
+    mid = info["mid"]
+    chr_length = info["chr_len"]
+    if info["dir"]:
+        st_lo, st_hi = mid, chr_length
+    else:
+        st_lo, st_hi = 0, mid
+
+    tv = np.zeros(m, dtype=np.float32)
+    for idx, (c, st) in enumerate(all_st_list):
+        if c == chrom and st_lo <= st < st_hi:
+            tv[idx] = 1.0
+
+    if NCLOSE_WEIGHT_USE:
+        A_arr[:ncm, ncnt] = tmp_n
+    A_arr[ncm:, ncnt] = tv
+
+    path_nclose_dict_set[ncnt].add(('cent_fragment', chrom, info["dir"]))
+    ncnt += 1
+
 B = np.hstack((B_nclose, B))
 
-dep_list.extend([0] * (fclen // 4 + bclen // 4 + eclen // 2))
+dep_list.extend([0] * (fclen // 4 + bclen // 4 + eclen // 2 + len(cen_fragment_list)))
 
 assert(len(dep_list) == n)
 

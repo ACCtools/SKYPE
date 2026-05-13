@@ -512,12 +512,18 @@ def process_raw_contig_list(full_connected_path, key_cnt):
         for i in range(1, full_connected_path_len):
             curr_contig = path_contig[-1]
             next_contig = contig_data[full_connected_path[i][1]]
-            if curr_contig[CHR_NAM] == next_contig[CHR_NAM] and curr_contig[CTG_NAM] != next_contig[CTG_NAM] \
+            # path_contig[-1] 은 form_normal_contig 결과라 simple_ctg_alt_* 같은 합성 contig는
+            # CTG_NAM 이 원본 이름(예: ptg000012l)으로 복구돼 있음. 같은 path 내 동일 contig
+            # chunk끼리 이름 비교가 깨져서 virtual_contig가 잘못 삽입되는 것을 막기 위해
+            # 이름 비교는 contig_data (합성 이름 그대로) 기준으로 한다.
+            curr_node_name = contig_data[full_connected_path[i-1][1]][CTG_NAM]
+            next_node_name = next_contig[CTG_NAM]
+            if curr_contig[CHR_NAM] == next_contig[CHR_NAM] and curr_node_name != next_node_name \
             or (curr_contig[CHR_NAM] == next_contig[CHR_NAM] and (full_connected_path[i-1][0] in (2, 3) or full_connected_path[i][0] in (2, 3))):
                 dist = distance_checker(curr_contig, next_contig)
                 if dist > 0:
                     if curr_contig[CHR_END] < next_contig[CHR_STR]:
-                        if curr_contig[CTG_NAM] != next_contig[CTG_NAM]:
+                        if curr_node_name != next_node_name:
                             vcnt += 1
                             new_contig = form_virtual_contig(curr_contig[CHR_LEN], curr_contig[CHR_END], next_contig[CHR_STR], curr_contig[CHR_NAM], vcnt)
                             new_next_contig = form_normal_contig(next_contig)
@@ -527,7 +533,7 @@ def process_raw_contig_list(full_connected_path, key_cnt):
                             new_next_contig = form_normal_contig(next_contig)
                             path_contig.append(new_next_contig)
                     else:
-                        if curr_contig[CTG_NAM] != next_contig[CTG_NAM]:
+                        if curr_node_name != next_node_name:
                             vcnt += 1
                             new_contig = form_virtual_contig(curr_contig[CHR_LEN], next_contig[CHR_END], curr_contig[CHR_STR], curr_contig[CHR_NAM], vcnt)
                             new_next_contig = form_normal_contig(next_contig)
@@ -572,7 +578,7 @@ def process_raw_contig_list(full_connected_path, key_cnt):
                         is_index_inc = (curr_contig[CTG_DIR]=='+' and full_connected_path[i-1][0]==1) or \
                                 (curr_contig[CTG_DIR]=='-' and full_connected_path[i-1][0]==0)
                     else:
-                        assert(curr_contig[CTG_NAM] != next_contig[CTG_NAM])
+                        assert(curr_node_name != next_node_name)
                         is_index_inc = (curr_contig[CTG_DIR]=='+' and full_connected_path[i-1][0]==1) or \
                                 (curr_contig[CTG_DIR]=='-' and full_connected_path[i-1][0]==0)
 
@@ -618,12 +624,15 @@ def process_raw_contig_list_ecdna(full_connected_path):
     for i in range(1, full_connected_path_len):
         curr_contig = path_contig[-1]
         next_contig = contig_data[full_connected_path[i][1]]
-        if curr_contig[CHR_NAM] == next_contig[CHR_NAM] and curr_contig[CTG_NAM] != next_contig[CTG_NAM] \
+        # 동일 contig chunk 사이에 virtual_contig가 잘못 들어가지 않도록 contig_data 기준 이름 비교.
+        curr_node_name = contig_data[full_connected_path[i-1][1]][CTG_NAM]
+        next_node_name = next_contig[CTG_NAM]
+        if curr_contig[CHR_NAM] == next_contig[CHR_NAM] and curr_node_name != next_node_name \
         or (curr_contig[CHR_NAM] == next_contig[CHR_NAM] and (full_connected_path[i-1][0] in (2, 3) or full_connected_path[i][0] in (2, 3))):
             dist = distance_checker(curr_contig, next_contig)
             if dist > 0:
                 if curr_contig[CHR_END] < next_contig[CHR_STR]:
-                    if curr_contig[CTG_NAM] != next_contig[CTG_NAM]:
+                    if curr_node_name != next_node_name:
                         vcnt += 1
                         new_contig = form_virtual_contig(curr_contig[CHR_LEN], curr_contig[CHR_END], next_contig[CHR_STR], curr_contig[CHR_NAM], vcnt)
                         new_next_contig = form_normal_contig(next_contig)
@@ -633,7 +642,7 @@ def process_raw_contig_list_ecdna(full_connected_path):
                         new_next_contig = form_normal_contig(next_contig)
                         path_contig.append(new_next_contig)
                 else:
-                    if curr_contig[CTG_NAM] != next_contig[CTG_NAM]:
+                    if curr_node_name != next_node_name:
                         vcnt += 1
                         new_contig = form_virtual_contig(curr_contig[CHR_LEN], next_contig[CHR_END], curr_contig[CHR_STR], curr_contig[CHR_NAM], vcnt)
                         new_next_contig = form_normal_contig(next_contig)
@@ -678,7 +687,7 @@ def process_raw_contig_list_ecdna(full_connected_path):
                     is_index_inc = (curr_contig[CTG_DIR]=='+' and full_connected_path[i-1][0]==1) or \
                             (curr_contig[CTG_DIR]=='-' and full_connected_path[i-1][0]==0)
                 else:
-                    assert(curr_contig[CTG_NAM] != next_contig[CTG_NAM])
+                    assert(curr_node_name != next_node_name)
                     is_index_inc = (curr_contig[CTG_DIR]=='+' and full_connected_path[i-1][0]==1) or \
                             (curr_contig[CTG_DIR]=='-' and full_connected_path[i-1][0]==0)
 

@@ -15,7 +15,7 @@ import pickle as pkl
 import numpy as np
 import pandas as pd
 
-from collections import defaultdict
+from collections import defaultdict, Counter
 from scipy.stats import mannwhitneyu, ttest_ind
 
 from skglm import GeneralizedLinearEstimator
@@ -503,6 +503,212 @@ while True:
         break
 
     prev_fail_chrom_list = fail_chrom_list[:]
+
+# === Cent_fragment greedy off-test ===
+# nclose 필터링 직후를 fail 기준점(고정 baseline)으로 잡고, weight 작은 cent_fragment
+# 컬럼부터 누적 제거 시도. PASS 시 컬럼 누적 제거(=offset 누적)되며, fail 비교 대상
+# baseline 은 항상 nclose 필터링 직후로 고정 — 누적 drift 도 base 대비 한도 안이면 OK.
+cent_fragment_col2chrom = {}
+for k, tags in path_nclose_set_dict.items():
+    for tag in tags:
+        if isinstance(tag, tuple) and len(tag) > 0 and tag[0] == 'cent_fragment':
+            cent_fragment_col2chrom[k] = tag[1]
+            break
+
+def _compute_acc_max(predict_a, predict_b):
+    acc = defaultdict(float)
+    acc_max = defaultdict(float)
+    for i, (chrom, _) in enumerate(chr_filt_st_list):
+        acc[chrom] += predict_a[i] - predict_b[i]
+        if abs(acc[chrom]) > acc_max[chrom]:
+            acc_max[chrom] = abs(acc[chrom])
+    return acc_max
+
+# 고정 baseline (nclose-filter 직후) — 누적 제거 후 비교 대상
+predict_suc_B_post = predict_suc_B.copy()
+cf_acc_max_base_fixed = _compute_acc_max(predict_suc_B_post, B)
+
+# 누적 상태 (PASS마다 갱신)
+A_idx_list_curr = sorted(A_idx_list)
+predict_suc_B_curr = predict_suc_B.copy()
+predict_fal_B_curr = predict_fal_B.copy()
+filter_weights_curr = filter_weights.copy()
+
+logging.info(f'CF greedy start: pool={len(cent_fragment_col2chrom)} cent_fragment cols')
+
+removed_cf = []
+while True:
+    pos_of = {col: i for i, col in enumerate(A_idx_list_curr)}
+    pool = [(filter_weights_curr[pos_of[col]], col, chrom)
+            for col, chrom in cent_fragment_col2chrom.items() if col in pos_of]
+    if not pool:
+        break
+    pool.sort(key=lambda x: x[0])
+
+    progressed = False
+    for w, col, chrom in pool:
+        A_idx_test = sorted(set(A_idx_list_curr) - {col})
+        with h5py.File(f"{PREFIX}/matrix.h5", "r") as f:
+            read_selected_columns_direct(f["A"], A, A_idx_test)
+            read_selected_columns_direct(f["A_fail"], A_fail, A_idx_test)
+        A_test = A[:, :len(A_idx_test)]
+        A_fail_test = A_fail[:, :len(A_idx_test)]
+
+        nnls.fit(A_test, B)
+        weights_test = nnls.coef_
+        predict_suc_B_test = A_test.dot(weights_test)
+        predict_fal_B_test = A_fail_test.dot(weights_test)
+
+        # numerator: 누적 제거된 test prediction vs FIXED baseline (nclose-filter 직후)
+        acc_max_diff = _compute_acc_max(predict_suc_B_test, predict_suc_B_post)
+
+        ok = True
+        worst_chrom = None
+        worst_ratio = 0.0
+        for chk, max_diff in acc_max_diff.items():
+            if chk == 'chrY' and no_chrY:
+                continue
+            base_max = cf_acc_max_base_fixed.get(chk, 0.0)
+            if base_max == 0:
+                continue
+            ratio = max_diff / base_max
+            if ratio > CHROM_ERROR_FAIL_RATE:
+                ok = False
+                if ratio > worst_ratio:
+                    worst_ratio = ratio
+                    worst_chrom = chk
+
+        if ok:
+            logging.info(f'CF PASS: drop col {col} chrom={chrom} w={w:.4f}')
+            A_idx_list_curr = A_idx_test
+            predict_suc_B_curr = predict_suc_B_test
+            predict_fal_B_curr = predict_fal_B_test
+            filter_weights_curr = weights_test
+            removed_cf.append((col, chrom))
+            progressed = True
+            break
+        else:
+            logging.info(f'CF FAIL: keep col {col} chrom={chrom} w={w:.4f} '
+                         f'(worst chrom={worst_chrom} ratio={worst_ratio:.3f})')
+
+    if not progressed:
+        break
+
+logging.info(f'CF greedy done. Removed {len(removed_cf)} cols: {removed_cf}')
+
+A_idx_list = A_idx_list_curr
+filter_weights = filter_weights_curr
+predict_suc_B = predict_suc_B_curr
+predict_fal_B = predict_fal_B_curr
+
+# === BP step / depth ratio 기반 nclose 추가 필터링 ===
+# 각 정상 nclose (type 4 제외) 의 두 BP 점에서, 양옆 ±500kb predict_suc_B 평균의
+# 절대 step 을 (그 nclose 의 count*weight 합) 으로 나눈 ratio 가 양쪽 모두 10% 미만이면 제거.
+# BP 가 censat 영역에 있거나 ±500kb window 못 만들면 false 처리 (=제거 안 함).
+# cent_fragment greedy off-test 가 끝나 weight 가 정리된 상태에서 적용 (cent_fragment 의 잔여 영향 배제).
+BP_STEP_WIN = 500 * K
+BP_STEP_RATIO_THRESHOLD = 0.10
+
+with open(f'{PREFIX}/path_data.pkl', 'rb') as f:
+    _bp_path_list_dict = pkl.load(f)
+with open(f'{PREFIX}/contig_pat_vec_data.pkl', 'rb') as f:
+    _bp_paf_sort_ans_list, _, _, _ = pkl.load(f)
+
+_bp_nclose_set = set()
+for _ctg, _pairs in nclose_nodes.items():
+    for _p in _pairs:
+        _bp_nclose_set.add(tuple(_p))
+
+# 각 path column 의 nclose 사용 Counter (31번 path_nclose_usage 와 동일)
+_bp_path_nclose_count = []
+for _col_idx in range(len(_bp_paf_sort_ans_list)):
+    _paf_loc = _bp_paf_sort_ans_list[_col_idx][0]
+    _key = _paf_loc.split('/')[-2]
+    _cnt = int(_paf_loc.split('/')[-1].split('.')[0]) - 1
+    _idx_path = _bp_path_list_dict[_key][_cnt][0]
+    _ctr = Counter()
+    _s = 1
+    while _s < len(_idx_path) - 2:
+        _cand = tuple(sorted([_idx_path[_s][1], _idx_path[_s+1][1]]))
+        if _cand in _bp_nclose_set:
+            _ctr[_cand] += 1
+            _s += 2
+        else:
+            _s += 1
+    _bp_path_nclose_count.append(_ctr)
+
+# 각 nclose 의 두 BP (chr, cord)
+_bp_nclose_cords = {}
+for _ctg, _pairs in nclose_nodes.items():
+    for _p in _pairs:
+        _bp_nclose_cords[tuple(_p)] = [get_contig_pair(_i, contig_data[_idx]) for _i, _idx in enumerate(_p)]
+
+# 현재 filter_weights 를 전체 column 길이로 unfold
+_bp_weight_full = np.zeros(len(_bp_paf_sort_ans_list), dtype=np.float64)
+for _j, _col in enumerate(A_idx_list):
+    if _col < len(_bp_paf_sort_ans_list):
+        _bp_weight_full[_col] = filter_weights[_j]
+
+# nclose 별 depth = Σ (count × weight)
+_bp_nclose_depth = defaultdict(float)
+for _col_idx, _ctr in enumerate(_bp_path_nclose_count):
+    for _nc, _v in _ctr.items():
+        _bp_nclose_depth[_nc] += _v * _bp_weight_full[_col_idx]
+
+# chr -> sorted [(bin_idx, st), ...]
+_bp_chr_to_bins = defaultdict(list)
+for _i, (_chrom, _st) in enumerate(chr_filt_st_list):
+    _bp_chr_to_bins[_chrom].append((_i, _st))
+for _c in _bp_chr_to_bins:
+    _bp_chr_to_bins[_c].sort(key=lambda x: x[1])
+
+def _bp_in_censat(chrom, cord):
+    mask = (cdf['chr'] == chrom) & (cdf['st'] <= cord) & (cdf['nd'] >= cord)
+    return bool(mask.any())
+
+def _bp_passes_ratio(chrom, bp, depth_val):
+    if _bp_in_censat(chrom, bp):
+        return False
+    bins = _bp_chr_to_bins.get(chrom, [])
+    left = [i for i, st in bins if bp - BP_STEP_WIN <= st < bp]
+    right = [i for i, st in bins if bp <= st < bp + BP_STEP_WIN]
+    if not left or not right:
+        return False
+    step_abs = abs(predict_suc_B[right].mean() - predict_suc_B[left].mean())
+    return (step_abs / depth_val) < BP_STEP_RATIO_THRESHOLD
+
+_bp_nclose_to_drop = set()
+for _nc, _cords in _bp_nclose_cords.items():
+    _d = _bp_nclose_depth.get(_nc, 0.0)
+    if _d < 1e-6:
+        continue
+    if all(_bp_passes_ratio(_c, _p, _d) for _c, _p in _cords):
+        _bp_nclose_to_drop.add(_nc)
+
+logging.info(f'BP step/depth filter : nclose to remove = {len(_bp_nclose_to_drop)}')
+
+_bp_drop_cols = set()
+for _col_idx, _ctr in enumerate(_bp_path_nclose_count):
+    if any(_nc in _bp_nclose_to_drop for _nc in _ctr):
+        _bp_drop_cols.add(_col_idx)
+
+if _bp_drop_cols:
+    _bp_new_A_idx_list = sorted(c for c in A_idx_list if c not in _bp_drop_cols)
+    with h5py.File(f"{PREFIX}/matrix.h5", "r") as f:
+        dA = f["A"]
+        dAf = f["A_fail"]
+        read_selected_columns_direct(dA, A, _bp_new_A_idx_list)
+        read_selected_columns_direct(dAf, A_fail, _bp_new_A_idx_list)
+    A_new = A[:, :len(_bp_new_A_idx_list)]
+    A_fail_new = A_fail[:, :len(_bp_new_A_idx_list)]
+    nnls.fit(A_new, B)
+    filter_weights = nnls.coef_
+    predict_suc_B = A_new.dot(filter_weights)
+    predict_fal_B = A_fail_new.dot(filter_weights)
+    A_idx_list = _bp_new_A_idx_list
+    logging.info(f'BP step/depth filter : columns kept {len(A_idx_list)} after refit')
+else:
+    logging.info('BP step/depth filter : no nclose removed, skip refit')
 
 final_weights_fullsize = np.zeros_like(weights_fullsize)
 final_weights_fullsize[A_idx_list] = filter_weights

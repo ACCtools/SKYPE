@@ -777,6 +777,9 @@ rpll = len(raw_path_list)
 with open(f'{PREFIX}/tot_loc_list.pkl', 'rb') as f:
     tot_loc_list = pkl.load(f)
 
+with open(f'{PREFIX}/cen_fragment_data.pkl', 'rb') as f:
+    cen_fragment_meta = pkl.load(f)
+
 grouped_data = defaultdict(lambda: {"positions": [], "values": []})
 for i, (chrom, pos) in enumerate(chr_filt_st_list + chr_no_filt_st_list):
     grouped_data[chrom]["positions"].append(pos)
@@ -890,6 +893,13 @@ def draw_circos_plot(fig_prefix=''):
 
     rdf = rebin_dataframe(df, 2)
 
+    fragment_depth_per_chrom = {}
+    for i, paf_loc in enumerate(tot_loc_list):
+        if paf_loc.split('/')[-3] == '12_cent_fragment':
+            chrom = paf_loc.split('/')[-2]
+            side = paf_loc.split('/')[-1].split('.')[0]
+            fragment_depth_per_chrom[chrom] = (side, float(weights[i]))
+
     circos = Circos(chr_len, space=3)
     circos.add_cytoband_tracks((95, 100), args.reference_cytobands_path)
 
@@ -937,7 +947,23 @@ def draw_circos_plot(fig_prefix=''):
         line_track_circos_color(cn_track, x=tdf['st'].to_list(), y1=tdf['meandepth'].to_list(), vmax=ABS_MAX_COVERAGE_RATIO * meandepth,
                                 target_color=['#6baed6', '#969696', '#fb6a4a'],
                                 target_value=[0.5 * meandepth, 2 * meandepth])
-        
+
+        if sector.name in fragment_depth_per_chrom:
+            side, frag_w = fragment_depth_per_chrom[sector.name]
+            info = cen_fragment_meta[sector.name]
+            if side == 'right':
+                st_lo, st_hi = info['mid'], info['chr_len']
+            else:
+                st_lo, st_hi = 0, info['mid']
+            cn_track.line(
+                [st_lo, st_lo, st_hi, st_hi],
+                [0, frag_w, frag_w, 0],
+                color='purple',
+                linestyle='--',
+                linewidth=0.7,
+                vmax=ABS_MAX_COVERAGE_RATIO * meandepth,
+                zorder=11,
+            )
 
         color_track = sector.add_track((53, 58))
         color_track.axis()
@@ -977,6 +1003,8 @@ def draw_circos_plot(fig_prefix=''):
     rpll = len(raw_path_list)
     for i in range(rpll, len(weights)):
         paf_loc = tot_loc_list[i]
+        if paf_loc.split('/')[-3] == '12_cent_fragment':
+            continue
         indel_ind = paf_loc.split('/')[-2]
         v = weights[i]
 
@@ -989,9 +1017,9 @@ def draw_circos_plot(fig_prefix=''):
                 chr_nam2 = l[CHR_NAM]
                 pos1 = int(l[CHR_STR])
                 pos2 = int(l[CHR_END])
-            
+
             bnd_cn_data.append([(chr_nam1, pos1), (chr_nam2, pos2), v, False])
-        
+
         indel_val_list.append(v / meandepth * 2)
 
     a = sorted(list(telo_cn.items()), key = lambda t:t[1])
@@ -1162,6 +1190,8 @@ def pairs_to_vcf(out_prefix=''):
     rpll = len(raw_path_list)
     for i in range(rpll, len(weights)):
         paf_loc = tot_loc_list[i]
+        if paf_loc.split('/')[-3] == '12_cent_fragment':
+            continue
         indel_ind = paf_loc.split('/')[-2]
         with open(tot_loc_list[i], "r") as f:
             l = f.readline()
@@ -1189,8 +1219,8 @@ def pairs_to_vcf(out_prefix=''):
             if exist_near_bnd(contig_data[st][CHR_NAM], contig_data[st][CHR_STR], contig_data[st][CHR_END]) or \
             exist_near_bnd(contig_data[ed][CHR_NAM], contig_data[ed][CHR_STR], contig_data[ed][CHR_END]):
                 significant_nclose.append(nclose)
-
-    logging.info(f"{out_prefix[1:].capitalize()} Total called breakends (INS, DEL, BND, INV) : {len(all_nclose) + len(display_indel)}")
+                
+    logging.info(f"{out_prefix[1:].capitalize()}{' ' if out_prefix else ''}Total called breakends (INS, DEL, BND, INV) : {len(all_nclose) + len(display_indel)}")
 
     vcf_path = f"{PREFIX}/SV_call_result{out_prefix}.vcf"
     _pairs_to_vcf(all_nclose, contig_data, chr_len, display_indel, vcf_path, significant_nclose, nclose_cn_std)
@@ -1206,7 +1236,7 @@ fclen = len(glob.glob(front_contig_path + "*"))
 bclen = len(glob.glob(back_contig_path + "*"))
 eclen = len(glob.glob(ecdna_contig_path + "*"))
 
-n = len(paf_ans_list) + fclen // 4 + bclen // 4 + eclen // 2
+n = len(paf_ans_list) + fclen // 4 + bclen // 4 + eclen // 2 + len(cen_fragment_meta)
 
 with open(f'{PREFIX}/ecdna_circuit_data.pkl', 'rb') as f:
     ecdna_circuit, _ = pkl.load(file=f)
@@ -1259,12 +1289,21 @@ def make_bed_output(output_prefix=''):
                         ctg_nd_list.append(contig_data[ctg_ind][CHR_END])
 
                     ctg_ind = ecdna_circuit[ecdna_ind][0]
-                    
+
                     ctg_st = min(ctg_st_list)
                     ctg_nd = max(ctg_nd_list)
 
                     cf.writerow([contig_data[ctg_ind][CHR_NAM], ctg_st, ctg_nd,
                                      'Amplicon', round(v / N * 2, 2)])
+
+                elif paf_loc.split('/')[-3] == '12_cent_fragment':
+                    chrom = paf_loc.split('/')[-2]
+                    info = cen_fragment_meta[chrom]
+                    if info["dir"]:
+                        st, nd = info["mid"], info["chr_len"]
+                    else:
+                        st, nd = 0, info["mid"]
+                    cf.writerow([chrom, st, nd, 'Centromere', round(v / N, 2)])
 
                 else:
                     assert(False)
@@ -1275,5 +1314,5 @@ if use_julia_solver:
     make_bed_output('_cluster')
     make_bed_output('_filter')
 
-os.remove(f'{PREFIX}/matrix.h5')
+# os.remove(f'{PREFIX}/matrix.h5')
 logging.info("SKYPE pipeline end")

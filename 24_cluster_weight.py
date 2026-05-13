@@ -92,6 +92,13 @@ def import_index_path(file_path : str) -> list:
 
     return path_list_dict[key][cnt][0]
 
+def chr2int(x):
+    chrXY2int = {'chrX' : 24, 'chrY' : 25}
+    if x in chrXY2int:
+        return chrXY2int[x]
+    else:
+        return int(x[3:])
+
 def import_telo_data(file_path : str, chr_len : dict) -> dict :
     fai_file = open(file_path, "r")
     telo_data = [(0,1)]
@@ -159,8 +166,57 @@ def exist_near_bnd(chrom, inside_st, inside_nd):
     nd_depth = mean_depth(inside_nd, inside_nd + VCF_FLANKING_LENGTH)
     if np.isnan(st_depth) or np.isnan(nd_depth):
         return True
-    
+
     return not similar_check(st_depth, nd_depth, NCLOSE_SIM_COMPARE_RAITO)
+
+
+def nclose_count_valid(st, ed):
+    """
+    Count "valid" sides:
+      - censat side: always treated as valid
+      - non-censat side: valid iff exist_near_bnd is True
+    Returns 0, 1, or 2.
+    """
+    def side_valid(idx):
+        if ppc_data[idx][CTG_CENSAT] != '0':
+            return True
+        return exist_near_bnd(
+            ppc_data[idx][CHR_NAM],
+            ppc_data[idx][CHR_STR],
+            ppc_data[idx][CHR_END],
+        )
+    st_cnt = int(side_valid(st))
+    ed_cnt = int(side_valid(ed))
+
+    return st_cnt + ed_cnt
+
+def is_filter_candidate(st, ed, tier_st, tier_ed):
+    """
+    Decide if nclose (st, ed) enters the filter set.
+
+    Per-side tier verdict:
+      Tier 1: filter if count_valid <= 1 (at least one side invalid)
+      Tier 2: filter only if count_valid == 0 (both sides invalid)
+      Tier 3: never filter
+    nclose enters the set only when both sides' tiers vote filter (AND).
+    """
+    if ppc_data[st][CTG_NAM].startswith('virtual_censat_contig'):
+        return False
+
+    if tier_st >= 3 or tier_ed >= 3:
+        return False
+
+    count_valid = nclose_count_valid(st, ed)
+
+    def tier_says_filter(tier):
+        if tier == 1:
+            return count_valid <= 1
+        if tier == 2:
+            return count_valid == 0
+        return False
+
+    return tier_says_filter(tier_st) and tier_says_filter(tier_ed)
+
 
 def parse_chromosome_labels(s):
     """
@@ -389,7 +445,7 @@ parser.add_argument("-t", "--thread", help="Number of threads", type=int)
 args = parser.parse_args()
 
 # t = """
-# 24_cluster_weight.py /home/hyunwoo/ACCtools-pipeline/90_skype_run/Caki-1/20_alignasm/Caki-1.ctg.aln.paf.ppc.paf /home/hyunwoo/ACCtools-pipeline/90_skype_run/Caki-1/01_depth/Caki-1_normalized.win.stat.gz public_data/chm13v2.0_telomere.bed public_data/chm13v2.0.fa.fai 30_skype_pipe/Caki-1_18_40_59 -t 128
+# 24_cluster_weight.py /Data/hyunwoo/00_skype_run_data/COLO829/20_alignasm/COLO829.ctg.aln.paf.ppc.paf /Data/hyunwoo/00_skype_run_data/COLO829/01_depth/COLO829_normalized.win.stat.gz /hyunwoo/63_skype_test/deps/SKYPE/public_data/chm13v2.0_telomere.bed /hyunwoo/63_skype_test/deps/SKYPE/public_data/chm13v2.0.fa.fai /hyunwoo/63_skype_test/skype/COLO829_00_26_35 -t 72
 # """
 # args = parser.parse_args(t.strip().split()[1:])
 
@@ -495,20 +551,16 @@ nclose_max_error_dict = {}
 pre_tar_nclose_list = []
 pre_thread_data_jl = jl.Vector[jl.Vector[jl.Int]]()
 
-# Collect all potential candidate pairs ignoring the fail_chrom_list filter for now
+# Collect all potential candidate pairs using Tier 1 (most permissive — covers all tiers)
 for k, v in nclose_total_weight_dict.items():
     if len(k) == 2:
         st, ed = k
+
+        if ppc_data[st][CTG_NAM] in {'utg036624l', 'utg020789l', 'utg023428l'}:
+            t = 1
+
         if v >= 0 * meandepth and ppc_data[st][CHR_NAM] != ppc_data[ed][CHR_NAM]:
-            is_candidate = False
-            if (not exist_near_bnd(ppc_data[st][CHR_NAM], ppc_data[st][CHR_STR], ppc_data[st][CHR_END]) or \
-            not exist_near_bnd(ppc_data[ed][CHR_NAM], ppc_data[ed][CHR_STR], ppc_data[ed][CHR_END])) and \
-            not ppc_data[st][CTG_NAM].startswith('virtual_censat_contig'):
-                is_candidate = True
-            if (ppc_data[st][CTG_CENSAT] != '0' or ppc_data[ed][CTG_CENSAT] != '0') and not ppc_data[st][CTG_NAM].startswith('virtual_censat_contig'):
-                is_candidate = True
-            
-            if is_candidate:
+            if is_filter_candidate(st, ed, 1, 1):
                 pre_tar_nclose_list.append(k)
 
 pre_nclose_notusing_idx_dict = defaultdict(list)
@@ -524,6 +576,9 @@ pre_weight_list = jl.run_nnls_map(A_jl, B_jl, pre_thread_data_jl)
 
 # Store pre-calculated max error rates in dictionary
 for nclose_pair, (weight_jl, predict_suc_B_jl) in zip(pre_tar_nclose_list, pre_weight_list):
+    if ppc_data[nclose_pair[0]][0] == 'simple_ctg_alt_ptg000012l':
+        t = 1
+
     predict_suc_B = np.asarray(predict_suc_B_jl)
 
     chrom_acc_sum_dict = defaultdict(int)
@@ -544,29 +599,22 @@ for nclose_pair, (weight_jl, predict_suc_B_jl) in zip(pre_tar_nclose_list, pre_w
     
     nclose_max_error_dict[nclose_pair] = max_error_rate
 
-# Iterate filtering process until failing chromosomes stabilize
-fail_chrom_list = []
-prev_fail_chrom_set = None
+# Iterative filtering with per-chromosome tier escalation:
+#   Tier 1: filter nclose if at least one side is invalid (count_valid <= 1)
+#   Tier 2: filter only if both sides are invalid (count_valid == 0)
+#   Tier 3: never filter
+# A chromosome advances 1->2->3 each time it fails (chrom_error_rate > threshold).
+chrom_tier = {}
 
 while True:
-    # Check termination condition: Break if fail_chrom_list has not changed
-    if prev_fail_chrom_set is not None and (set(fail_chrom_list) == prev_fail_chrom_set or not fail_chrom_list):
-        break
-    prev_fail_chrom_set = set(fail_chrom_list)
-
     div_nclose_set = set()
     for k, v in nclose_total_weight_dict.items():
         if len(k) == 2:
             st, ed = k
-            if v >= 0 * meandepth \
-            and ppc_data[st][CHR_NAM] != ppc_data[ed][CHR_NAM] \
-            and ppc_data[st][CHR_NAM] not in fail_chrom_list \
-            and ppc_data[ed][CHR_NAM] not in fail_chrom_list:
-                if (not exist_near_bnd(ppc_data[st][CHR_NAM], ppc_data[st][CHR_STR], ppc_data[st][CHR_END]) or \
-                not exist_near_bnd(ppc_data[ed][CHR_NAM], ppc_data[ed][CHR_STR], ppc_data[ed][CHR_END])) and \
-                not ppc_data[st][CTG_NAM].startswith('virtual_censat_contig'):
-                    div_nclose_set.add(k)
-                if (ppc_data[st][CTG_CENSAT] != '0' or ppc_data[ed][CTG_CENSAT] != '0') and not ppc_data[st][CTG_NAM].startswith('virtual_censat_contig'):
+            if v >= 0 * meandepth and ppc_data[st][CHR_NAM] != ppc_data[ed][CHR_NAM]:
+                tier_st = chrom_tier.get(ppc_data[st][CHR_NAM], 1)
+                tier_ed = chrom_tier.get(ppc_data[ed][CHR_NAM], 1)
+                if is_filter_candidate(st, ed, tier_st, tier_ed):
                     div_nclose_set.add(k)
 
     nclose_notusing_idx_dict = defaultdict(list)
@@ -576,16 +624,26 @@ while True:
                 nclose_notusing_idx_dict[nclose_pair].append(k)
 
     not_essential_nclose = set()
-    
+
     # Use cached max error rates instead of recalculating
     for nclose_pair in div_nclose_set:
         max_error_rate = nclose_max_error_dict.get(nclose_pair, float('inf'))
-        
+
         if max_error_rate < BASE_ACCSUMABSMAX_RATIO:
             logging.debug(f"{nclose_pair} : Nclose removed")
             not_essential_nclose.add(nclose_pair)
 
     logging.info(f'Filtered nclose count by depth : {len(not_essential_nclose)}')
+    for nclose_pair in sorted(not_essential_nclose):
+        st, ed = nclose_pair
+        st_row = ppc_data[st]
+        ed_row = ppc_data[ed]
+        # logging.info(
+        #     f'  Filtered nclose: '
+        #     f'{st_row[CTG_NAM]} ({st_row[CHR_NAM]}:{st_row[CHR_STR]}-{st_row[CHR_END]}) '
+        #     f'<-> '
+        #     f'{ed_row[CTG_NAM]} ({ed_row[CHR_NAM]}:{ed_row[CHR_STR]}-{ed_row[CHR_END]})'
+        # )
 
     using_idx_set = set(A_idx_list)
     for nclose_pair in not_essential_nclose:
@@ -615,7 +673,7 @@ while True:
         chrom_acc_sum_dict[chrom] += predict_B_succ[i] - predict_suc_B_base[i]
         if abs(chrom_acc_sum_dict[chrom]) > chrom_acc_sum_dict_max[chrom]:
             chrom_acc_sum_dict_max[chrom] = abs(chrom_acc_sum_dict[chrom])
-    
+
     new_fail_chrom_list = []
     for chrom, acc_sum_max in chrom_acc_sum_dict_max.items():
         if chrom == 'chrY' and no_chrY:
@@ -625,14 +683,22 @@ while True:
         
         if chrom_error_rate > CHROM_ERROR_FAIL_RATE:
             new_fail_chrom_list.append(chrom)
-            
-    fail_chrom_list.extend(new_fail_chrom_list)
 
-    if len(new_fail_chrom_list) > 0:
-        logging.info(f'Fail filtering nclose chromosome : {", ".join(new_fail_chrom_list)}')
+    advanced = []
+    for chrom in new_fail_chrom_list:
+        cur_tier = chrom_tier.get(chrom, 1)
+        if cur_tier < 3:
+            chrom_tier[chrom] = cur_tier + 1
+            advanced.append((chrom, cur_tier + 1))
 
-if len(fail_chrom_list) > 0:
-    logging.info(f'Final fail filtering nclose chromosome : {", ".join(fail_chrom_list)}')
+    if advanced:
+        logging.info(f'Chrom tier advanced: {", ".join(f"{c}->T{t}" for c, t in advanced)}')
+    else:
+        break
+
+final_tier_summary = sorted((c, t) for c, t in chrom_tier.items() if t > 1)
+if final_tier_summary:
+    logging.info(f'Final chrom tiers (>T1): {", ".join(f"{c}@T{t}" for c, t in final_tier_summary)}')
 
 b_norm = np.linalg.norm(B)
 
@@ -702,6 +768,14 @@ for i in range(1, eclen//2 + 1):
     ecdna_paf_loc = ecdna_contig_path+f"{i}.paf"
     tot_loc_list.append(ecdna_paf_loc)
 
+with open(f'{PREFIX}/cen_fragment_data.pkl', 'rb') as f:
+    cen_fragment_meta = pkl.load(f)
+
+cen_fragment_list = sorted(cen_fragment_meta.items(), key=lambda kv: chr2int(kv[0]))
+for chrom, info in cen_fragment_list:
+    side = 'right' if info["dir"] else 'left'
+    tot_loc_list.append(f'{PREFIX}/12_cent_fragment/{chrom}/{side}.fragment')
+
 loc2weight = dict(zip(tot_loc_list, weights))
 
 cluster_tar_path_list = []
@@ -718,14 +792,14 @@ for path_tuple in tar_chr_data.values():
 
 for ind, w in weights_sorted_data:
     paf_loc = tot_loc_list[ind]
-    if paf_loc.split('/')[-3] != '11_ref_ratio_outliers':
+    if paf_loc.split('/')[-3] not in {'11_ref_ratio_outliers', '12_cent_fragment'}:
         if w > CLUSTER_START_DEPTH * N:
             cluster_tar_path_list.append(paf_loc)
 
 tot_loc_list2nclosecnt = dict()
 
 for paf_loc in tot_loc_list:
-    if paf_loc.split('/')[-3] != '11_ref_ratio_outliers':
+    if paf_loc.split('/')[-3] not in {'11_ref_ratio_outliers', '12_cent_fragment'}:
         path = import_index_path(paf_loc)
 
         if len(path[0]) < 4:
@@ -790,6 +864,8 @@ for ncnt, (paf_loc, w) in enumerate(loc2weight.items()):
             using_merge_ncnt_list.append(ncnt)
         else:
             assert(False)
+    elif paf_loc.split('/')[-3] == '12_cent_fragment':
+        using_merge_ncnt_list.append(ncnt)
 
 using_merge_ncnt_list.sort()
 using_merge_ncnt_arr = np.asarray(using_merge_ncnt_list)

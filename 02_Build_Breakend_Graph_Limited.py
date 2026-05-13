@@ -94,6 +94,8 @@ PATH_MAJOR_COMPONENT = 3
 NCLOSE_COMPRESS_LIMIT = 100*K
 NCLOSE_MERGE_LIMIT = 1*K
 ALL_REPEAT_NCLOSE_COMPRESS_LIMIT = 500*K
+SUBTELO_TIP_LIMIT = 500*K
+
 PATH_COMPRESS_LIMIT = 50*K
 IGNORE_PATH_LIMIT = 50*K
 NON_REPEAT_NOISE_RATIO=0.1
@@ -101,7 +103,9 @@ NON_REPEAT_NOISE_RATIO=0.1
 CONTIG_MINIMUM_SIZE = 100*K
 BND_CONTIG_BOUND = 0.1
 RPT_BND_CONTIG_BOUND = 0.2
+
 MAPQ_BOUND = 60
+
 TELOMERE_EXPANSION = 5 * K
 TELOMERE_COMPRESS_RANGE = 100*K
 CENSAT_COMPRESSABLE_THRESHOLD = 1000*K
@@ -1818,6 +1822,19 @@ def find_breakend_centromere(repeat_censat_data : dict, chr_len : dict, df : pd.
 
     result_df = pd.DataFrame(results)
 
+    cen_fragment_meta = {}
+    for chrom, diff in depth_diff_data.items():
+        intervals = repeat_censat_data[chrom]
+        rep_start_0, rep_end_0 = intervals[0]
+        mid_censat = (rep_start_0 + rep_end_0) // 2
+        
+        cen_fragment_meta[chrom] = {
+            "dir": depth_dir_data[chrom],
+            "mid": mid_censat,
+            "depth_diff": diff,
+            "chr_len": chr_len[chrom],
+        }
+
     def find_min_error_partition(depth_diff_data):
         """
         Partition keys into groups of size 1, 2, or 3 to minimize total error,
@@ -1916,11 +1933,14 @@ def find_breakend_centromere(repeat_censat_data : dict, chr_len : dict, df : pd.
 
         return recurse(all_keys)
 
-    partition_dict, error = find_min_error_partition(depth_diff_data)
-
     cnt = 0
     vtg_list = []
     prefix = "virtual_censat_contig"
+
+    # 가상 BND contig 생성 비활성화: centromere depth 차이는 22번 NNLS의
+    # fragment chromosome column 으로 흡수한다. 페어링/노드 생성 코드는 보존.
+    partition_dict = {}
+    # partition_dict, error = find_min_error_partition(depth_diff_data)
 
     for k, v in partition_dict.items():
         connecting_pair = []
@@ -1998,7 +2018,7 @@ def find_breakend_centromere(repeat_censat_data : dict, chr_len : dict, df : pd.
                 vtg_list.append(temp_node1)
                 vtg_list.append(temp_node2)
 
-    return vtg_list
+    return vtg_list, cen_fragment_meta
 
 def break_double_telomere_contig(contig_data : list, telo_connected_set : set):
     s = 0
@@ -2235,18 +2255,45 @@ def extract_nclose_node(contig_data : list, bnd_contig : set, repeat_contig_name
             if contig_data[s][CTG_TYP] in (1, 2):
                 st_chr = [contig_data[s][CTG_DIR], contig_data[s][CHR_NAM]]
                 ed_chr = [contig_data[e][CTG_DIR], contig_data[e][CHR_NAM]]
-                while st <= e and [contig_data[st][CTG_DIR], contig_data[st][CHR_NAM]] == st_chr:
-                    st+=1
-                    cut_ratio, _ = calculate_single_contig_ref_ratio(contig_data[s:st+1])
+                # simple_ctg_alt: 1-chunk noise(다른 chr/dir 단일 chunk)는 무시하고 더 깊이 trim
+                is_simple_ctg_alt = contig_data[s][CTG_NAM].startswith("simple_ctg_alt_")
+                MAX_GAP = 1 if is_simple_ctg_alt else 0
+
+                # forward trim
+                gap = 0
+                last_match_st = st  # st == s, st_chr 매칭 by construction
+                st_cur = st + 1
+                while st_cur <= e:
+                    if [contig_data[st_cur][CTG_DIR], contig_data[st_cur][CHR_NAM]] == st_chr:
+                        last_match_st = st_cur
+                        gap = 0
+                    else:
+                        gap += 1
+                        if gap > MAX_GAP:
+                            break
+                    cut_ratio, _ = calculate_single_contig_ref_ratio(contig_data[s:last_match_st+1])
                     if abs(cut_ratio-1) > BND_CONTIG_BOUND:
                         break
-                st-=1
-                while ed >= s and [contig_data[ed][CTG_DIR], contig_data[ed][CHR_NAM]] == ed_chr:
-                    ed-=1
-                    cut_ratio, _ = calculate_single_contig_ref_ratio(contig_data[ed:e+1])
+                    st_cur += 1
+                st = last_match_st
+
+                # backward trim
+                gap = 0
+                last_match_ed = ed  # ed == e, ed_chr 매칭 by construction
+                ed_cur = ed - 1
+                while ed_cur >= s:
+                    if [contig_data[ed_cur][CTG_DIR], contig_data[ed_cur][CHR_NAM]] == ed_chr:
+                        last_match_ed = ed_cur
+                        gap = 0
+                    else:
+                        gap += 1
+                        if gap > MAX_GAP:
+                            break
+                    cut_ratio, _ = calculate_single_contig_ref_ratio(contig_data[last_match_ed:e+1])
                     if abs(cut_ratio-1) > BND_CONTIG_BOUND:
                         break
-                ed+=1
+                    ed_cur -= 1
+                ed = last_match_ed
 
                 if st + 1 < ed:
                     flags = [contig_data[ed-1][CTG_DIR], contig_data[ed-1][CHR_NAM]] == st_chr
@@ -2339,7 +2386,10 @@ def extract_nclose_node(contig_data : list, bnd_contig : set, repeat_contig_name
                         st_idx = i-maxcombo+1
                         ed_idx = i
                 nclose_list = []
-                if max_chr not in ((contig_data[s][CTG_DIR], contig_data[s][CHR_NAM]), (contig_data[e][CTG_DIR], contig_data[e][CHR_NAM])) \
+                # simple_ctg_alt contigs: skip mainflow split — keep exactly one nclose pair per contig
+                is_simple_ctg_alt = contig_data[s][CTG_NAM].startswith("simple_ctg_alt_")
+                if not is_simple_ctg_alt \
+                    and max_chr not in ((contig_data[s][CTG_DIR], contig_data[s][CHR_NAM]), (contig_data[e][CTG_DIR], contig_data[e][CHR_NAM])) \
                     and st_idx != ed_idx:
                     st_chr = [contig_data[st][CTG_DIR], contig_data[st][CHR_NAM]]
                     ed_chr = [contig_data[st_idx][CTG_DIR], contig_data[st_idx][CHR_NAM]]
@@ -3108,7 +3158,10 @@ def contig_preprocessing_00(PAF_FILE_PATH_ : list):
     df = pd.read_csv(main_stat_loc, compression='gzip', comment='#', sep='\t', names=['chr', 'st', 'nd', 'length', 'covsite', 'totaldepth', 'cov', 'meandepth'])
     df = df.query('chr != "chrM"')
 
-    cen_vtg_contig = find_breakend_centromere(repeat_censat_data, chr_len, df)
+    cen_vtg_contig, cen_fragment_meta = find_breakend_centromere(repeat_censat_data, chr_len, df)
+
+    with open(f'{PREFIX}/cen_fragment_data.pkl', 'wb') as f:
+        pkl.dump(cen_fragment_meta, f)
 
     telo_dict = defaultdict(list)
     for _ in telo_data:
@@ -3508,6 +3561,167 @@ def contig_preprocessing_00(PAF_FILE_PATH_ : list):
     logging.info(f"Original PAF file length : {original_node_count}")
     logging.info(f"Final preprocessed PAF file length: {len(real_final_contig)}")
     logging.info(f"Number of virtual contigs added on preprocessing : {add_node_count}")
+
+    # raw alt PAF(args.alt = utg.aln.paf)에서 텔로미어 endpoint별로
+    # 가장 가까운 chunk 1개를 stub contig로 추가한다.
+    # CTG_TYP=3, CTG_TELCON='0'으로 두어 initial_graph_build의 closest-node 분기에서만 후보로 잡히게 함.
+    # CTG_GLOBALIDX는 cl_ind=3 prefix를 써서 div_repeat_paf / form_normal_contig 등 cl_ind<2 가드들이 자동으로 우회하도록 한다.
+    if args.alt is not None and os.path.exists(args.alt):
+        chunks_per_chr = defaultdict(list)
+        with open(args.alt, "rt") as raw_f:
+            for line in raw_f:
+                cols = line.rstrip("\n").split("\t")
+                if len(cols) < 12:
+                    continue
+                ctg_name = cols[0]
+                try:
+                    chunk = [
+                        ctg_name,        # 0  CTG_NAM
+                        int(cols[1]),    # 1  CTG_LEN
+                        int(cols[2]),    # 2  CTG_STR
+                        int(cols[3]),    # 3  CTG_END
+                        cols[4],         # 4  CTG_DIR
+                        cols[5],         # 5  CHR_NAM
+                        int(cols[6]),    # 6  CHR_LEN
+                        int(cols[7]),    # 7  CHR_STR
+                        int(cols[8]),    # 8  CHR_END
+                        int(cols[11]),   # 9  CTG_MAPQ
+                    ]
+                except (IndexError, ValueError):
+                    continue
+                chunks_per_chr[chunk[CHR_NAM]].append(chunk)
+
+        selected_stub_chunks = {}
+        for telo_key, telo_range in telo_bound_dict.items():
+            chr_name = telo_key[:-1]
+            if chr_name not in chunks_per_chr:
+                continue
+            temp_telo = (0, 0, 0, 0, 0, 0, 0, telo_range[0], telo_range[1])
+            best_dist = INF
+            best_chunk = None
+            for chunk in chunks_per_chr[chr_name]:
+                d = telo_distance_checker(chunk, temp_telo)
+                if d < best_dist:
+                    best_dist = d
+                    best_chunk = chunk
+            if best_chunk is not None:
+                key = (best_chunk[CTG_NAM], best_chunk[CTG_STR], best_chunk[CTG_END])
+                if key not in selected_stub_chunks:
+                    selected_stub_chunks[key] = best_chunk
+
+        raw_telo_stub_count = 0
+        for stub_chunk in selected_stub_chunks.values():
+            stub_idx = len(real_final_contig)
+            stub_name = f"raw_telo_stub_{stub_chunk[CTG_NAM]}_{stub_chunk[CHR_NAM]}_{stub_chunk[CHR_STR]}"
+            stub = list(stub_chunk) + [
+                3,                                  # 10 CTG_TYP
+                stub_idx,                           # 11 CTG_STRND
+                stub_idx,                           # 12 CTG_ENDND
+                '0',                                # 13 CTG_TELCHR
+                '0',                                # 14 CTG_TELDIR
+                '0',                                # 15 CTG_TELCON
+                '0',                                # 16 CTG_RPTCHR
+                '0',                                # 17 CTG_RPTCASE
+                '0',                                # 18 CTG_CENSAT
+                '0',                                # 19 CTG_MAINFLOWDIR (find_mainflow가 덮어씀)
+                '0',                                # 20 CTG_MAINFLOWCHR (find_mainflow가 덮어씀)
+                f'3.{raw_telo_stub_count}',         # 21 CTG_GLOBALIDX
+            ]
+            stub[CTG_NAM] = stub_name
+            real_final_contig.append(stub)
+            raw_telo_stub_count += 1
+
+        if raw_telo_stub_count > 0:
+            logging.info(f"Number of raw telomere stub contigs added : {raw_telo_stub_count}")
+
+    # Simple ctg-as-alt (--add_alt_ctg_simple):
+    # primary contig PAF의 각 contig에 대해 양끝 chunk(qry 첫/마지막)의 chr/dir만으로
+    # type 판정 (1: chr 다름, 2: dir 다름, 그 외 skip). 양끝 nclose가 잡히는 contig은
+    # 그 안의 ALL chunk를 real_final_contig에 그대로 append → extract_nclose_node가
+    # 전체 contig 구조를 보고 nclose pair 생성 (mainflow split 등 자연스럽게 발동).
+    if args.add_alt_ctg_simple:
+        primary_kept_set = set(final_using_contig)
+        existing_names = {c[CTG_NAM] for c in real_final_contig}
+
+        chunks_per_contig = defaultdict(list)
+        # primary ctg PAF의 line idx를 함께 트래킹 → CTG_GLOBALIDX="0.{line_idx}"로 11번이 lookup 가능
+        with open(PAF_FILE_PATH_[0], "rt") as f:
+            for line_idx, line in enumerate(f):
+                cols = line.rstrip("\n").split("\t")
+                if len(cols) < 12:
+                    continue
+                ctg_name = cols[0]
+                if ctg_name in primary_kept_set:
+                    continue
+                try:
+                    chunk = [
+                        ctg_name,        # 0  CTG_NAM
+                        int(cols[1]),    # 1  CTG_LEN
+                        int(cols[2]),    # 2  CTG_STR
+                        int(cols[3]),    # 3  CTG_END
+                        cols[4],         # 4  CTG_DIR
+                        cols[5],         # 5  CHR_NAM
+                        int(cols[6]),    # 6  CHR_LEN
+                        int(cols[7]),    # 7  CHR_STR
+                        int(cols[8]),    # 8  CHR_END
+                        int(cols[11]),   # 9  CTG_MAPQ
+                        line_idx,        # 10 line idx in primary PAF (used for CTG_GLOBALIDX)
+                    ]
+                except (IndexError, ValueError):
+                    continue
+                chunks_per_contig[ctg_name].append(chunk)
+
+        simple_alt_count = 0
+        for ctg_name, chunks in sorted(chunks_per_contig.items()):
+            if len(chunks) < 2:
+                continue
+            chunks.sort(key=lambda c: (c[CTG_STR], c[CTG_END]))
+            start = chunks[0]
+            end = chunks[-1]
+
+            if start[CHR_NAM] != end[CHR_NAM]:
+                sv_type = 1
+            elif start[CTG_DIR] != end[CTG_DIR]:
+                sv_type = 2
+            else:
+                continue  # type 3, 4, or 5 — skip per --add_alt_ctg_simple spec
+
+            syn_name = f"simple_ctg_alt_{ctg_name}"
+            if syn_name in existing_names:
+                continue
+            existing_names.add(syn_name)
+
+            # 기존 contig들과 동일한 telo / repeat / censat 라벨을 계산해서 채움
+            # (label_node / label_repeat_node 는 chunk[CHR_NAM/CHR_STR/CHR_END] 만 봄)
+            telo_labels = label_node(chunks, telo_dict)
+            repeat_labels = label_repeat_node(chunks, repeat_data, chr_len)
+            censat_labels = label_repeat_node(chunks, repeat_censat_data, chr_len)
+
+            s_idx = len(real_final_contig)
+            e_idx = s_idx + len(chunks) - 1
+            for chunk_i, raw in enumerate(chunks):
+                line_idx = raw[10]                       # tracked when parsing primary PAF
+                syn_chunk = list(raw[:10]) + [
+                    sv_type,                             # 10 CTG_TYP
+                    s_idx,                               # 11 CTG_STRND
+                    e_idx,                               # 12 CTG_ENDND
+                    telo_labels[chunk_i][0],             # 13 CTG_TELCHR
+                    telo_labels[chunk_i][1],             # 14 CTG_TELDIR
+                    '0',                                 # 15 CTG_TELCON (telcon_set 미참여)
+                    repeat_labels[chunk_i][0],           # 16 CTG_RPTCHR
+                    repeat_labels[chunk_i][1],           # 17 CTG_RPTCASE
+                    censat_labels[chunk_i][1],           # 18 CTG_CENSAT
+                    '0',                                 # 19 CTG_MAINFLOWDIR (find_mainflow가 덮어씀)
+                    '0',                                 # 20 CTG_MAINFLOWCHR (find_mainflow가 덮어씀)
+                    f'0.{line_idx}',                     # 21 CTG_GLOBALIDX (paf_file[0][line_idx]로 11번이 lookup)
+                ]
+                syn_chunk[CTG_NAM] = syn_name
+                real_final_contig.append(syn_chunk)
+
+            simple_alt_count += 1
+
+        if simple_alt_count > 0:
+            logging.info(f"Number of simple ctg alt contigs added : {simple_alt_count}")
 
     adjacency = initial_graph_build(real_final_contig, telo_bound_dict)
 
@@ -3932,6 +4146,88 @@ def nclose_calc():
     
     nclose_nodes = final_nclose_nodes
 
+    # censat 관련 nclose 필터:
+    # - 양쪽 모두 censat: 무조건 drop
+    # - 한쪽만 censat: keep if (censat chr in cen_fragment_meta) OR (censat 위치가 chr 끝)
+    #   (cen_fragment column 만들어진 chr 또는 acrocentric 같이 censat이 chr 끝쪽인 케이스)
+    with open(f'{PREFIX}/cen_fragment_data.pkl', 'rb') as f:
+        cen_fragment_meta_for_filter = pkl.load(f)
+    cent_fragment_chroms = set(cen_fragment_meta_for_filter.keys())
+
+    # chunk가 overlap하는 censat interval이 chr 경계와 정확히 맞닿은 경우만 chr 끝 판정
+    # CHM13 v2.1 기준: chr13/14/15/21/22 (acrocentric) 의 censat이 s=0 에서 시작 → match
+
+    def _censat_at_chr_end(idx):
+        chrom = contig_data[idx][CHR_NAM]
+        cl = chr_len.get(chrom, 0)
+        intervals = repeat_censat_data.get(chrom, [])
+        chunk_str = contig_data[idx][CHR_STR]
+        chunk_end = contig_data[idx][CHR_END]
+        for s, e in intervals:
+            if max(s, chunk_str) < min(e, chunk_end):  # chunk가 이 interval 과 overlap
+                if s == 0 or e == cl:  # interval이 chr 경계에 붙음 (strict)
+                    return True
+        return False
+
+    censat_filtered_nclose_nodes = defaultdict(list)
+    censat_removed_both = 0
+    censat_removed_one = 0
+    for ctg_name, pair_list in nclose_nodes.items():
+        for pair in pair_list:
+            s_censat = contig_data[pair[0]][CTG_CENSAT] != '0'
+            e_censat = contig_data[pair[1]][CTG_CENSAT] != '0'
+            if s_censat and e_censat:
+                censat_removed_both += 1
+                continue
+            if s_censat:
+                s_chr = contig_data[pair[0]][CHR_NAM]
+                if s_chr not in cent_fragment_chroms and not _censat_at_chr_end(pair[0]):
+                    censat_removed_one += 1
+                    continue
+            if e_censat:
+                e_chr = contig_data[pair[1]][CHR_NAM]
+                if e_chr not in cent_fragment_chroms and not _censat_at_chr_end(pair[1]):
+                    censat_removed_one += 1
+                    continue
+            censat_filtered_nclose_nodes[ctg_name].append(pair)
+    nclose_nodes = censat_filtered_nclose_nodes
+    logging.info(f'Removed {censat_removed_both} censat-censat nclose, '
+                 f'{censat_removed_one} censat-* nclose (chr not in cent_fragment AND not at chr end)')
+
+    # Subtelomeric tip-orientation filter:
+    # 양끝 SUBTELO_TIP_LIMIT tip을 동등 boundary로 가정. 두 chunk가 같은 telomere
+    # orientation type ({f+, b-} = telo-inward 또는 {f-, b+} = telo-outward) 이면
+    # 결과 path가 "정상 chromosome path + tip swap"으로 환원되어 정보 추가가 없음.
+    # 다른 type끼리는 양쪽 본체가 다 path에 들어가는 fusion/inversion이라 보존.
+    # 같은 chromosome head-to-tail (chr1b+ => chr1f+) 은 type이 달라 자동 보존됨.
+    def _subtelo_orientation(idx):
+        chrom = contig_data[idx][CHR_NAM]
+        chr_str = contig_data[idx][CHR_STR]
+        chr_end = contig_data[idx][CHR_END]
+        ctg_dir = contig_data[idx][CTG_DIR]
+        cl = chr_len.get(chrom, 0)
+        at_front = chr_str < SUBTELO_TIP_LIMIT
+        at_back = chr_end > cl - SUBTELO_TIP_LIMIT
+        if at_front == at_back:
+            return None
+        if at_front:
+            return 'inward' if ctg_dir == '+' else 'outward'
+        return 'outward' if ctg_dir == '+' else 'inward'
+
+    subtelo_filtered_nclose_nodes = defaultdict(list)
+    subtelo_removed = 0
+    for ctg_name, pair_list in nclose_nodes.items():
+        for pair in pair_list:
+            t_s = _subtelo_orientation(pair[0])
+            t_e = _subtelo_orientation(pair[1])
+            if t_s is not None and t_s == t_e:
+                subtelo_removed += 1
+                continue
+            subtelo_filtered_nclose_nodes[ctg_name].append(pair)
+    nclose_nodes = subtelo_filtered_nclose_nodes
+    logging.info(f"Removed {subtelo_removed} same-orientation subtelomeric tip nclose "
+                 f"(both junctions within {SUBTELO_TIP_LIMIT//1000}kb of telomere, same telo-in/out direction)")
+
     nclose_type = defaultdict(list)
     for j in nclose_nodes:
         for pair in nclose_nodes[j]:
@@ -4174,8 +4470,16 @@ parser.add_argument("--test",
                     help=argparse.SUPPRESS, action='store_true')
 parser.add_argument("--exclude_nclose_list_loc", 
                     help=argparse.SUPPRESS, default=None)                 
-parser.add_argument("--skip_bam_analysis", 
+parser.add_argument("--skip_bam_analysis",
                     help="Skip bam analysis", action='store_true')
+parser.add_argument("--add_alt_ctg_simple",
+                    help="For each primary ctg PAF contig, classify by first/last chunk "
+                         "(chr diff -> type 1, dir diff -> type 2; else skip). "
+                         "If type 1 or 2, append ALL chunks of that contig to real_final_contig. "
+                         "extract_nclose_node applies its trim/fake_bnd/censat/compression logic, "
+                         "but mainflow split is disabled for these contigs -> exactly one nclose "
+                         "pair per simple_ctg_alt contig.",
+                    action='store_true')
 
 args = parser.parse_args()
 
@@ -4851,4 +5155,4 @@ with open(f'{PREFIX}/report.txt', 'w') as f:
             print(st, nd, c, file=f)
 
 with open(f'{PREFIX}/nclose_chunk_data.pkl', 'wb') as f:
-        pkl.dump((nclose_nodes, st_compress, ed_compress), f)
+    pkl.dump((nclose_nodes, st_compress, ed_compress), f)

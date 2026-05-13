@@ -419,6 +419,79 @@ def plot_indel(ax, indel, maxh, cell_col, def_cell_col, chr_len, label=None):
     ax.set_ylim(0, 100)
     ax.axis('off')
 
+def plot_centromere_fragment(ax, frag, maxh, cell_col, def_cell_col, chr_len_norm, label=None):
+    """frag = (chrom, side, mid_bp, chr_len_bp).
+    점선 outline 으로 reference 염색체 윤곽을 그리고, centromere mid 를 기준으로
+    한쪽 arm fragment 만 색칠한다.
+    """
+    chrom, side, mid_bp, chr_len_bp = frag
+    x_center = 0
+    width = 10
+    radius = width / 2.0
+    total_length = chr_len_norm
+    round_radius = min(radius, total_length / 4) if total_length > 0 else radius
+    chr_color = CHR_COLORS.get(chrom, "gray")
+
+    clip_patch = patches.FancyBboxPatch(
+        (x_center - radius, 0),
+        width,
+        total_length,
+        boxstyle=f"round,pad=0,rounding_size={round_radius}",
+        facecolor='none',
+        edgecolor='none'
+    )
+    ax.add_patch(clip_patch)
+
+    outline_patch = patches.FancyBboxPatch(
+        (x_center - radius, 0),
+        width,
+        total_length,
+        boxstyle=f"round,pad=0,rounding_size={round_radius}",
+        facecolor='white',
+        edgecolor='black',
+        linestyle='dashed',
+        linewidth=1.2,
+        clip_on=False
+    )
+    ax.add_patch(outline_patch)
+
+    mid_norm = mid_bp / chr_len_bp * total_length
+    if side == 'right':
+        y1, y2 = mid_norm, total_length
+    else:
+        y1, y2 = 0, mid_norm
+    seg_length = y2 - y1
+
+    frag_rect = patches.Rectangle(
+        (x_center - radius, y1),
+        width,
+        seg_length,
+        facecolor=chr_color,
+        edgecolor='none'
+    )
+    frag_rect.set_clip_path(clip_patch)
+    ax.add_patch(frag_rect)
+
+    midy = (y1 + y2) / 2
+    x_start = x_center + radius
+    x_end = x_center + 2 * radius
+    ax.plot([x_start, x_end], [y1, midy], linewidth=1, color='black')
+    ax.plot([x_start, x_end], [y2, midy], linewidth=1, color='black')
+
+    text_obj = ax.text(
+        x_end + radius / 5, midy,
+        f"cen({chrom[3:]})",
+        ha='left', va='center', fontsize=10, color='black'
+    )
+    mark_overlapping_texts_with_arrows(ax, [text_obj], min_gap=5)
+
+    if label:
+        ax.text(x_center, -5, label, ha='center', va='top', fontsize=10)
+
+    ax.set_xlim(0, 60 * cell_col / def_cell_col)
+    ax.set_ylim(0, 100)
+    ax.axis('off')
+
 def plot_ecdna(ax, chr_name, cell_col, def_cell_col, label = None):
     axis_xlim = 60
     axis_ylim = 100
@@ -742,7 +815,7 @@ def build_karyotype_diagram(fig_prefix : str = '', filter_depth_N : float = TARG
     for ind, w in weights_sorted_data:
         paf_loc = tot_loc_list[ind]
         key = paf_loc.split('/')[-3]
-        if paf_loc.split('/')[-3] != '11_ref_ratio_outliers':
+        if key not in {'11_ref_ratio_outliers', '12_cent_fragment'}:
             if w > filter_depth_N * meandepth / 2:
                 non_type4_top_path.append(paf_loc)
 
@@ -857,13 +930,26 @@ def build_karyotype_diagram(fig_prefix : str = '', filter_depth_N : float = TARG
         sorted_cnt_data = sorted(cnt.items(), key=lambda t: -t[1])
         grouped_norm_data[sorted_cnt_data[0][0][0]].append((path, data))
 
+    fragment_display = []
+    for ind, w in weights_sorted_data:
+        paf_loc = tot_loc_list[ind]
+        if paf_loc.split('/')[-3] == '12_cent_fragment':
+            if w > filter_depth_N * meandepth / 2:
+                chrom = paf_loc.split('/')[-2]
+                side = paf_loc.split('/')[-1].split('.')[0]
+                info = cen_fragment_meta[chrom]
+                fragment_display.append((chrom, side, info["mid"], info["chr_len"], w / meandepth * 2))
+
     cols = 10
     rows = 0
     for chr_name, data_list in grouped_norm_data.items():
         chr_indel = display_indel.get(chr_name, [])
         indel_len = len(chr_indel)
-        
+
         rows += ((len(data_list) + indel_len - 1) // cols + 1) if len(data_list) + indel_len > 0 else 0
+
+    if len(fragment_display) > 0:
+        rows += (len(fragment_display) - 1) // cols + 1
 
     # if len(long_ecdna_path) > 0:
     #     rows += ((len(long_ecdna_path)-1) // cols + 1)
@@ -908,6 +994,22 @@ def build_karyotype_diagram(fig_prefix : str = '', filter_depth_N : float = TARG
         now_col += ((len(data_list) + indel_len - 1) // cols + 1) if len(data_list) + indel_len > 0 else 0
         for col in range(bef_now_col, now_col):
             plot_scale_bar(ax_array[col][len(prefix_ratios) - 1], chr_name, maxh)
+
+    if len(fragment_display) > 0:
+        bef_now_col = now_col
+        plot_chr_name(ax_array[now_col][0], 'cen frag')
+        for i, frag in enumerate(fragment_display):
+            chrom, side, mid_bp, chr_len_bp, depth_N = frag
+            chr_len_norm = chr_len_bp / maxh * 100
+            plot_centromere_fragment(
+                ax_array[i // cols + now_col][i % cols + len(prefix_ratios)],
+                (chrom, side, mid_bp, chr_len_bp),
+                maxh, cell_col, def_cell_col, chr_len_norm,
+                label=f"{round(depth_N, 2)}N"
+            )
+        now_col += (len(fragment_display) - 1) // cols + 1
+        for col in range(bef_now_col, now_col):
+            plot_scale_bar(ax_array[col][len(prefix_ratios) - 1], 'cen', maxh)
 
     # if len(long_ecdna_path) > 0:
     #     plot_chr_name(ax_array[now_col][0], 'ecDNA')
@@ -1024,12 +1126,19 @@ for i in range(1, eclen//2 + 1):
     ec_paf_loc = ecdna_contig_path+f"{i}.paf"
     tot_loc_list.append(ec_paf_loc)
 
+with open(f'{PREFIX}/cen_fragment_data.pkl', 'rb') as f:
+    cen_fragment_meta = pkl.load(f)
+cen_fragment_list = sorted(cen_fragment_meta.items(), key=lambda kv: chr2int(kv[0]))
+for chrom, info in cen_fragment_list:
+    side = 'right' if info["dir"] else 'left'
+    tot_loc_list.append(f'{PREFIX}/12_cent_fragment/{chrom}/{side}.fragment')
+
 with open(f'{PREFIX}/tot_loc_list.pkl', 'wb') as f:
     pkl.dump(tot_loc_list, f)
 
 tot_loc_list2nclosecnt = dict()
 for paf_loc in tot_loc_list:
-    if paf_loc.split('/')[-3] != '11_ref_ratio_outliers':
+    if paf_loc.split('/')[-3] not in {'11_ref_ratio_outliers', '12_cent_fragment'}:
         path = import_index_path(paf_loc)
 
         if len(path[0]) < 4:
