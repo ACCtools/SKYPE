@@ -95,6 +95,7 @@ NCLOSE_COMPRESS_LIMIT = 100*K
 NCLOSE_MERGE_LIMIT = 1*K
 ALL_REPEAT_NCLOSE_COMPRESS_LIMIT = 500*K
 SUBTELO_TIP_LIMIT = 500*K
+OFFSET_DIR_GROUP_LIMIT = 100*K
 
 PATH_COMPRESS_LIMIT = 50*K
 IGNORE_PATH_LIMIT = 50*K
@@ -4193,6 +4194,70 @@ def nclose_calc():
     nclose_nodes = censat_filtered_nclose_nodes
     logging.info(f'Removed {censat_removed_both} censat-censat nclose, '
                  f'{censat_removed_one} censat-* nclose (chr not in cent_fragment AND not at chr end)')
+
+    # offset 방향 mismatch 필터:
+    # offset(cent_fragment_chroms 에 속함) censat-noncensat 페어만 대상.
+    # 모든 페어를 (censat, noncensat) 형태로 정규화 (e가 censat이면 RC: pair 순서 swap +
+    # censat chunk CTG_DIR flip). 정규화 후 censat chunk의 CTG_DIR이
+    #   '+' → contig가 chr 앞쪽(f telomere)부터 forward로 와서 breakend로 새는 형태
+    #         → 앞쪽(low coord, p-arm) 영역이 duplicate → "앞쪽 높음" (dir == False 와 일치)
+    #   '-' → 뒤쪽(b telomere)부터 reverse로 와서 새는 형태
+    #         → 뒤쪽(high coord, q-arm) 영역이 duplicate → "뒤쪽 높음" (dir == True 와 일치)
+    # (censat_chr, noncensat_chr) 별로 non-censat 좌표 100K single-linkage 클러스터를 만들고,
+    # 클러스터 안에 정규화 CTG_DIR이 둘 다 존재하면 offset target 매칭하는 쪽만 남긴다.
+    # (같은 non-censat 위치에서 censat 방향이 양쪽인 건 모순이고, offset depth 신호 방향이
+    # ground truth)
+    offset_filter_candidates = []
+    for ctg_name, pair_list in nclose_nodes.items():
+        for pair in pair_list:
+            s_is_censat = contig_data[pair[0]][CTG_CENSAT] != '0'
+            e_is_censat = contig_data[pair[1]][CTG_CENSAT] != '0'
+            if s_is_censat == e_is_censat:
+                continue
+            if s_is_censat:
+                cidx, nidx = pair[0], pair[1]
+                censat_norm_dir = contig_data[cidx][CTG_DIR]
+            else:
+                cidx, nidx = pair[1], pair[0]
+                censat_norm_dir = '-' if contig_data[cidx][CTG_DIR] == '+' else '+'
+            censat_chr = contig_data[cidx][CHR_NAM]
+            if censat_chr not in cent_fragment_chroms:
+                continue
+            noncensat_chr = contig_data[nidx][CHR_NAM]
+            noncensat_pos = (contig_data[nidx][CHR_STR] + contig_data[nidx][CHR_END]) // 2
+            offset_filter_candidates.append((ctg_name, pair, censat_chr, noncensat_chr, noncensat_pos, censat_norm_dir))
+
+    offset_group_map = defaultdict(list)
+    for cand in offset_filter_candidates:
+        offset_group_map[(cand[2], cand[3])].append(cand)
+
+    offset_to_remove = set()
+    for (censat_chr, _), items in offset_group_map.items():
+        target_norm_dir = '-' if cen_fragment_meta_for_filter[censat_chr]['dir'] else '+'
+        items.sort(key=lambda x: x[4])
+        i = 0
+        while i < len(items):
+            j = i + 1
+            while j < len(items) and items[j][4] - items[j-1][4] < OFFSET_DIR_GROUP_LIMIT:
+                j += 1
+            sub = items[i:j]
+            dirs = {it[5] for it in sub}
+            if len(dirs) > 1:
+                for it in sub:
+                    if it[5] != target_norm_dir:
+                        offset_to_remove.add((it[0], it[1]))
+            i = j
+
+    offset_filtered_nclose_nodes = defaultdict(list)
+    offset_removed = 0
+    for ctg_name, pair_list in nclose_nodes.items():
+        for pair in pair_list:
+            if (ctg_name, pair) in offset_to_remove:
+                offset_removed += 1
+                continue
+            offset_filtered_nclose_nodes[ctg_name].append(pair)
+    nclose_nodes = offset_filtered_nclose_nodes
+    logging.info(f'Removed {offset_removed} offset-direction-mismatched censat-noncensat nclose pairs')
 
     # Subtelomeric tip-orientation filter:
     # 양끝 SUBTELO_TIP_LIMIT tip을 동등 boundary로 가정. 두 chunk가 같은 telomere
