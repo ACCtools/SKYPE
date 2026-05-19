@@ -1055,7 +1055,7 @@ def initial_graph_build(contig_data : list, telo_data : dict) -> list :
     now_telo_list = list(chr_corr.keys())
 
     if no_chrY:
-        now_telo_list = [i for i in now_telo_list if i not in 'chrY']
+        now_telo_list = [i for i in now_telo_list if 'chrY' not in i]
 
     for now_telo in now_telo_list:
         now_telo_chr = now_telo[:-1]
@@ -4964,8 +4964,9 @@ def run_graph(data, nonzero_telo_set, CHR_CHANGE_LIMIT, DIR_CHANGE_LIMIT):
                 flag = True
                 flagflag = False
                 rank = []
+                _rank_norm = lambda c: 'chrX' if c == 'chrY' else c
                 for i in range(min(PATH_MAJOR_COMPONENT, len(ack))):
-                    if ack[i][0] in (src[0][:-1], tar[:-1]):
+                    if _rank_norm(ack[i][0]) in (_rank_norm(src[0][:-1]), _rank_norm(tar[:-1])):
                         rank.append(i)
                 if len(rank) == 2:
                     flagflag = True

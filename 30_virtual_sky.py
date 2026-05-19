@@ -749,11 +749,14 @@ def get_karyotype_summary(non_type4_path_list: list):
             
         # Initialize direction and chromosome from the first dummy node
         curr_incr = '+' if path[0][NODE_NAME][-1] == 'f' else '-'
-        curr_chr = [path[0][NODE_NAME][:-1], curr_incr]
         
         # Set the starting reference using the first real node (index 1)
         # instead of assuming the absolute ends of the chromosome (0 or chr_len)
         first_real_node = ppc_data[path[1][NODE_NAME]]
+        # Take chr from the real node's CHR_NAM, not the telomere endpoint name:
+        # the shared chrX/chrY telomere node is always labeled chrXf/chrXb, so a
+        # pure-chrY path with no chr/dir-change transition would be mislabeled chrX.
+        curr_chr = [first_real_node[CHR_NAM], curr_incr]
         curr_ref = first_real_node[CHR_STR] if curr_incr == '+' else first_real_node[CHR_END]
         
         nclose_use_cnt = 0
