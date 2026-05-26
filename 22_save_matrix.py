@@ -344,8 +344,9 @@ parser.add_argument("-t", "--thread",
 parser.add_argument("--nclose_weight",
                     help="Nclose weight", type=float, default=DEFAULT_NCLOSE_WEIGHT)
 
-parser.add_argument("--not_use_nclose_weight",
-                    help="Do not use nclose weight", action='store_false')
+parser.add_argument("--use_nclose_weight",
+                    dest="nclose_weight_use",
+                    help="Use nclose weight", action='store_true', default=False)
 
 parser.add_argument("--progress",
                     help="Show progress bar", action='store_true')
@@ -374,7 +375,7 @@ TELO_CONNECT_NODES_INFO_PATH = PREFIX + "/telomere_connected_list.txt"
 NCLOSE_FILE_PATH = f"{PREFIX}/nclose_nodes_index.txt"
 
 NCLOSE_WEIGHT = args.nclose_weight
-NCLOSE_WEIGHT_USE = args.not_use_nclose_weight
+NCLOSE_WEIGHT_USE = args.nclose_weight_use
 
 df = pd.read_csv(main_stat_loc, compression='gzip', comment='#', sep='\t',
                  names=['chr', 'st', 'nd', 'length', 'covsite', 'totaldepth', 'cov', 'meandepth'])
