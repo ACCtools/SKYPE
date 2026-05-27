@@ -74,7 +74,7 @@ TYPE2_FLANKING_LENGTH = 500 * K
 TYPE2_SIM_COMPARE_RAITO = 1.3
 TYPE34_BREAK_CHUKJI_LIMIT = 1*M
 CHUKJI_FAIL_TYPE2_RESCUE_THRESHOLD = 2*K
-CIRCUIT_ECDNA_LENGTH_LIMIT = 40*M
+CIRCUIT_ECDNA_LENGTH_LIMIT = 80*M
 
 NCLOSE_SIM_COMPARE_RAITO = 1.2
 NCLOSE_SIM_DIFF_THRESHOLD = 5
@@ -3103,6 +3103,37 @@ def initialize_inversion_only_graph(contig_data : list, nclose_nodes_original : 
     return bnd_adjacency
 
 
+def convert_all_nclose_comp_to_nclose_nodes(contig_data : list, all_nclose_comp : dict) -> dict:
+    all_nclose_nodes = defaultdict(list)
+    seen_nclose = set()
+
+    for pairs in all_nclose_comp.values():
+        for pair in pairs:
+            pair = tuple(pair)
+            if len(pair) != 2 or pair in seen_nclose:
+                continue
+            all_nclose_nodes[contig_data[pair[0]][CTG_NAM]].append(pair)
+            seen_nclose.add(pair)
+
+    return all_nclose_nodes
+
+
+def build_ecdna_nclose_nodes(raw_nclose_nodes : dict, all_nclose_nodes : dict) -> dict:
+    ecdna_nclose_nodes = defaultdict(list)
+    seen_nclose = set()
+
+    for nclose_source in (raw_nclose_nodes, all_nclose_nodes):
+        for contig_name, pairs in nclose_source.items():
+            for pair in pairs:
+                pair = tuple(pair)
+                if len(pair) != 2 or pair in seen_nclose:
+                    continue
+                ecdna_nclose_nodes[contig_name].append(pair)
+                seen_nclose.add(pair)
+
+    return ecdna_nclose_nodes
+
+
 def make_inversion_nx_graph(bnd_graph_adjacency):
     G = nx.DiGraph()
     for i in bnd_graph_adjacency:
@@ -5171,8 +5202,15 @@ path_di_list_dict = dict()
 for k, v in path_di_list_dict_data:
     path_di_list_dict[k] = v
 
+all_nclose_nodes = convert_all_nclose_comp_to_nclose_nodes(contig_data, all_nclose_comp)
+ecdna_nclose_nodes = build_ecdna_nclose_nodes(raw_nclose_nodes, all_nclose_nodes)
+logging.info(
+    f"ecDNA nclose input: {sum(len(v) for v in raw_nclose_nodes.values())} filtered nclose, "
+    f"{sum(len(v) for v in all_nclose_nodes.values())} all-file nclose, "
+    f"{sum(len(v) for v in ecdna_nclose_nodes.values())} merged nclose"
+)
 
-inversion_adjacency = initialize_inversion_only_graph(contig_data, raw_nclose_nodes)
+inversion_adjacency = initialize_inversion_only_graph(contig_data, ecdna_nclose_nodes)
 
 inversion_graph = nx2gt(make_inversion_nx_graph(inversion_adjacency))
 
@@ -5196,7 +5234,7 @@ for circuit in ecdna_circuit_candidate_set:
 
 # Todo : transform into vcf format
 with open(f"{PREFIX}/ecdna_circuit_data.pkl", "wb") as f:
-    pkl.dump((list(ecdna_circuit_set), raw_nclose_nodes), f)
+    pkl.dump((list(ecdna_circuit_set), ecdna_nclose_nodes), f)
 
 logging.info(f'Final success settings: {(CHR_CHANGE_LIMIT_PREFIX, DIR_CHANGE_LIMIT_PREFIX)}')
 
