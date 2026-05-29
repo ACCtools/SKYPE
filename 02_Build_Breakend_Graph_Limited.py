@@ -5079,7 +5079,8 @@ def run_graph_pipeline():
     limit_combinations.append((1, 0))
 
     if nclose_node_count > HARD_NCLOSE_COUNT:
-        idx = limit_combinations.index((CHR_CHANGE_LIMIT_HARD_START, DIR_CHANGE_LIMIT_ABS_MAX))
+        hard_start_chr = min(CHR_CHANGE_LIMIT_HARD_START, CHR_CHANGE_LIMIT_ABS_MAX)
+        idx = limit_combinations.index((hard_start_chr, DIR_CHANGE_LIMIT_ABS_MAX))
     else:
         idx = 0
 
