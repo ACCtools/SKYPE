@@ -485,7 +485,7 @@ def bnd_alt(t, mate_chr, mate_pos, form):
     if form == "t[p[":
         return f"{t}[{p}["
     if form == "t]p]":
-        return f"]{p}]{t}"
+        return f"{t}]{p}]"
     if form == "]p]t":
         return f"]{p}]{t}"
     if form == "[p[t":
@@ -494,17 +494,22 @@ def bnd_alt(t, mate_chr, mate_pos, form):
 
 def choose_alt_forms(dir_a, dir_b):
     """
-    Map (dir_a, dir_b) to a complementary ALT pair.
-    You can tweak this mapping to your exact strand semantics.
+    Map (dir_a, dir_b) to the complementary VCF 4.3 breakend ALT pair.
+    Convention: a = arm1 (junction at its contig-3' end), b = arm2 (junction at its contig-5' end).
+    - dir_a decides whether a's retained sequence is left ('+': t-prefix) or right ('-': t-suffix).
+    - dir_b decides whether the joined arm2 piece extends right of p forward ('+': '[') or
+      is the reverse-complement extending left of p ('-': ']').
+    Verified against VCFv4.3 §5.4 (Fig.1 all-orientations, Fig.7 RR0 transloc, Fig.8 INV0 inversion);
+    valid reciprocal mate pairs are  t[p[ <-> ]p]t ,  t]p] <-> t]p] ,  [p[t <-> [p[t .
     """
     if dir_a == '+' and dir_b == '+':
         return ("t[p[", "]p]t")
-    if dir_a == '-' and dir_b == '-':
-        return ("t]p]", "[p[t")
     if dir_a == '+' and dir_b == '-':
-        return ("t[p[", "[p[t")
+        return ("t]p]", "t]p]")
     if dir_a == '-' and dir_b == '+':
-        return ("t]p]", "]p]t")
+        return ("[p[t", "[p[t")
+    if dir_a == '-' and dir_b == '-':
+        return ("]p]t", "t[p[")
     assert(False)
 
 def make_strands(dir_a, dir_b):
@@ -520,10 +525,12 @@ def write_vcf_header(fh, contig_lengths):
     fh.write("##fileformat=VCFv4.3\n")
     fh.write('##ALT=<ID=BND,Description="Breakend">\n')
     fh.write('##ALT=<ID=INV,Description="Inversion">\n')
+    fh.write('##ALT=<ID=DEL,Description="Deletion">\n')
+    fh.write('##ALT=<ID=DUP,Description="Duplication">\n')
     fh.write('##INFO=<ID=SVTYPE,Number=1,Type=String,Description="Type of structural variant">\n')
     fh.write('##INFO=<ID=END,Number=1,Type=Integer,Description="End position of SV">\n')
     fh.write('##INFO=<ID=SVLEN,Number=1,Type=Integer,Description="Length of the SV">\n')
-    fh.write('##INFO=<ID=WEIGHT,Number=1,Type=String,Description="Depth for breakend">\n')
+    fh.write('##INFO=<ID=WEIGHT,Number=1,Type=Float,Description="Depth for breakend">\n')
     fh.write('##INFO=<ID=CTG_NAME,Number=1,Type=String,Description="Name of contig for supporting variant">\n')
     fh.write('##INFO=<ID=STRANDS,Number=1,Type=String,Description="Breakpoint strandedness">\n')
     fh.write('##INFO=<ID=MATEID,Number=1,Type=String,Description="ID of mate breakend">\n')
@@ -554,12 +561,22 @@ def _pairs_to_vcf(nclose_pairs, contig_data, contig_lengths, display_indel, out_
             a = contig_data[a_idx]
             b = contig_data[b_idx]
 
-            chr_a, chr_b = a[CHR_NAM], b[CHR_NAM]
-            pos_a = a[CHR_END]
-            pos_b = b[CHR_STR]
+            # Order anchors by contig coordinate so a = arm1 (junction at its contig-3' end)
+            # and b = arm2 (junction at its contig-5' end). The breakend adjacency is symmetric,
+            # so this canonical order yields a valid reciprocal mate pair regardless of how the
+            # derivative path actually traverses the contig (FOR/BAK).
+            if a[CTG_STR] > b[CTG_STR]:
+                a, b = b, a
 
             dir_a = a[CTG_DIR]
             dir_b = b[CTG_DIR]
+
+            chr_a, chr_b = a[CHR_NAM], b[CHR_NAM]
+            # Junction base depends on each anchor's alignment strand (CTG_DIR):
+            #   arm1 exits at its contig-3' end  -> CHR_END if '+', else CHR_STR
+            #   arm2 enters at its contig-5' end -> CHR_STR if '+', else CHR_END
+            pos_a = a[CHR_END] if dir_a == '+' else a[CHR_STR]
+            pos_b = b[CHR_STR] if dir_b == '+' else b[CHR_END]
 
             strands = make_strands(dir_a, dir_b)
 
@@ -592,30 +609,35 @@ def _pairs_to_vcf(nclose_pairs, contig_data, contig_lengths, display_indel, out_
             )
 
         # 3) indel 처리
-        ins_counter = 1
+        #   front_jump -> DEL (reference 구간이 어셈블리에서 사라짐)
+        #   back_jump  -> DUP (reference 구간 [lo,hi]가 추가 카피로 재방문됨 = tandem duplication)
+        # depth 기반 검출은 novel insertion이 아니라 reference 구간의 copy 변화를 보므로,
+        # END/SVLEN은 reference span을 그대로 사용하고 POS<=END가 되도록 정규화한다.
+        dup_counter = 1
         del_dounter = 1
-        
+
         for chrom, indel_list in display_indel.items():
             for indel in indel_list:
                 indel_type, start, end, w, _, indel_idx = indel
+                lo, hi = min(start, end), max(start, end)
                 if indel_type == 'd':
                     sv_id = f"SKYPE.DEL.{del_dounter}"
-                    svlen = -(end - start)
+                    svlen = -(hi - lo)
                     alt = "<DEL>"
 
                     del_dounter += 1
                 elif indel_type == 'i':
-                    sv_id = f"SKYPE.INS.{ins_counter}"
-                    svlen = end - start
-                    alt = "<INS>"
+                    sv_id = f"SKYPE.DUP.{dup_counter}"
+                    svlen = hi - lo
+                    alt = "<DUP>"
 
-                    ins_counter += 1
+                    dup_counter += 1
                 else:
                     assert(False)
 
                 fo.write(
-                    f"{chrom}\t{start}\t{sv_id}\tN\t{alt}\t60\tPASS\t"
-                    f"SVTYPE={alt[1:-1]};END={end};SVLEN={svlen};WEIGHT={round(w, 2)};CTG_NAME=INDEL_INDEX_{indel_idx}\n"
+                    f"{chrom}\t{lo}\t{sv_id}\tN\t{alt}\t60\tPASS\t"
+                    f"SVTYPE={alt[1:-1]};END={hi};SVLEN={svlen};WEIGHT={round(w, 2)};CTG_NAME=INDEL_INDEX_{indel_idx}\n"
                 )
 
 parser = argparse.ArgumentParser(description="SKYPE depth analysis")
@@ -1203,7 +1225,12 @@ def pairs_to_vcf(out_prefix=''):
             pos2 = int(l[CHR_END])
         v = weights[i]
         chrom = chr_nam1
-        if abs(pos1-pos2) > TYPE2_FLANKING_LENGTH and v > NCLOSE_SIM_DIFF_THRESHOLD:
+        # Gate must match make_bed_output() so SKYPE_result.bed and SV_call_result.vcf
+        # report the SAME jump (DEL/DUP) call set.
+        # Original VCF-only gate, kept for reference — it additionally required span > 5Mb,
+        # which silently dropped smaller CNVs that the BED (v > BREAKEND_REMARKABLE_CN) kept:
+        #     if abs(pos1 - pos2) > TYPE2_FLANKING_LENGTH and v > NCLOSE_SIM_DIFF_THRESHOLD:
+        if v > BREAKEND_REMARKABLE_CN:
             if indel_ind == 'front_jump':
                 display_indel[chrom].append(("d", pos1, pos2, v / N, chrom, i - rpll))
             if indel_ind == 'back_jump':
@@ -1220,7 +1247,7 @@ def pairs_to_vcf(out_prefix=''):
             exist_near_bnd(contig_data[ed][CHR_NAM], contig_data[ed][CHR_STR], contig_data[ed][CHR_END]):
                 significant_nclose.append(nclose)
                 
-    logging.info(f"{out_prefix[1:].capitalize()}{' ' if out_prefix else ''}Total called breakends (INS, DEL, BND, INV) : {len(all_nclose) + len(display_indel)}")
+    logging.info(f"{out_prefix[1:].capitalize()}{' ' if out_prefix else ''}Total called breakends (DUP, DEL, BND, INV) : {len(all_nclose) + len(display_indel)}")
 
     vcf_path = f"{PREFIX}/SV_call_result{out_prefix}.vcf"
     _pairs_to_vcf(all_nclose, contig_data, chr_len, display_indel, vcf_path, significant_nclose, nclose_cn_std)
@@ -1275,7 +1302,7 @@ def make_bed_output(output_prefix=''):
                         
 
                         cf.writerow([l[CHR_NAM], l[CHR_STR], l[CHR_END],
-                                        'Insertion' if event_type == 'front_jump' else 'Deletion',
+                                        'Deletion' if event_type == 'front_jump' else 'Duplication',
                                         round(v / N, 2)])
 
                 elif event_type == 'ecdna':

@@ -679,8 +679,12 @@ while True:
         if chrom == 'chrY' and no_chrY:
             continue
         acc_sum_max_base = chrom_acc_sum_dict_max_base[chrom]
+        # Guard against zero baseline (mirror of the pre-calc loop above):
+        # a chromosome with no baseline error envelope cannot have a finite error rate.
+        if acc_sum_max_base == 0:
+            continue
         chrom_error_rate = acc_sum_max / acc_sum_max_base
-        
+
         if chrom_error_rate > CHROM_ERROR_FAIL_RATE:
             new_fail_chrom_list.append(chrom)
 
