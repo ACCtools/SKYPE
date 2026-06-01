@@ -21,11 +21,7 @@ from collections import defaultdict
 from itertools import pairwise, groupby
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
-logging.basicConfig(
-    format='%(asctime)s %(levelname)s:%(message)s',
-    level=logging.INFO,
-    datefmt='%m/%d/%Y %I:%M:%S %p',
-)
+# logging 설정(레벨/포맷)은 skype_utils 에서 중앙 관리한다 (LOG_LEVEL).
 logging.info("21_run_depth_eff start")
 
 CTG_NAM = 0

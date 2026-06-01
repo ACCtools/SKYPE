@@ -28,11 +28,7 @@ from tqdm import tqdm
 from functools import partial
 import logging
 
-logging.basicConfig(
-    format='%(asctime)s %(levelname)s:%(message)s',
-    level=logging.INFO,
-    datefmt='%m/%d/%Y %I:%M:%S %p',
-)
+# logging 설정(레벨/포맷)은 skype_utils 에서 중앙 관리한다 (LOG_LEVEL).
 logging.info('SKYPE pipeline start')
 logging.info("02_Build_Breakend_Graph start")
 

@@ -21,11 +21,7 @@ from matplotlib.ticker import MultipleLocator
 from collections import defaultdict
 from collections import Counter
 
-logging.basicConfig(
-    format='%(asctime)s %(levelname)s:%(message)s',
-    level=logging.INFO,
-    datefmt='%m/%d/%Y %I:%M:%S %p',
-)
+# logging 설정(레벨/포맷)은 skype_utils 에서 중앙 관리한다 (LOG_LEVEL).
 logging.info("30_virtual_sky start")
 
 CTG_NAM = 0
@@ -77,6 +73,8 @@ NCLOSE_SIM_DIFF_THRESHOLD = 5
 
 JOIN_BASELINE = 0.8
 KARYOTYPE_SECTION_MINIMUM_LENGTH = 100 * K
+KARYOTYPE_MIN_SEGMENT_LENGTH = 1 * M  # karyotype 텍스트 표기 시 이보다 짧은 segment/indel 은 무시 (1Mb)
+KARYOTYPE_NORMAL_RATIO = 0.9  # 단일 염색체 path 가 reference 길이의 이 비율 미만이면 normal('1') 대신 del 로 취급
 
 
 
@@ -259,7 +257,7 @@ def telo_condition(node : list, need_label_index : dict) -> bool:
     return node in need_label_index
 
 # SKY Figure
-def plot_virtual_chromosome(ax, segments_data, maxh, cell_col, def_cell_col, label=None):
+def plot_virtual_chromosome(ax, segments_data, maxh, cell_col, def_cell_col, label=None, karyotype_str=None):
     """
     주어진 segments 리스트로 가상 염색체를 그립니다.
     """
@@ -334,7 +332,9 @@ def plot_virtual_chromosome(ax, segments_data, maxh, cell_col, def_cell_col, lab
     # 가상 염색체 라벨 (옵션)
     if label:
         ax.text(x_center, -5, label, ha='center', va='top', fontsize=10)
-    ax.text(x_center, -10, '/'.join(path.split('/')[-2:]), ha='center', va='top', fontsize=10)
+    # 경로(path) 대신 karyotype ISCN 표기를 표시
+    if karyotype_str:
+        ax.text(x_center, -10, karyotype_str, ha='center', va='top', fontsize=10)
 
     ax.set_xlim(0, 60 * cell_col / def_cell_col)
     ax.set_ylim(0, 100)
@@ -409,11 +409,13 @@ def plot_indel(ax, indel, maxh, cell_col, def_cell_col, chr_len, label=None):
             color='black')
     
     text_obj = ax.text(x_end+radius/5, midy, f"{'del' if indel[0] == 'd' else 'ins'}({indel[-2][3:]})", ha='left', va='center', fontsize=10, color='black')
-    
+
     mark_overlapping_texts_with_arrows(ax, [text_obj], min_gap=5)
 
     if label:
         ax.text(x_center, -5, label, ha='center', va='top', fontsize=10)
+    # 아래: 다른 염색체와 동일하게 ISCN indel 표기
+    ax.text(x_center, -10, f"{'del' if indel[0] == 'd' else 'ins'}({chrom_to_iscn(indel[4])})", ha='center', va='top', fontsize=10)
 
     ax.set_xlim(0, 60 * cell_col / def_cell_col)
     ax.set_ylim(0, 100)
@@ -478,15 +480,18 @@ def plot_centromere_fragment(ax, frag, maxh, cell_col, def_cell_col, chr_len_nor
     ax.plot([x_start, x_end], [y1, midy], linewidth=1, color='black')
     ax.plot([x_start, x_end], [y2, midy], linewidth=1, color='black')
 
+    arm = 'q' if side == 'right' else 'p'  # right=q arm, left=p arm
     text_obj = ax.text(
         x_end + radius / 5, midy,
-        f"cen({chrom[3:]})",
+        f"{chrom}{arm}",   # 옆 라벨: chr13q / chr13p (한쪽 arm 이름)
         ha='left', va='center', fontsize=10, color='black'
     )
     mark_overlapping_texts_with_arrows(ax, [text_obj], min_gap=5)
 
     if label:
         ax.text(x_center, -5, label, ha='center', va='top', fontsize=10)
+    # 아래: 다른 염색체와 동일하게 ISCN isochromosome 표기
+    ax.text(x_center, -10, f"i({chrom_to_iscn(chrom)})({arm}10)", ha='center', va='top', fontsize=10)
 
     ax.set_xlim(0, 60 * cell_col / def_cell_col)
     ax.set_ylim(0, 100)
@@ -809,6 +814,43 @@ def ecdna_format(x:int) -> str:
     else:
         return str(x)
 
+def chrom_to_iscn(chrom : str) -> str:
+    """'chr1' -> '1', 'chrX' -> 'X' (plot_virtual_chromosome 라벨과 동일 규칙)."""
+    return chrom[3:] if chrom.startswith('chr') else chrom
+
+def karyotype_path_to_iscn(pieces : list):
+    """get_karyotype_summary 가 만든 pieces([((chrom, strand), length_bp), ...]) 를
+    ISCN 문자열로 변환한다. KARYOTYPE_MIN_SEGMENT_LENGTH(1Mb) 미만 segment 는 무시.
+      - segment 1개(정상 단일 염색체): '1'
+      - junction 마다: 다른 염색체면 t(a;b), 같은 염색체 방향(strand)전환이면 inv(a)
+    표기할 segment 가 하나도 없으면 None 반환.
+    """
+    filtered = [(seg_chr, length) for seg_chr, length in pieces
+                if length >= KARYOTYPE_MIN_SEGMENT_LENGTH]
+    if not filtered:
+        return None
+    tokens = []
+    for i in range(1, len(filtered)):
+        prev_chrom, prev_strand = filtered[i - 1][0]
+        curr_chrom, curr_strand = filtered[i][0]
+        if prev_chrom != curr_chrom:
+            tokens.append(f"t({chrom_to_iscn(prev_chrom)};{chrom_to_iscn(curr_chrom)})")
+        elif prev_strand != curr_strand:
+            tokens.append(f"inv({chrom_to_iscn(curr_chrom)})")
+        # 같은 염색체·같은 strand 인접(작은 segment 제거로 병합)은 junction 아님 -> 생략
+    if tokens:
+        return ''.join(tokens)
+    # junction 이 없는 단일 염색체: reference 길이의 90%(KARYOTYPE_NORMAL_RATIO) 미만이면
+    # 일부 결실로 보아 del 로 취급, 그렇지 않으면 정상('1')
+    chrom = filtered[0][0][0]
+    total_len = sum(length for _, length in filtered)
+    ratio = total_len / chr_len[chrom] if chrom in chr_len else None
+    if ratio is not None:
+        logging.debug(f"single-chrom path {chrom}: len={total_len} ref_ratio={ratio:.3f}")
+    if ratio is not None and ratio < KARYOTYPE_NORMAL_RATIO:
+        return f"del({chrom_to_iscn(chrom)})"
+    return chrom_to_iscn(chrom)
+
 def build_karyotype_diagram(fig_prefix : str = '', filter_depth_N : float = TARGET_DEPTH):
     weights = np.load(f'{PREFIX}/weight{fig_prefix}.npy')
     loc2weight = dict(zip(tot_loc_list, weights))
@@ -985,9 +1027,11 @@ def build_karyotype_diagram(fig_prefix : str = '', filter_depth_N : float = TARG
         bef_now_col = now_col
         plot_chr_name(ax_array[now_col][0], chr_name)
         for i, data in enumerate(data_list):
+            iscn = karyotype_path_to_iscn(karyotypes_data[data[0]])
             plot_virtual_chromosome(ax_array[i // cols + now_col][i % cols + len(prefix_ratios)], data, maxh,
                                     cell_col, def_cell_col,
-                                    label=f"{round(float(loc2weight[data[0]] / meandepth * 2), 2)}N")
+                                    label=f"{round(float(loc2weight[data[0]] / meandepth * 2), 2)}N",
+                                    karyotype_str=iscn if iscn is not None else '')
         for j, data in enumerate(chr_indel):
             i = j + len(data_list)
             plot_indel(ax_array[i // cols + now_col][i % cols + len(prefix_ratios)], data, maxh,
@@ -1051,6 +1095,29 @@ def build_karyotype_diagram(fig_prefix : str = '', filter_depth_N : float = TARG
 
     fig.savefig(f'{PREFIX}/virtual_sky{fig_prefix}.pdf')
     fig.savefig(f'{PREFIX}/virtual_sky{fig_prefix}.png')
+
+    # ----- ISCN karyotype 텍스트 출력: 그림에 그린 breakend 를 표기법으로 정리 -----
+    # 그림과 동일한 순서(염색체 그룹별 path -> 같은 염색체 indel -> centromere fragment).
+    karyotype_rows = []  # (iscn_str, depth_N)
+    for chr_name, data_list in sorted_grouped_norm_data_items:
+        for path, _norm in data_list:
+            iscn = karyotype_path_to_iscn(karyotypes_data[path])
+            if iscn is not None:
+                karyotype_rows.append((iscn, loc2weight[path] / meandepth * 2))
+        for indel in display_indel.get(chr_name, []):
+            typ, pos1, pos2, depth_N, chrom, _path = indel
+            if abs(pos2 - pos1) < KARYOTYPE_MIN_SEGMENT_LENGTH:
+                continue
+            name = chrom_to_iscn(chrom)
+            karyotype_rows.append((f"del({name})" if typ == 'd' else f"ins({name})", depth_N))
+    for chrom, side, mid_bp, chr_len_bp, depth_N in fragment_display:
+        arm = 'q' if side == 'right' else 'p'  # right=q arm, left=p arm
+        karyotype_rows.append((f"i({chrom_to_iscn(chrom)})({arm}10)", depth_N))
+
+    with open(f'{PREFIX}/karyotype{fig_prefix}.txt', 'w') as kf:
+        kf.write("karyotype\tdepth\n")
+        for iscn, depth_N in karyotype_rows:
+            kf.write(f"{iscn}\t{round(float(depth_N), 2)}N\n")
 
 parser = argparse.ArgumentParser(description="SKYPE depth analysis")
 

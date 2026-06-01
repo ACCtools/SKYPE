@@ -417,11 +417,7 @@ def get_karyotype_summary_relpath(non_type4_path_list : list):
 
     return karyotypes_data_direction_include
 
-logging.basicConfig(
-    format='%(asctime)s %(levelname)s:%(message)s',
-    level=logging.INFO,
-    datefmt='%m/%d/%Y %I:%M:%S %p',
-)
+# logging 설정(레벨/포맷)은 skype_utils 에서 중앙 관리한다 (LOG_LEVEL).
 
 parser = argparse.ArgumentParser()
 

@@ -333,11 +333,7 @@ def read_selected_columns_direct(dA, A, A_idx_list):
 
 warnings.simplefilter(action='ignore', category=FutureWarning)
 
-logging.basicConfig(
-    format='%(asctime)s %(levelname)s:%(message)s',
-    level=logging.INFO,
-    datefmt='%m/%d/%Y %I:%M:%S %p',
-)
+# logging 설정(레벨/포맷)은 skype_utils 에서 중앙 관리한다 (LOG_LEVEL).
 logging.info("23_run_nnls start")
 
 parser = argparse.ArgumentParser(description="SKYPE depth analysis")

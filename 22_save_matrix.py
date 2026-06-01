@@ -23,11 +23,7 @@ from scipy.optimize import nnls
 from scipy.signal import butter, filtfilt
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
-logging.basicConfig(
-    format='%(asctime)s %(levelname)s:%(message)s',
-    level=logging.INFO,
-    datefmt='%m/%d/%Y %I:%M:%S %p',
-)
+# logging 설정(레벨/포맷)은 skype_utils 에서 중앙 관리한다 (LOG_LEVEL).
 logging.info("22_save_matrix start")
 
 

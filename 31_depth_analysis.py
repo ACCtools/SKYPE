@@ -29,11 +29,7 @@ from pycirclize.track import Track
 from collections import defaultdict
 from collections import Counter
 
-logging.basicConfig(
-    format='%(asctime)s %(levelname)s:%(message)s',
-    level=logging.INFO,
-    datefmt='%m/%d/%Y %I:%M:%S %p',
-)
+# logging 설정(레벨/포맷)은 skype_utils 에서 중앙 관리한다 (LOG_LEVEL).
 logging.info("31_depth_analysis start")
 
 BREAKEND_REMARKABLE_CN_RATIO = 0.05
@@ -1008,17 +1004,18 @@ def draw_circos_plot(fig_prefix=''):
         chr_nam1 = contig_data[idx1][CHR_NAM]
         chr_nam2 = contig_data[idx2][CHR_NAM]
 
+        event_type = 'breakend'
         if chr_nam1 != chr_nam2 and v > BREAKEND_REMARKABLE_CN:
             transloc_val_list.append(v / meandepth * 2)
         elif chr_nam1 == chr_nam2 and contig_data[idx1][CTG_DIR] != contig_data[idx2][CTG_DIR] and v > BREAKEND_REMARKABLE_CN:
             inv_val_list.append(v / meandepth * 2)
+            event_type = 'inversion'
 
-        virtual_flag = False
         if contig_data[idx1][CTG_NAM].startswith('v'):
-            virtual_flag = True
+            event_type = 'virtual_indel'
         
         if v > BREAKEND_REMARKABLE_CN:
-            bnd_cn_data.append([(chr_nam1, pos1), (chr_nam2, pos2), v, virtual_flag])
+            bnd_cn_data.append([(chr_nam1, pos1), (chr_nam2, pos2), v, event_type])
 
     indel_val_list = []
     non_type4_cnt = len(bnd_cn_data)
@@ -1040,7 +1037,7 @@ def draw_circos_plot(fig_prefix=''):
                 pos1 = int(l[CHR_STR])
                 pos2 = int(l[CHR_END])
 
-            bnd_cn_data.append([(chr_nam1, pos1), (chr_nam2, pos2), v, False])
+            bnd_cn_data.append([(chr_nam1, pos1), (chr_nam2, pos2), v, 'indel'])
 
         indel_val_list.append(v / meandepth * 2)
 
@@ -1057,11 +1054,18 @@ def draw_circos_plot(fig_prefix=''):
 
     bnd_cn_data = sorted(bnd_cn_data, key=lambda t: t[2])
 
-    for i, (bnd_loc1, bnd_loc2, cn, is_vir) in enumerate(bnd_cn_data):
+    line_style_by_event = {
+        'breakend': '-',
+        'inversion': '-.',
+        'indel': '--',
+        'virtual_indel': (0, (5, 2)),
+    }
+
+    for i, (bnd_loc1, bnd_loc2, cn, event_type) in enumerate(bnd_cn_data):
         norm_cn = np.clip((cn - lower) / (upper - lower), 0, 1)
 
         color = cmap(norm_cn)
-        linestyle = '--' if is_vir else '-'
+        linestyle = line_style_by_event[event_type]
         
         if cn >= 0:
             circos.link_line(bnd_loc1, bnd_loc2, color=color, linestyle=linestyle, lw=1, zorder=i)
@@ -1160,7 +1164,9 @@ def draw_circos_plot(fig_prefix=''):
 
     cn_line_handles = [
         Line2D([], [], color="black", label="Breakend", linestyle = '-'),
-        Line2D([], [], color="black", label="Virtual breakend", linestyle = '--'),
+        Line2D([], [], color="black", label="Inversion", linestyle = '-.'),
+        Line2D([], [], color="black", label="Indel", linestyle = '--'),
+        Line2D([], [], color="black", label="Virtual indel", linestyle = (0, (5, 2))),
     ]
 
     cn_line_legend = circos.ax.legend(
