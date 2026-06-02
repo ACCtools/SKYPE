@@ -2239,6 +2239,17 @@ def extract_nclose_node(contig_data : list, bnd_contig : set, repeat_contig_name
     for i in telo_set:
         telo_name_set.add(contig_data[i][CTG_NAM])
 
+    # [RECIPROCAL FIX] nclose 방향 정규화: '작은 염색체 노드를 먼저 읽는' 프레임의 (low_dir, high_dir).
+    # all_nclose 출력의 get_corr_dir 와 동일 규칙이라 reverse-complement 대칭을 자동 보장한다
+    # (예: chr12+ -> chr15+ 와 chr15- -> chr12- 는 같은 값으로 정규화됨).
+    # balanced reciprocal translocation 두 산물(예: der(12) vs der(15))은 같은 breakpoint를
+    # 공유해 좌표만으로는 구분되지 않으므로(distance_checker 가 겹침을 0으로 봄), 압축 병합
+    # 판정에 이 정규화 방향을 함께 비교해 한쪽이 통째로 버려지는 것을 막는다.
+    def nclose_canon_dir(low_node, high_node):
+        is_for = low_node < high_node
+        return (get_corr_dir(is_for, contig_data[low_node][CTG_DIR]),
+                get_corr_dir(is_for, contig_data[high_node][CTG_DIR]))
+
     div_repeat_paf_name = div_repeat_paf(ORIGNAL_PAF_LOC_LIST, ALIGNED_PAF_LOC_LIST, contig_data)
 
     while s<contig_data_size:
@@ -2449,7 +2460,8 @@ def extract_nclose_node(contig_data : list, bnd_contig : set, repeat_contig_name
                                 compress_limit = NCLOSE_COMPRESS_LIMIT
                             dummy_list = [0,0,0,0,0,0,0,]
                             if distance_checker(contig_data[st], dummy_list+i[1]) < compress_limit \
-                            and distance_checker(contig_data[ed], dummy_list + i[2]) < compress_limit:
+                            and distance_checker(contig_data[ed], dummy_list + i[2]) < compress_limit \
+                            and nclose_canon_dir(st, ed) == nclose_canon_dir(i[3], i[4]):
                                 sorted_tar_tuple = tuple(sorted((i[3], i[4])))
                                 nclose_coverage[sorted_tar_tuple] += asm2cov[cov_count_name]
                                 nclose_compress_track[sorted_tar_tuple].append((st, ed))
@@ -2524,7 +2536,8 @@ def extract_nclose_node(contig_data : list, bnd_contig : set, repeat_contig_name
                                 compress_limit = NCLOSE_COMPRESS_LIMIT
                             dummy_list = [0,0,0,0,0,0,0,]
                             if distance_checker(contig_data[st], dummy_list+i[2]) < compress_limit \
-                            and distance_checker(contig_data[ed], dummy_list + i[1]) < compress_limit:
+                            and distance_checker(contig_data[ed], dummy_list + i[1]) < compress_limit \
+                            and nclose_canon_dir(ed, st) == nclose_canon_dir(i[3], i[4]):
                                 sorted_tar_tuple = tuple(sorted((i[3], i[4])))
                                 nclose_coverage[sorted_tar_tuple] += asm2cov[cov_count_name]
                                 nclose_compress_track[sorted_tar_tuple].append((st, ed))
