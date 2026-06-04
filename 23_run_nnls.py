@@ -50,7 +50,25 @@ CTG_GLOBALIDX = 21
 
 FILTER_P_VALUE = 0.01
 
-CHROM_ERROR_FAIL_RATE = 1.0
+CHROM_ERROR_FAIL_RATE = 2.0
+
+def normalize_path_nclose_tag(tag):
+    if isinstance(tag, (tuple, list)):
+        if len(tag) == 2:
+            return tuple(sorted(tag))
+        if len(tag) == 3 and tag[0] in {'front_jump', 'back_jump', 'ecdna'}:
+            event_type, event_idx, type2_merge_idx = tag
+            return (event_type, int(event_idx), int(type2_merge_idx))
+        if len(tag) == 3 and tag[0] == 'cent_fragment':
+            return tuple(tag)
+        
+    raise ValueError(f'Unexpected nclose tag format: {tag!r}')
+
+def normalize_path_nclose_set_dict(path_nclose_set_dict):
+    return {
+        k: {normalize_path_nclose_tag(tag) for tag in path_nclose_list}
+        for k, path_nclose_list in path_nclose_set_dict.items()
+    }
 
 def import_ppc_contig_data(file_path: str) -> list:
     paf_file = open(file_path, "r")
@@ -80,28 +98,33 @@ def get_contig_pair(i, cd):
 def get_chr_cord_data(contig_data, nclose_nodes, type4_nclose_nodes):
     chr_cord_dict = defaultdict(list)
     ncloseidx2cord = defaultdict(list)
+    ncloseidx2path_tag = {}
     
     for ctg_name, nclose_idx_pair_list in nclose_nodes.items():
         for j, nclose_idx_pair in enumerate(nclose_idx_pair_list):
+            nclose_key = (ctg_name, j)
+            ncloseidx2path_tag[nclose_key] = normalize_path_nclose_tag(nclose_idx_pair)
             for i, idx in enumerate(nclose_idx_pair):
                 chr_name, chr_cord = get_contig_pair(i, contig_data[idx])
 
-                chr_cord_dict[chr_name].append((chr_cord, (ctg_name, j)))
-                ncloseidx2cord[(ctg_name, j)].append((chr_name, chr_cord))
+                chr_cord_dict[chr_name].append((chr_cord, nclose_key))
+                ncloseidx2cord[nclose_key].append((chr_name, chr_cord))
                 
 
     for type4_nclose_idx, (c1, i1, c2, i2) in type4_nclose_nodes.items():
+        type4_nclose_idx = normalize_path_nclose_tag(type4_nclose_idx)
+
         chr_cord_dict[c1].append((i1, type4_nclose_idx))
         chr_cord_dict[c2].append((i2, type4_nclose_idx))
-
         ncloseidx2cord[type4_nclose_idx].append((c1, i1))
         ncloseidx2cord[type4_nclose_idx].append((c2, i2))
+        ncloseidx2path_tag[type4_nclose_idx] = type4_nclose_idx
 
 
     for l in chr_cord_dict.values():
         l.sort(key=lambda t: t[0])
 
-    return chr_cord_dict, ncloseidx2cord
+    return chr_cord_dict, ncloseidx2cord, ncloseidx2path_tag
 
 def group_close_coordinates(data_list, distance_threshold=50 * K):
     """
@@ -265,12 +288,16 @@ def filter_nclose_by_test(contig_data, nclose_nodes, df, cdf):
             pos1 = int(l[CHR_STR])
             pos2 = int(l[CHR_END])
 
-            type4_nclose_nodes[(event_type, event_idx, type2_merge_paf_idx)] = (chr_nam1, pos1, chr_nam2, pos2)
+            type4_tag = normalize_path_nclose_tag((event_type, event_idx, type2_merge_paf_idx))
+            type4_nclose_nodes[type4_tag] = (chr_nam1, pos1, chr_nam2, pos2)
 
-    chr_cord_dict, ncloseidx2cord = get_chr_cord_data(contig_data, nclose_nodes, type4_nclose_nodes)
+    chr_cord_dict, ncloseidx2cord, ncloseidx2path_tag = get_chr_cord_data(contig_data, nclose_nodes, type4_nclose_nodes)
 
     in_cnt = defaultdict(lambda : [0, 0])
     for chr_key in chr_cord_dict:
+        if chr_key in {'chr1', 'chr18'}:
+            t = 1
+
         in_split, out_split = merge_regions_iteratively(df, cdf, chr_key, chr_cord_dict, p_value=FILTER_P_VALUE)
 
         for ctg_idx, nclose_idx_list in in_split:
@@ -281,7 +308,7 @@ def filter_nclose_by_test(contig_data, nclose_nodes, df, cdf):
             for nclose_idx in nclose_idx_list:
                 in_cnt[nclose_idx][1] += 1
 
-    return in_cnt, ncloseidx2cord
+    return in_cnt, ncloseidx2cord, ncloseidx2path_tag
 
 def _group_consecutive(sorted_idx_list):
     """
@@ -349,10 +376,10 @@ parser.add_argument("censat_bed_path",
 
 parser.add_argument("-t", "--thread", help="Number of threads", type=int)
 
-args = parser.parse_args()
+# args = parser.parse_args()
 
-# t = "23_run_nnls.py /home/hyunwoo/ACCtools-pipeline/90_skype_run/Caki-1/20_alignasm/Caki-1.ctg.aln.paf.ppc.paf 30_skype_pipe/Caki-1_13_47_01 /home/hyunwoo/ACCtools-pipeline/90_skype_run/Caki-1/01_depth/Caki-1_normalized.win.stat.gz public_data/chm13v2.0_censat_v2.1.m.bed -t 128"
-# args = parser.parse_args(t.split()[1:])
+t = "23_run_nnls.py /Data/hyunwoo/00_skype_run_data/HG008-T/20_alignasm/HG008-T.ctg.aln.paf.ppc.paf /Data/hyunwoo/00_skype_run_data/HG008-T/30_skype /Data/hyunwoo/00_skype_run_data/HG008-T/01_depth/HG008-T_normalized.win.stat.gz /hyunwoo/63_skype_test/deps/SKYPE/public_data/chm13v2.0_censat_v2.1.m.bed -t 72"
+args = parser.parse_args(t.split()[1:])
 
 PREPROCESSED_PAF_FILE_PATH = args.ppc_paf_file_path
 PREFIX = args.prefix
@@ -386,6 +413,7 @@ cdf = pd.read_csv(CENSAT_PATH, sep='\t', names=['chr', 'st', 'nd'])
 
 with open(f'{PREFIX}/23_input.pkl', 'rb') as f:
     chr_filt_st_list, path_nclose_set_dict, amplitude, bed_data = pkl.load(f)
+path_nclose_set_dict = normalize_path_nclose_set_dict(path_nclose_set_dict)
 
 ydf = df.query('chr == "chrY"')
 
@@ -438,18 +466,25 @@ prev_fail_chrom_list = None
 fail_chrom_list = []
 
 while True:
-    in_cnt, ncloseidx2cord = filter_nclose_by_test(contig_data, nclose_nodes, df, cdf)
+    in_cnt, ncloseidx2cord, ncloseidx2path_tag = filter_nclose_by_test(contig_data, nclose_nodes, df, cdf)
 
     not_using_nclose_set = set()
 
     for nclose_key, nclose_cnt in in_cnt.items():
+        if nclose_key == ('utg008527l', 0):
+            q = 1
         (c1, i1), (c2, i2) = ncloseidx2cord[nclose_key]
         censat_count = get_censet_count(cdf, c1, i1, c2, i2)
         if (not (censat_count == 2 or nclose_cnt[0] - censat_count >= 1) and
             c1 not in fail_chrom_list and c2 not in fail_chrom_list):
-            not_using_nclose_set.add(nclose_key)
+            not_using_nclose_set.add(ncloseidx2path_tag[nclose_key])
 
-    logging.info(f'Hyp. test filtering nclose count : {len(not_using_nclose_set)}')
+    fail_chrom_text = ','.join(fail_chrom_list) if fail_chrom_list else 'none'
+    logging.info(f'Hyp. test filtering nclose count : {len(not_using_nclose_set)} (fail chroms: {fail_chrom_text})')
+    logging.debug(
+        f'Hyp. test filtering nclose breakdown : '
+        f'{dict(Counter("ordinary" if len(tag) == 2 else tag[0] for tag in not_using_nclose_set))}'
+    )
 
     A_idx_list = []
     for k, path_nclose_list in path_nclose_set_dict.items():
@@ -487,7 +522,6 @@ while True:
             continue
         acc_sum_max_base = chrom_acc_sum_dict_max_base[chrom]
         chrom_error_rate = acc_sum_max / acc_sum_max_base
-
         if chrom_error_rate > CHROM_ERROR_FAIL_RATE:
             new_fail_chrom_list.append(chrom)
 
@@ -534,6 +568,7 @@ logging.info(f'CF greedy start: pool={len(cent_fragment_col2chrom)} cent_fragmen
 
 removed_cf = []
 while True:
+    break
     pos_of = {col: i for i, col in enumerate(A_idx_list_curr)}
     pool = [(filter_weights_curr[pos_of[col]], col, chrom)
             for col, chrom in cent_fragment_col2chrom.items() if col in pos_of]
@@ -547,6 +582,7 @@ while True:
         with h5py.File(f"{PREFIX}/matrix.h5", "r") as f:
             read_selected_columns_direct(f["A"], A, A_idx_test)
             read_selected_columns_direct(f["A_fail"], A_fail, A_idx_test)
+        
         A_test = A[:, :len(A_idx_test)]
         A_fail_test = A_fail[:, :len(A_idx_test)]
 
@@ -575,7 +611,7 @@ while True:
                     worst_chrom = chk
 
         if ok:
-            logging.info(f'CF PASS: drop col {col} chrom={chrom} w={w:.4f}')
+            logging.debug(f'CF PASS: drop col {col} chrom={chrom} w={w:.4f}')
             A_idx_list_curr = A_idx_test
             predict_suc_B_curr = predict_suc_B_test
             predict_fal_B_curr = predict_fal_B_test
@@ -584,7 +620,7 @@ while True:
             progressed = True
             break
         else:
-            logging.info(f'CF FAIL: keep col {col} chrom={chrom} w={w:.4f} '
+            logging.debug(f'CF FAIL: keep col {col} chrom={chrom} w={w:.4f} '
                          f'(worst chrom={worst_chrom} ratio={worst_ratio:.3f})')
 
     if not progressed:
@@ -598,110 +634,128 @@ predict_suc_B = predict_suc_B_curr
 predict_fal_B = predict_fal_B_curr
 
 # === BP step / depth ratio 기반 nclose 추가 필터링 ===
-# 각 정상 nclose (type 4 제외) 의 두 BP 점에서, 양옆 ±500kb predict_suc_B 평균의
-# 절대 step 을 (그 nclose 의 count*weight 합) 으로 나눈 ratio 가 양쪽 모두 10% 미만이면 제거.
+# predict_suc_B와 B 각각에서, 정상 nclose (type 4 제외) 의 두 BP 점 양옆 ±500kb
+# 절대 step 을 (그 nclose 의 count*weight 합) 으로 나눈 ratio 가 모두 10% 미만이면 drop set에 추가.
+# 최종 제거 대상은 predict_suc_B 기반 drop set과 B 기반 drop set의 union.
 # BP 가 censat 영역에 있거나 ±500kb window 못 만들면 false 처리 (=제거 안 함).
 # cent_fragment greedy off-test 가 끝나 weight 가 정리된 상태에서 적용 (cent_fragment 의 잔여 영향 배제).
 BP_STEP_WIN = 500 * K
-BP_STEP_RATIO_THRESHOLD = 0.10
+BP_STEP_RATIO_THRESHOLD = 0.25
 
 with open(f'{PREFIX}/path_data.pkl', 'rb') as f:
-    _bp_path_list_dict = pkl.load(f)
+    bp_path_list_dict = pkl.load(f)
 with open(f'{PREFIX}/contig_pat_vec_data.pkl', 'rb') as f:
-    _bp_paf_sort_ans_list, _, _, _ = pkl.load(f)
+    bp_paf_sort_ans_list, _, _, _ = pkl.load(f)
 
-_bp_nclose_set = set()
-for _ctg, _pairs in nclose_nodes.items():
-    for _p in _pairs:
-        _bp_nclose_set.add(tuple(_p))
+bp_nclose_set = set()
+for ctg, pairs in nclose_nodes.items():
+    for pair in pairs:
+        bp_nclose_set.add(tuple(pair))
 
 # 각 path column 의 nclose 사용 Counter (31번 path_nclose_usage 와 동일)
-_bp_path_nclose_count = []
-for _col_idx in range(len(_bp_paf_sort_ans_list)):
-    _paf_loc = _bp_paf_sort_ans_list[_col_idx][0]
-    _key = _paf_loc.split('/')[-2]
-    _cnt = int(_paf_loc.split('/')[-1].split('.')[0]) - 1
-    _idx_path = _bp_path_list_dict[_key][_cnt][0]
-    _ctr = Counter()
-    _s = 1
-    while _s < len(_idx_path) - 2:
-        _cand = tuple(sorted([_idx_path[_s][1], _idx_path[_s+1][1]]))
-        if _cand in _bp_nclose_set:
-            _ctr[_cand] += 1
-            _s += 2
+bp_path_nclose_count = []
+for col_idx in range(len(bp_paf_sort_ans_list)):
+    paf_loc = bp_paf_sort_ans_list[col_idx][0]
+    key = paf_loc.split('/')[-2]
+    cnt = int(paf_loc.split('/')[-1].split('.')[0]) - 1
+    idx_path = bp_path_list_dict[key][cnt][0]
+    ctr = Counter()
+    s = 1
+    while s < len(idx_path) - 2:
+        cand = tuple(sorted([idx_path[s][1], idx_path[s+1][1]]))
+        if cand in bp_nclose_set:
+            ctr[cand] += 1
+            s += 2
         else:
-            _s += 1
-    _bp_path_nclose_count.append(_ctr)
+            s += 1
+    bp_path_nclose_count.append(ctr)
 
 # 각 nclose 의 두 BP (chr, cord)
-_bp_nclose_cords = {}
-for _ctg, _pairs in nclose_nodes.items():
-    for _p in _pairs:
-        _bp_nclose_cords[tuple(_p)] = [get_contig_pair(_i, contig_data[_idx]) for _i, _idx in enumerate(_p)]
+bp_nclose_cords = {}
+for ctg, pairs in nclose_nodes.items():
+    for pair in pairs:
+        bp_nclose_cords[tuple(pair)] = [get_contig_pair(i, contig_data[idx]) for i, idx in enumerate(pair)]
 
 # 현재 filter_weights 를 전체 column 길이로 unfold
-_bp_weight_full = np.zeros(len(_bp_paf_sort_ans_list), dtype=np.float64)
-for _j, _col in enumerate(A_idx_list):
-    if _col < len(_bp_paf_sort_ans_list):
-        _bp_weight_full[_col] = filter_weights[_j]
+bp_weight_full = np.zeros(len(bp_paf_sort_ans_list), dtype=np.float64)
+for j, col in enumerate(A_idx_list):
+    if col < len(bp_paf_sort_ans_list):
+        bp_weight_full[col] = filter_weights[j]
 
 # nclose 별 depth = Σ (count × weight)
-_bp_nclose_depth = defaultdict(float)
-for _col_idx, _ctr in enumerate(_bp_path_nclose_count):
-    for _nc, _v in _ctr.items():
-        _bp_nclose_depth[_nc] += _v * _bp_weight_full[_col_idx]
+bp_nclose_depth = defaultdict(float)
+for col_idx, ctr in enumerate(bp_path_nclose_count):
+    for nc, v in ctr.items():
+        bp_nclose_depth[nc] += v * bp_weight_full[col_idx]
 
 # chr -> sorted [(bin_idx, st), ...]
-_bp_chr_to_bins = defaultdict(list)
-for _i, (_chrom, _st) in enumerate(chr_filt_st_list):
-    _bp_chr_to_bins[_chrom].append((_i, _st))
-for _c in _bp_chr_to_bins:
-    _bp_chr_to_bins[_c].sort(key=lambda x: x[1])
+bp_chr_to_bins = defaultdict(list)
+for i, (chrom, st) in enumerate(chr_filt_st_list):
+    bp_chr_to_bins[chrom].append((i, st))
+for chrom in bp_chr_to_bins:
+    bp_chr_to_bins[chrom].sort(key=lambda x: x[1])
 
-def _bp_in_censat(chrom, cord):
+def bp_in_censat(chrom, cord):
     mask = (cdf['chr'] == chrom) & (cdf['st'] <= cord) & (cdf['nd'] >= cord)
     return bool(mask.any())
 
-def _bp_passes_ratio(chrom, bp, depth_val):
-    if _bp_in_censat(chrom, bp):
+def bp_signal_passes_ratio(signal_B, left_bins, right_bins, depth_val):
+    left_rows = [b_start_ind + i for i in left_bins]
+    right_rows = [b_start_ind + i for i in right_bins]
+    step_abs = abs(signal_B[right_rows].mean() - signal_B[left_rows].mean())
+    return (step_abs / depth_val) < BP_STEP_RATIO_THRESHOLD
+
+def bp_passes_ratio(chrom, bp, depth_val, signal_B):
+    if bp_in_censat(chrom, bp):
         return False
-    bins = _bp_chr_to_bins.get(chrom, [])
+    bins = bp_chr_to_bins.get(chrom, [])
     left = [i for i, st in bins if bp - BP_STEP_WIN <= st < bp]
     right = [i for i, st in bins if bp <= st < bp + BP_STEP_WIN]
     if not left or not right:
         return False
-    step_abs = abs(predict_suc_B[right].mean() - predict_suc_B[left].mean())
-    return (step_abs / depth_val) < BP_STEP_RATIO_THRESHOLD
+    return bp_signal_passes_ratio(signal_B, left, right, depth_val)
 
-_bp_nclose_to_drop = set()
-for _nc, _cords in _bp_nclose_cords.items():
-    _d = _bp_nclose_depth.get(_nc, 0.0)
-    if _d < 1e-6:
-        continue
-    if all(_bp_passes_ratio(_c, _p, _d) for _c, _p in _cords):
-        _bp_nclose_to_drop.add(_nc)
+def bp_find_nclose_to_drop(signal_B):
+    nclose_to_drop = set()
+    for nc, cords in bp_nclose_cords.items():
+        if nc == (1921, 1922):
+            t = 1
+        depth = bp_nclose_depth.get(nc, 0.0)
+        if depth < 1e-6:
+            continue
+        if all(bp_passes_ratio(chrom, pos, depth, signal_B) for chrom, pos in cords):
+            nclose_to_drop.add(nc)
+    return nclose_to_drop
 
-logging.info(f'BP step/depth filter : nclose to remove = {len(_bp_nclose_to_drop)}')
+bp_nclose_to_drop_predict = bp_find_nclose_to_drop(predict_suc_B)
+bp_nclose_to_drop_observed = bp_find_nclose_to_drop(B)
+bp_nclose_to_drop = bp_nclose_to_drop_predict | bp_nclose_to_drop_observed
 
-_bp_drop_cols = set()
-for _col_idx, _ctr in enumerate(_bp_path_nclose_count):
-    if any(_nc in _bp_nclose_to_drop for _nc in _ctr):
-        _bp_drop_cols.add(_col_idx)
+logging.info(
+    f'BP step/depth filter : nclose to remove = {len(bp_nclose_to_drop)} '
+    f'(predict={len(bp_nclose_to_drop_predict)}, observed={len(bp_nclose_to_drop_observed)})'
+)
 
-if _bp_drop_cols:
-    _bp_new_A_idx_list = sorted(c for c in A_idx_list if c not in _bp_drop_cols)
+bp_drop_cols = set()
+for col_idx, ctr in enumerate(bp_path_nclose_count):
+    if any(nc in bp_nclose_to_drop for nc in ctr):
+        bp_drop_cols.add(col_idx)
+
+if bp_drop_cols:
+    bp_new_A_idx_list = sorted(c for c in A_idx_list if c not in bp_drop_cols)
     with h5py.File(f"{PREFIX}/matrix.h5", "r") as f:
         dA = f["A"]
         dAf = f["A_fail"]
-        read_selected_columns_direct(dA, A, _bp_new_A_idx_list)
-        read_selected_columns_direct(dAf, A_fail, _bp_new_A_idx_list)
-    A_new = A[:, :len(_bp_new_A_idx_list)]
-    A_fail_new = A_fail[:, :len(_bp_new_A_idx_list)]
+        read_selected_columns_direct(dA, A, bp_new_A_idx_list)
+        read_selected_columns_direct(dAf, A_fail, bp_new_A_idx_list)
+    
+    A_new = A[:, :len(bp_new_A_idx_list)]
+    A_fail_new = A_fail[:, :len(bp_new_A_idx_list)]
     nnls.fit(A_new, B)
     filter_weights = nnls.coef_
     predict_suc_B = A_new.dot(filter_weights)
     predict_fal_B = A_fail_new.dot(filter_weights)
-    A_idx_list = _bp_new_A_idx_list
+    A_idx_list = bp_new_A_idx_list
     logging.info(f'BP step/depth filter : columns kept {len(A_idx_list)} after refit')
 else:
     logging.info('BP step/depth filter : no nclose removed, skip refit')
@@ -722,4 +776,3 @@ np.save(f'{PREFIX}/predict_B.npy', predict_B)
 
 with open(f'{PREFIX}/A_idx_list.pkl', 'wb') as f:
     pkl.dump(A_idx_list, f)
-

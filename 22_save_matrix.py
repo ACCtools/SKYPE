@@ -773,7 +773,7 @@ for i in tqdm(range(1, fclen // 4 + 1), desc='Parse coverage from forward-direct
         ov = get_vec_from_stat_loc(ov_loc)
     else:
         ov_type2_loc = glob.glob(front_contig_path + f"{i}_type2_merge_*.win.stat.gz")[0]
-        type2_ins_idx = ov_type2_loc.split('/')[-1].split('.')[0].split('_')[-1]
+        type2_ins_idx = int(ov_type2_loc.split('/')[-1].split('.')[0].split('_')[-1])
         type2_ins_loc = type2_ins_contig_path + f"{type2_ins_idx}.win.stat.gz"
         ov = get_vec_from_stat_loc(ov_type2_loc) + get_vec_from_stat_loc(type2_ins_loc)
 
@@ -811,7 +811,7 @@ for i in tqdm(range(1, bclen // 4 + 1), desc='Parse coverage from backward-direc
         ov = get_vec_from_stat_loc(ov_loc)
     else:
         ov_type2_loc = glob.glob(back_contig_path + f"{i}_type2_merge_*.win.stat.gz")[0]
-        type2_ins_idx = ov_type2_loc.split('/')[-1].split('.')[0].split('_')[-1]
+        type2_ins_idx = int(ov_type2_loc.split('/')[-1].split('.')[0].split('_')[-1])
         type2_ins_loc = type2_ins_contig_path + f"{type2_ins_idx}.win.stat.gz"
         ov = get_vec_from_stat_loc(ov_type2_loc) + get_vec_from_stat_loc(type2_ins_loc)
 

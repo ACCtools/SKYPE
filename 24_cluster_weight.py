@@ -634,12 +634,12 @@ while True:
         st, ed = nclose_pair
         st_row = ppc_data[st]
         ed_row = ppc_data[ed]
-        # logging.info(
-        #     f'  Filtered nclose: '
-        #     f'{st_row[CTG_NAM]} ({st_row[CHR_NAM]}:{st_row[CHR_STR]}-{st_row[CHR_END]}) '
-        #     f'<-> '
-        #     f'{ed_row[CTG_NAM]} ({ed_row[CHR_NAM]}:{ed_row[CHR_STR]}-{ed_row[CHR_END]})'
-        # )
+        logging.debug(
+            f'  Filtered nclose: '
+            f'{st_row[CTG_NAM]} ({st_row[CHR_NAM]}:{st_row[CHR_STR]}-{st_row[CHR_END]}) '
+            f'<-> '
+            f'{ed_row[CTG_NAM]} ({ed_row[CHR_NAM]}:{ed_row[CHR_STR]}-{ed_row[CHR_END]})'
+        )
 
     using_idx_set = set(A_idx_list)
     for nclose_pair in not_essential_nclose:
