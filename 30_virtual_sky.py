@@ -76,6 +76,10 @@ KARYOTYPE_SECTION_MINIMUM_LENGTH = 100 * K
 KARYOTYPE_MIN_SEGMENT_LENGTH = 1 * M  # karyotype 텍스트 표기 시 이보다 짧은 segment/indel 은 무시 (1Mb)
 KARYOTYPE_NORMAL_RATIO = 0.9  # 단일 염색체 path 가 reference 길이의 이 비율 미만이면 normal('1') 대신 del 로 취급
 
+CTG_INTYPE_CHECK_MIN_LENGTH = 100 * K
+CTG_INTYPE_INSERT_MIN_SEGMENT_LENGTH = 10 * K
+CTG_INTYPE_INSERT_MIN_RATIO = 0.2
+
 
 
 NODE_NAME = 1
@@ -212,6 +216,24 @@ def import_index_path(file_path : str) -> list:
     cnt = int(file_path_list[-1].split('.')[0]) - 1
 
     return path_list_dict[key][cnt][0]
+
+def import_path_paf_rows(file_path : str) -> list:
+    rows = []
+    with open(file_path, "r") as paf_file:
+        for curr_contig in paf_file:
+            curr_contig = curr_contig.rstrip()
+            if not curr_contig:
+                continue
+            temp_list = curr_contig.split("\t")
+            int_induce_idx = [
+                CTG_LEN, CTG_STR, CTG_END,
+                CHR_LEN, CHR_STR, CHR_END,
+                CTG_MAPQ,
+            ]
+            for i in int_induce_idx:
+                temp_list[i] = int(temp_list[i])
+            rows.append(tuple(temp_list))
+    return rows
 
 def import_telo_data(file_path : str, chr_len : dict) -> dict :
     fai_file = open(file_path, "r")
@@ -733,72 +755,172 @@ def should_join_by_baseline(
     score = max_aligned_match_length(seq_a, seq_b)
     return (score / denom) >= JOIN_BASELINE
 
+def append_karyotype_piece(pieces : list, chrom : str, strand : str, length : int, merge : bool = True):
+    if length <= 0:
+        return
+    key = (chrom, strand)
+    if merge and pieces and pieces[-1][0] == key:
+        pieces[-1] = (key, pieces[-1][1] + length)
+    else:
+        pieces.append((key, length))
+
+def append_ctg_intype_interrupt_piece(pieces : list, chrom : str, strand : str, length : int):
+    if length <= 0:
+        return
+    if pieces and pieces[-1][0][0] == chrom:
+        prev_chrom, prev_strand = pieces[-1][0]
+        pieces[-1] = ((prev_chrom, prev_strand), pieces[-1][1] + length)
+    else:
+        pieces.append(((chrom, strand), length))
+
+def infer_path_strand_from_paf_rows(rows : list, idx : int) -> str:
+    chrom = rows[idx][CHR_NAM]
+    curr_mid = (rows[idx][CHR_STR] + rows[idx][CHR_END]) // 2
+
+    if idx + 1 < len(rows) and rows[idx + 1][CHR_NAM] == chrom:
+        next_mid = (rows[idx + 1][CHR_STR] + rows[idx + 1][CHR_END]) // 2
+        if next_mid != curr_mid:
+            return '+' if next_mid > curr_mid else '-'
+
+    if idx > 0 and rows[idx - 1][CHR_NAM] == chrom:
+        prev_mid = (rows[idx - 1][CHR_STR] + rows[idx - 1][CHR_END]) // 2
+        if curr_mid != prev_mid:
+            return '+' if curr_mid > prev_mid else '-'
+
+    return rows[idx][CTG_DIR] if rows[idx][CTG_DIR] in {'+', '-'} else '+'
+
+def get_ctg_intype_interrupt_pieces(key_int : int, endpoint_chroms : set) -> list:
+    paf_loc = f"{output_folder}/{key_int}.paf"
+    if not os.path.isfile(paf_loc):
+        return []
+
+    rows = import_path_paf_rows(paf_loc)
+    if not rows:
+        return []
+
+    row_lengths = [abs(row[CHR_END] - row[CHR_STR]) for row in rows]
+    total_length = sum(row_lengths)
+    if total_length <= CTG_INTYPE_CHECK_MIN_LENGTH:
+        return []
+
+    foreign_chrom_lengths = Counter()
+    for row, length in zip(rows, row_lengths):
+        chrom = row[CHR_NAM]
+        if chrom not in endpoint_chroms:
+            foreign_chrom_lengths[chrom] += length
+
+    interrupt_chroms = {
+        chrom for chrom, length in foreign_chrom_lengths.items()
+        if length / total_length >= CTG_INTYPE_INSERT_MIN_RATIO
+    }
+    if not interrupt_chroms:
+        return []
+
+    pieces = []
+    for i, (row, length) in enumerate(zip(rows, row_lengths)):
+        chrom = row[CHR_NAM]
+        if chrom not in interrupt_chroms:
+            continue
+        if length < CTG_INTYPE_INSERT_MIN_SEGMENT_LENGTH:
+            continue
+        strand = infer_path_strand_from_paf_rows(rows, i)
+        append_ctg_intype_interrupt_piece(pieces, chrom, strand, length)
+
+    return pieces
+
+def get_karyotype_summary_from_index(path_path : str) -> list:
+    """
+    Fallback summary from the compact index path. This keeps the old behavior
+    for prefixes that do not have the 21_pat_depth PAF fragments available.
+    """
+    pieces = []
+    path = import_index_path(path_path)
+    ctg_intype_key_by_edge = {}
+    for key_int in path2key_int_list.get(path_path, []):
+        key_type, key_value = int2key[key_int]
+        if key_type == CTG_IN_TYPE:
+            ctg_intype_key_by_edge[key_value] = key_int
+    
+    # Padding for easier calculation
+    if len(path[0]) < 4:
+        path[0] = tuple([0] + list(path[0]))
+    if len(path[-1]) < 4:
+        path[-1] = tuple([0] + list(path[-1]))
+        
+    # Initialize direction and chromosome from the first dummy node
+    curr_incr = '+' if path[0][NODE_NAME][-1] == 'f' else '-'
+    
+    # Set the starting reference using the first real node (index 1)
+    # instead of assuming the absolute ends of the chromosome (0 or chr_len)
+    first_real_node = ppc_data[path[1][NODE_NAME]]
+    # Take chr from the real node's CHR_NAM, not the telomere endpoint name:
+    # the shared chrX/chrY telomere node is always labeled chrXf/chrXb, so a
+    # pure-chrY path with no chr/dir-change transition would be mislabeled chrX.
+    curr_chr = [first_real_node[CHR_NAM], curr_incr]
+    curr_ref = first_real_node[CHR_STR] if curr_incr == '+' else first_real_node[CHR_END]
+    
+    for i in range(1, len(path)-1):
+        prev_node_name = path[i-1][NODE_NAME]
+        curr_node_name = path[i][NODE_NAME]
+        if not isinstance(prev_node_name, int) or not isinstance(curr_node_name, int):
+            continue
+
+        last_node = ppc_data[prev_node_name]
+        curr_node = ppc_data[curr_node_name]
+        edge_key = (
+            (path[i-1][0], prev_node_name),
+            (path[i][0], curr_node_name),
+        )
+        ctg_intype_key_int = ctg_intype_key_by_edge.get(edge_key)
+        interrupt_pieces = []
+        if ctg_intype_key_int is not None:
+            endpoint_chroms = {last_node[CHR_NAM], curr_node[CHR_NAM]}
+            interrupt_pieces = get_ctg_intype_interrupt_pieces(ctg_intype_key_int, endpoint_chroms)
+
+        if path[i][CHR_CHANGE_IDX] > path[i-1][CHR_CHANGE_IDX] \
+        or path[i][DIR_CHANGE_IDX] > path[i-1][DIR_CHANGE_IDX] \
+        or interrupt_pieces:
+            
+            # Add last piece
+            if curr_incr == '+':
+                append_karyotype_piece(pieces, curr_chr[0], curr_chr[1], abs(last_node[CHR_END] - curr_ref), merge=False)
+            else:
+                append_karyotype_piece(pieces, curr_chr[0], curr_chr[1], abs(curr_ref - last_node[CHR_STR]), merge=False)
+
+            for piece_chr, piece_length in interrupt_pieces:
+                append_karyotype_piece(pieces, piece_chr[0], piece_chr[1], piece_length, merge=True)
+                        
+            # Update info of new piece (starting ref, chromosome type, increment ..)
+            if path[i][NODE_NAME] > path[i-1][NODE_NAME]:
+                curr_incr = curr_node[CTG_DIR]
+                curr_chr = [curr_node[CHR_NAM], curr_incr]
+                curr_ref = curr_node[CHR_STR] if curr_incr == '+' else curr_node[CHR_END]
+            else:
+                curr_incr = '-' if curr_node[CTG_DIR] == '+' else '+'
+                curr_chr = [curr_node[CHR_NAM], curr_incr]
+                curr_ref = curr_node[CHR_STR] if curr_incr == '+' else curr_node[CHR_END]
+    
+    # Process the final piece using the last real node (index -2)
+    # instead of extending it to absolute end
+    last_real_node = ppc_data[path[-2][NODE_NAME]]
+    if curr_incr == '+':
+        final_length = last_real_node[CHR_END] - curr_ref
+    else:
+        final_length = curr_ref - last_real_node[CHR_STR]
+        
+    append_karyotype_piece(pieces, curr_chr[0], curr_chr[1], abs(final_length), merge=False)
+    return pieces
+
 def get_karyotype_summary(non_type4_path_list: list):
     """
-    Summarizes karyotype data by parsing the given path list.
-    Ignores dummy nodes at the start and end of each path (e.g., 'chrXf') 
-    and calculates the reference coordinates based on the first and last 
-    actual nodes to account for telomeres appearing in the middle.
+    Summarizes karyotype data from the compact index path. Only CTG_IN_TYPE
+    edges are inspected in the expanded PAF fragments to reveal long inserted
+    sequence from chromosomes outside the edge endpoints.
     """
     karyotypes_data_direction_include = {}
     
     for path_path in non_type4_path_list:
-        pieces = []
-        path = import_index_path(path_path)
-        
-        # Padding for easier calculation
-        if len(path[0]) < 4:
-            path[0] = tuple([0] + list(path[0]))
-        if len(path[-1]) < 4:
-            path[-1] = tuple([0] + list(path[-1]))
-            
-        # Initialize direction and chromosome from the first dummy node
-        curr_incr = '+' if path[0][NODE_NAME][-1] == 'f' else '-'
-        
-        # Set the starting reference using the first real node (index 1)
-        # instead of assuming the absolute ends of the chromosome (0 or chr_len)
-        first_real_node = ppc_data[path[1][NODE_NAME]]
-        # Take chr from the real node's CHR_NAM, not the telomere endpoint name:
-        # the shared chrX/chrY telomere node is always labeled chrXf/chrXb, so a
-        # pure-chrY path with no chr/dir-change transition would be mislabeled chrX.
-        curr_chr = [first_real_node[CHR_NAM], curr_incr]
-        curr_ref = first_real_node[CHR_STR] if curr_incr == '+' else first_real_node[CHR_END]
-        
-        nclose_use_cnt = 0
-        for i in range(1, len(path)-1):
-            if path[i][CHR_CHANGE_IDX] > path[i-1][CHR_CHANGE_IDX] \
-            or path[i][DIR_CHANGE_IDX] > path[i-1][DIR_CHANGE_IDX]:
-                nclose_use_cnt += 1
-                
-                last_node = ppc_data[path[i-1][NODE_NAME]]
-                curr_node = ppc_data[path[i][NODE_NAME]]
-                
-                # Add last piece
-                if curr_incr == '+':
-                    pieces.append((tuple(curr_chr), abs(last_node[CHR_END] - curr_ref)))
-                else:
-                    pieces.append((tuple(curr_chr), abs(curr_ref - last_node[CHR_STR])))
-                            
-                # Update info of new piece (starting ref, chromosome type, increment ..)
-                if path[i][NODE_NAME] > path[i-1][NODE_NAME]:
-                    curr_incr = curr_node[CTG_DIR]
-                    curr_chr = [curr_node[CHR_NAM], curr_incr]
-                    curr_ref = curr_node[CHR_STR] if curr_incr == '+' else curr_node[CHR_END]
-                else:
-                    curr_incr = '-' if curr_node[CTG_DIR] == '+' else '+'
-                    curr_chr = [curr_node[CHR_NAM], curr_incr]
-                    curr_ref = curr_node[CHR_STR] if curr_incr == '+' else curr_node[CHR_END]
-        
-        # Process the final piece using the last real node (index -2)
-        # instead of extending it to absolute end
-        last_real_node = ppc_data[path[-2][NODE_NAME]]
-        if curr_incr == '+':
-            final_length = last_real_node[CHR_END] - curr_ref
-        else:
-            final_length = curr_ref - last_real_node[CHR_STR]
-            
-        pieces.append((tuple(curr_chr), abs(final_length)))
-        
+        pieces = get_karyotype_summary_from_index(path_path)
         karyotypes_data_direction_include[path_path] = pieces
         
     return karyotypes_data_direction_include
@@ -821,12 +943,21 @@ def chrom_to_iscn(chrom : str) -> str:
 def karyotype_path_to_iscn(pieces : list):
     """get_karyotype_summary 가 만든 pieces([((chrom, strand), length_bp), ...]) 를
     ISCN 문자열로 변환한다. KARYOTYPE_MIN_SEGMENT_LENGTH(1Mb) 미만 segment 는 무시.
+    단, CTG_IN_TYPE 내부에서 끼어든 것으로 남긴 중간 chr 조각은 10Kb 이상이면 유지.
       - segment 1개(정상 단일 염색체): '1'
       - junction 마다: 다른 염색체면 t(a;b), 같은 염색체 방향(strand)전환이면 inv(a)
     표기할 segment 가 하나도 없으면 None 반환.
     """
-    filtered = [(seg_chr, length) for seg_chr, length in pieces
-                if length >= KARYOTYPE_MIN_SEGMENT_LENGTH]
+    filtered = []
+    for i, (seg_chr, length) in enumerate(pieces):
+        keep = length >= KARYOTYPE_MIN_SEGMENT_LENGTH
+        if not keep and length >= CTG_INTYPE_INSERT_MIN_SEGMENT_LENGTH and 0 < i < len(pieces) - 1:
+            prev_chrom = pieces[i - 1][0][0]
+            curr_chrom = seg_chr[0]
+            next_chrom = pieces[i + 1][0][0]
+            keep = curr_chrom != prev_chrom and curr_chrom != next_chrom
+        if keep:
+            filtered.append((seg_chr, length))
     if not filtered:
         return None
     tokens = []
@@ -1180,6 +1311,7 @@ tot_loc_list = []
 
 with open(f'{PREFIX}/contig_pat_vec_data.pkl', 'rb') as f:
     paf_ans_list, key_list, int2key, _ = pkl.load(f)
+path2key_int_list = dict(paf_ans_list)
 
 for loc, ll in paf_ans_list:
     tot_loc_list.append(loc)

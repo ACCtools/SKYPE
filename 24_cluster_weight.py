@@ -58,9 +58,9 @@ JOIN_DIFF_CHR_BASELINE = 0.9
 TELOMERE_EXPANSION = 5 * K
 KARYOTYPE_SECTION_MINIMUM_LENGTH = 100*K
 
-TYPE4_CLUSTER_SIZE = 10 * M
+TYPE4_CLUSTER_SIZE = 1 * M
 
-BASE_ACCSUMABSMAX_RATIO = 1.0
+BASE_ACCSUMABSMAX_RATIO = 1.5
 CHROM_ERROR_FAIL_RATE = 2.0
 
 VCF_FLANKING_LENGTH = 1*M
@@ -441,7 +441,7 @@ parser.add_argument("-t", "--thread", help="Number of threads", type=int)
 args = parser.parse_args()
 
 # t = """
-# 24_cluster_weight.py /Data/hyunwoo/00_skype_run_data/COLO829/20_alignasm/COLO829.ctg.aln.paf.ppc.paf /Data/hyunwoo/00_skype_run_data/COLO829/01_depth/COLO829_normalized.win.stat.gz /hyunwoo/63_skype_test/deps/SKYPE/public_data/chm13v2.0_telomere.bed /hyunwoo/63_skype_test/deps/SKYPE/public_data/chm13v2.0.fa.fai /hyunwoo/63_skype_test/skype/COLO829_00_26_35 -t 72
+# 24_cluster_weight.py /Data/hyunwoo/00_skype_run_data/COLO829/20_alignasm/COLO829.ctg.aln.paf.ppc.paf /Data/hyunwoo/00_skype_run_data/COLO829/01_depth/COLO829_normalized.win.stat.gz /hyunwoo/63_skype_test/deps/SKYPE/public_data/chm13v2.0_telomere.bed /hyunwoo/63_skype_test/deps/SKYPE/public_data/chm13v2.0.fa.fai /hyunwoo/63_skype_test/skype/COLO829_15_06_54 -t 16
 # """
 # args = parser.parse_args(t.strip().split()[1:])
 
@@ -475,6 +475,12 @@ if core_num is None:
     THREAD = THREAD
 else:
     THREAD = min(int(THREAD), core_num)
+
+NNLS_GRAM_MEM_RATIO = 0.8
+BYTES_PER_GB = 1e9
+
+def nnls_gram_mem_gb():
+    return psutil.virtual_memory().available * NNLS_GRAM_MEM_RATIO / BYTES_PER_GB
 
 ppc_data = import_ppc_data(PREPROCESSED_PAF_FILE_PATH)
 
@@ -520,9 +526,19 @@ A_jl, B_jl, b_start_ind = jl.load_nnls_array(f'{PREFIX}/matrix.h5')
 A_fail_jl = jl.load_fail_array(f'{PREFIX}/matrix.h5')
 B = np.asarray(B_jl)
 
+def make_jl_weight(weight):
+    weight = np.maximum(np.asarray(weight), 0)
+    return jl.Vector[jl.eltype(B_jl)](weight)
+
+def run_nnls_map_gram_mem_gb(task_count):
+    # run_nnls_map applies gram_mem_gb per spawned subproblem, so split the
+    # 80% total budget across the maximum number of concurrently active tasks.
+    active_tasks = min(max(int(task_count), 1), max(int(THREAD), 1))
+    return nnls_gram_mem_gb() / active_tasks
+
 # Get weight from 23_run_nnls.py
 weight_base = np.load(f'{PREFIX}/weight.npy')
-weight_base_jl = jl.Vector[jl.eltype(B_jl)](weight_base)
+weight_base_jl = make_jl_weight(weight_base)
 
 final_weights_fullsize = np.zeros(len(weight_base))
 predict_suc_B_base = np.asarray(A_jl * weight_base_jl)
@@ -568,19 +584,22 @@ for nclose_pair in pre_tar_nclose_list:
     jl.push_b(pre_thread_data_jl, jl.Vector[jl.Int](pre_nclose_notusing_idx_dict[nclose_pair]))
 
 logging.info(f"Pre-calculating max error rate for pairs count : {len(pre_tar_nclose_list)}")
-pre_weight_list = jl.run_nnls_map(A_jl, B_jl, pre_thread_data_jl)
+pre_map_gram_mem_gb = run_nnls_map_gram_mem_gb(len(pre_tar_nclose_list))
+
+pre_weight_list = jl.run_nnls_map(
+    A_jl, B_jl, pre_thread_data_jl, False,
+    gram_mem_gb=pre_map_gram_mem_gb,
+    w_init=weight_base_jl
+)
 
 # Store pre-calculated max error rates in dictionary
 for nclose_pair, (weight_jl, predict_suc_B_jl) in zip(pre_tar_nclose_list, pre_weight_list):
-    if ppc_data[nclose_pair[0]][0] == 'simple_ctg_alt_ptg000012l':
-        t = 1
-
     predict_suc_B = np.asarray(predict_suc_B_jl)
 
     chrom_acc_sum_dict = defaultdict(int)
     chrom_acc_sum_dict_max = defaultdict(int)
     for i, (chrom, st) in enumerate(chr_filt_st_list):
-        chrom_acc_sum_dict[chrom] += predict_suc_B[i] - predict_suc_B_base[i] 
+        chrom_acc_sum_dict[chrom] += predict_suc_B[i] - B[i]
         if abs(chrom_acc_sum_dict[chrom]) > chrom_acc_sum_dict_max[chrom]:
             chrom_acc_sum_dict_max[chrom] = abs(chrom_acc_sum_dict[chrom])
 
@@ -601,6 +620,7 @@ for nclose_pair, (weight_jl, predict_suc_B_jl) in zip(pre_tar_nclose_list, pre_w
 #   Tier 3: never filter
 # A chromosome advances 1->2->3 each time it fails (chrom_error_rate > threshold).
 chrom_tier = {}
+filter_warm_fullsize = weight_base.copy()
 
 while True:
     div_nclose_set = set()
@@ -625,7 +645,7 @@ while True:
     for nclose_pair in div_nclose_set:
         max_error_rate = nclose_max_error_dict.get(nclose_pair, float('inf'))
 
-        if max_error_rate < BASE_ACCSUMABSMAX_RATIO:
+        if max_error_rate <= BASE_ACCSUMABSMAX_RATIO:
             logging.debug(f"{nclose_pair} : Nclose removed")
             not_essential_nclose.add(nclose_pair)
 
@@ -651,13 +671,19 @@ while True:
     A_final_jl = jl.view(A_jl, jl.Colon(), final_idx_array_jl)
     A_fail_final_jl = jl.view(A_fail_jl, jl.Colon(), final_idx_array_jl)
 
-    final_weight_jl = jl.nnls_solve(A_final_jl, B_jl, THREAD, False)
+    solve_gram_mem_gb = nnls_gram_mem_gb()
+    final_weight_jl = jl.nnls_solve(
+        A_final_jl, B_jl, THREAD, False,
+        gram_mem_gb=solve_gram_mem_gb,
+        w_init=make_jl_weight(filter_warm_fullsize[final_idx_list])
+    )
     final_weight = np.asarray(final_weight_jl)
 
     # Update final weights
     final_weights_fullsize = np.zeros(len(weight_base))
     for i, v in enumerate(final_idx_list):
         final_weights_fullsize[int(v)] = final_weight[i]
+    filter_warm_fullsize = final_weights_fullsize.copy()
 
     predict_B_succ = np.asarray(A_final_jl * final_weight_jl)
     predict_B_fail = np.asarray(A_fail_final_jl * final_weight_jl)
@@ -666,7 +692,7 @@ while True:
     chrom_acc_sum_dict = defaultdict(int)
     chrom_acc_sum_dict_max = defaultdict(int)
     for i, (chrom, st) in enumerate(chr_filt_st_list):
-        chrom_acc_sum_dict[chrom] += predict_B_succ[i] - predict_suc_B_base[i]
+        chrom_acc_sum_dict[chrom] += predict_B_succ[i] - B[i]
         if abs(chrom_acc_sum_dict[chrom]) > chrom_acc_sum_dict_max[chrom]:
             chrom_acc_sum_dict_max[chrom] = abs(chrom_acc_sum_dict[chrom])
 
@@ -711,8 +737,7 @@ logging.info(f'Filter relative error : {error/b_norm:.4f}')
 np.save(f'{PREFIX}/weight_filter.npy', final_weights_fullsize)
 np.save(f'{PREFIX}/predict_B_filter.npy', predict_B)
 
-weights = np.load(f'{PREFIX}/weight.npy')
-weights_sorted_data = sorted(enumerate(weights), key=lambda t:t[1], reverse=True)
+weights_sorted_data = sorted(enumerate(final_weights_fullsize), key=lambda t:t[1], reverse=True)
 
 chr_inf = max(chr_len.values())
 chr_fb_len_dict = defaultdict(list)
@@ -776,7 +801,7 @@ for chrom, info in cen_fragment_list:
     side = 'right' if info["dir"] else 'left'
     tot_loc_list.append(f'{PREFIX}/12_cent_fragment/{chrom}/{side}.fragment')
 
-loc2weight = dict(zip(tot_loc_list, weights))
+loc2weight = dict(zip(tot_loc_list, final_weights_fullsize))
 
 cluster_tar_path_list = []
 
@@ -854,8 +879,6 @@ for ncnt, (paf_loc, w) in enumerate(loc2weight.items()):
                 l = f.readline()
                 l = l.rstrip()
                 l = l.split("\t")
-                chr_nam1 = l[CHR_NAM]
-                chr_nam2 = l[CHR_NAM]
                 pos1 = int(l[CHR_STR])
                 pos2 = int(l[CHR_END])
                 if abs(pos1-pos2) > TYPE4_CLUSTER_SIZE:
@@ -877,7 +900,12 @@ A_final_jl = jl.view(A_jl, jl.Colon(), final_idx_array_jl)
 A_fail_final_jl = jl.view(A_fail_jl, jl.Colon(), final_idx_array_jl)
 
 
-final_weight_jl = jl.nnls_solve(A_final_jl, B_jl, THREAD, False)
+solve_gram_mem_gb = nnls_gram_mem_gb()
+final_weight_jl = jl.nnls_solve(
+    A_final_jl, B_jl, THREAD, False,
+    gram_mem_gb=solve_gram_mem_gb,
+    w_init=make_jl_weight(final_weights_fullsize[using_merge_ncnt_list])
+)
 final_weight = np.asarray(final_weight_jl)
 final_weights_fullsize = np.zeros(jl.size(A_jl, 2))
 

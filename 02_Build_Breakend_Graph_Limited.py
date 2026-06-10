@@ -107,6 +107,11 @@ TELOMERE_EXPANSION = 5 * K
 TELOMERE_COMPRESS_RANGE = 100*K
 CENSAT_COMPRESSABLE_THRESHOLD = 1000*K
 
+# 여러 flank 창(1M/5M/10M)으로 censat 양옆 depth 차이를 볼 때, 바깥 창의 차이가
+# 가장 안쪽(1M) 창 차이의 이 배율 이상으로 커지면 그 depth 차이의 원인이 censat
+# 경계가 아니라 censat 바깥의 다른 CNV 라고 보고 cen_fragment 후보에서 제외한다.
+CENSAT_OUT_RATIO = 2
+
 FORCE_TELOMERE_THRESHOLD = 10*K
 TELOMERE_CLUSTER_THRESHOLD = 500*K
 SUBTELOMERE_LENGTH = 500*K
@@ -129,6 +134,11 @@ MIN_PATH_REF_LEN = 5 * M
 TYPE2_CHUKJI_AS_TYPE4 = 5 * M
 TYPE2_CONJOIN_COMPRESS_LIMIT = 1 * M
 TYPE2_DIST_FLIP_THRESHOLD = 100 * K
+
+TYPE4_INSERTION_GRAPH_EDGE_PKL = 'type4_insertion_graph_edges.pkl'
+TYPE4_INSERTION_GRAPH_NODE_KEY = '__type4_insertion_graph__'
+TYPE4_INSERTION_GRAPH_MIN_SPAN = 1 * M
+
 
 def import_data(file_path : str) -> list :
     contig_data = []
@@ -1798,9 +1808,9 @@ def find_breakend_centromere(repeat_censat_data : dict, chr_len : dict, df : pd.
                 tmp_depth_data.append(right_weighted - left_weighted)
             else:
                 break
-        
+
         rules = [(1, 0.20), (2, 0.15), (3, 0.10)]
-        
+
         for k, thr in rules:
             if len(tmp_depth_data) < k:
                 continue
@@ -1810,8 +1820,14 @@ def find_breakend_centromere(repeat_censat_data : dict, chr_len : dict, df : pd.
 
             same_sign = all((x > 0) == first_sign for x in head)
             strong_enough = all(abs(x) >= abs(thr * meandepth) for x in head)
+            
+            # 이 규칙이 보는 창들 중 바깥(더 큰) 창의 depth 차이가 가장 안쪽(1M) 창 차이의
+            # CENSAT_OUT_RATIO 배 이상으로 커지면, 그 차이는 censat 경계가 아니라 censat
+            # 바깥의 다른 CNV 때문이므로 이 규칙으로는 인정하지 않는다.
+            # (1M 창 단독으로 strong 한 k=1 은 바깥 창을 보지 않으므로 그대로 통과)
+            localized = all(abs(x) < CENSAT_OUT_RATIO * abs(tmp_depth_data[0]) for x in head[1:])
 
-            if same_sign and strong_enough:
+            if same_sign and strong_enough and localized:
                 depth_diff_data[chrom] = abs(tmp_depth_data[0])
                 depth_dir_data[chrom] = first_sign
                 break
@@ -1831,6 +1847,13 @@ def find_breakend_centromere(repeat_censat_data : dict, chr_len : dict, df : pd.
             "depth_diff": diff,
             "chr_len": chr_len[chrom],
         }
+
+    # censat(centromere) breakend 로 인식된 염색체 목록을 로그로 출력
+    detected_summary = ', '.join(sorted(cen_fragment_meta, key=chr2int))
+    logging.info(
+        f'Censat breakend chromosome: '
+        f'{detected_summary if cen_fragment_meta else "(none)"}'
+    )
 
     def find_min_error_partition(depth_diff_data):
         """
@@ -2082,9 +2105,9 @@ def break_type34_contig(contig_data : list):
     while s < len(contig_data):
         e = contig_data[s][CTG_ENDND]
         curr_contig_name = contig_data[s][CTG_NAM]
+        broken_chk = False  # reset per contig: avoid UnboundLocalError on non-type3 first contig and stale carry-over
         if contig_data[s][CTG_TYP] == 3:
             cnt = 0
-            broken_chk = False
             for i in range(s, e):
                 front_chr = (contig_data[i][CHR_NAM], contig_data[i][CTG_DIR])
                 back_chr = (contig_data[i+1][CHR_NAM], contig_data[i+1][CTG_DIR])
@@ -2223,7 +2246,7 @@ def pass_pipeline(pre_contig_data, telo_dict, telo_bound_dict, repeat_data, repe
 
 def extract_nclose_node(contig_data : list, bnd_contig : set, repeat_contig_name : set, \
                         censat_contig_name : set, repeat_censat_data : dict, ALIGNED_PAF_LOC_LIST : list, ORIGNAL_PAF_LOC_LIST : list, \
-                        telo_set : set, chr_len : dict, asm2cov : dict) -> tuple:
+                        telo_set : set, telo_contig : dict, chr_len : dict, asm2cov : dict) -> tuple:
     s = 0
     fake_bnd = dict()
     contig_data_size = len(contig_data)
@@ -2415,6 +2438,7 @@ def extract_nclose_node(contig_data : list, bnd_contig : set, repeat_contig_name
                     nclose_list.append([st, st_chr, ed, ed_chr])
 
                 for nclose in nclose_list:
+                    flag = True  # reset per nclose: novel until proven duplicate (mainflow split can hold 2 ncloses)
                     st = nclose[0]
                     ed = nclose[2]
                     # Pass if 
@@ -2440,7 +2464,8 @@ def extract_nclose_node(contig_data : list, bnd_contig : set, repeat_contig_name
                             nclose_back_const = 1
                             if censat_ref_range[0] < K or censat_ref_range[1] > chr_len[contig_data[ed][CHR_NAM]]-K:
                                 nclose_back_const = 2
-                    if nclose_front_const + nclose_back_const >= 3:
+                    if nclose_front_const + nclose_back_const >= 3 \
+                       and not (contig_data[st][CTG_MAPQ] == 60 and contig_data[ed][CTG_MAPQ] == 60):
                         continue
                     st_chr = nclose[1]
                     ed_chr = nclose[3]
@@ -3990,6 +4015,155 @@ def conjoined_type4(contig_data, type2_nclose_node):
 
     return conjoined_type4_ins, conjoined_type4_del
 
+def get_breakend_coord(contig, side_idx):
+    nclose_loc = side_idx == 0
+    nclose_dir = contig[CTG_DIR] == '+'
+    return contig[CHR_STR if nclose_dir ^ nclose_loc else CHR_END]
+
+def collect_nclose_breakends(contig_data, nclose_nodes):
+    breakends_by_chrom = defaultdict(list)
+    for ctg_name, pair_list in nclose_nodes.items():
+        for pair in pair_list:
+            pair_key = tuple(pair)
+            for side_idx, contig_idx in enumerate(pair):
+                contig = contig_data[contig_idx]
+                breakends_by_chrom[contig[CHR_NAM]].append((
+                    get_breakend_coord(contig, side_idx),
+                    pair_key,
+                    ctg_name,
+                ))
+
+    for chrom in breakends_by_chrom:
+        breakends_by_chrom[chrom].sort(key=lambda x: x[0])
+
+    return breakends_by_chrom
+
+def get_graph_edge_weight(contig_data, src_idx, dst_idx):
+    contig_s = contig_data[src_idx]
+    contig_e = contig_data[dst_idx]
+    if contig_s[CTG_NAM] == contig_e[CTG_NAM]:
+        if src_idx < dst_idx:
+            idx_range = range(src_idx + 1, dst_idx)
+        else:
+            idx_range = range(dst_idx + 1, src_idx)
+        return sum(
+            contig_data[i][CHR_END] - contig_data[i][CHR_STR]
+            for i in idx_range
+        )
+
+    ds = contig_s[CHR_END] - contig_s[CHR_STR]
+    de = contig_e[CHR_END] - contig_e[CHR_STR]
+    if distance_checker(contig_s, contig_e) == 0:
+        return ds + de - overlap_calculator(contig_s, contig_e)
+    return distance_checker(contig_s, contig_e) + ds + de
+
+def get_type4_ref_span(contig_slice):
+    if contig_slice[0][CTG_DIR] == '+':
+        return contig_slice[0][CHR_STR], contig_slice[-1][CHR_END]
+    return contig_slice[-1][CHR_STR], contig_slice[0][CHR_END]
+
+def collect_type4_insertion_graph_candidates(contig_data, min_span=TYPE4_INSERTION_GRAPH_MIN_SPAN):
+    candidates = []
+    s = 0
+    contig_data_size = len(contig_data)
+    while s < contig_data_size:
+        e = contig_data[s][CTG_ENDND]
+        contig_slice = contig_data[s:e + 1]
+        contig_s = contig_data[s]
+        contig_e = contig_data[e]
+
+        if contig_s[CTG_TYP] == 4 \
+           and contig_s[CHR_NAM] == contig_e[CHR_NAM] \
+           and contig_s[CTG_DIR] == contig_e[CTG_DIR]:
+            ratio, total_ref_len = calculate_single_contig_ref_ratio(contig_slice)
+            ref_a, ref_b = get_type4_ref_span(contig_slice)
+            span_st, span_nd = sorted((ref_a, ref_b))
+            span_len = span_nd - span_st
+
+            if ratio < 0 and span_len >= min_span:
+                candidates.append({
+                    'type4_tuple': (s, e),
+                    'src': (DIR_FOR, s),
+                    'dst': (DIR_FOR, e),
+                    'chrom': contig_s[CHR_NAM],
+                    'span_st': span_st,
+                    'span_nd': span_nd,
+                    'span_len': span_len,
+                    'ratio': ratio,
+                    'total_ref_len': total_ref_len,
+                    'contig_name': contig_s[CTG_NAM],
+                })
+
+        s = e + 1
+
+    return candidates
+
+def select_type4_insertion_graph_edges(contig_data, nclose_nodes, type4_ins_candidates):
+    breakends_by_chrom = collect_nclose_breakends(contig_data, nclose_nodes)
+    selected_edges = []
+
+    for type4_idx, candidate in enumerate(type4_ins_candidates):
+        s, e = candidate['type4_tuple']
+        chrom = candidate['chrom']
+        span_st = candidate['span_st']
+        span_nd = candidate['span_nd']
+        inside_nclose_pairs = {
+            pair_key
+            for bp, pair_key, _ in breakends_by_chrom.get(chrom, [])
+            if span_st <= bp <= span_nd
+        }
+        if len(inside_nclose_pairs) < 2:
+            continue
+
+        edge_specs = [
+            ((DIR_FOR, s), (DIR_FOR, e)),
+            ((DIR_BAK, e), (DIR_BAK, s)),
+        ]
+        for src, dst in edge_specs:
+            selected_edges.append({
+                'type4_kind': 'raw_type4_insertion',
+                'type4_idx': type4_idx,
+                'type4_tuple': tuple(candidate['type4_tuple']),
+                'src': src,
+                'dst': dst,
+                'dist': get_graph_edge_weight(contig_data, src[1], dst[1]),
+                'chrom': chrom,
+                'span_st': span_st,
+                'span_nd': span_nd,
+                'span_len': candidate['span_len'],
+                'inside_nclose_count': len(inside_nclose_pairs),
+                'contig_name': candidate['contig_name'],
+            })
+
+    return selected_edges
+
+def augment_nclose_nodes_with_type4_insertions(nclose_nodes, selected_edges):
+    augmented_nclose_nodes = defaultdict(list)
+    for key, pair_list in nclose_nodes.items():
+        augmented_nclose_nodes[key].extend(pair_list)
+
+    selected_pairs = []
+    selected_pair_set = set()
+    for edge in selected_edges:
+        pair = tuple(edge['type4_tuple'])
+        if pair not in selected_pair_set:
+            selected_pairs.append(pair)
+            selected_pair_set.add(pair)
+
+    if selected_pairs:
+        augmented_nclose_nodes[TYPE4_INSERTION_GRAPH_NODE_KEY].extend(selected_pairs)
+
+    return augmented_nclose_nodes
+
+def get_type4_insertion_zero_dim_edge_set(selected_edges):
+    zero_dim_edge_set = set()
+    for edge in selected_edges:
+        src = tuple(edge['src'])
+        dst = tuple(edge['dst'])
+        zero_dim_edge_set.add((src, dst))
+
+    return zero_dim_edge_set
+
 
 def nclose_calc():
     repeat_censat_data = import_censat_repeat_data(CENSAT_PATH)
@@ -4025,7 +4199,7 @@ def nclose_calc():
 
     # Type 1, 2, 4에 대해서 
     raw_nclose_nodes, nclose_start_compress, nclose_end_compress, vctg_dict, all_nclose_comp, nclose_coverage, nclose_compress_track = \
-        extract_nclose_node(contig_data, bnd_contig, rpt_con, rpt_censat_con, repeat_censat_data, PAF_FILE_PATH, ORIGNAL_PAF_LOC_LIST, telo_set, chr_len, asm2cov)
+        extract_nclose_node(contig_data, bnd_contig, rpt_con, rpt_censat_con, repeat_censat_data, PAF_FILE_PATH, ORIGNAL_PAF_LOC_LIST, telo_set, telo_contig, chr_len, asm2cov)
 
     not_using_nclose_node = set()
     type1_nclose_node = []
@@ -4046,7 +4220,7 @@ def nclose_calc():
                 chukji = inside_nd - inside_st
                 chukji_chrom = curr_contig_first_fragment[CHR_NAM]
 
-                if (not exist_near_bnd_point(chukji_chrom, inside_st)) and (not exist_near_bnd_point(chukji_chrom, inside_st)) and \
+                if (not exist_near_bnd_point(chukji_chrom, inside_st)) and (not exist_near_bnd_point(chukji_chrom, inside_nd)) and \
                    (not censat_overlap_check(repeat_censat_data, chukji_chrom, inside_st, inside_nd)):
                     not_using_nclose_node.add((s, e))
             else:
@@ -4188,16 +4362,18 @@ def nclose_calc():
     nclose_nodes = final_nclose_nodes
 
     # censat 관련 nclose 필터:
-    # - 양쪽 모두 censat: 무조건 drop
-    # - 한쪽만 censat: keep if (censat chr in cen_fragment_meta) OR (censat 위치가 chr 끝)
-    #   (cen_fragment column 만들어진 chr 또는 acrocentric 같이 censat이 chr 끝쪽인 케이스)
+    # - 양쪽 모두 censat: both endpoint MAPQ == 60 이면 keep, MAPQ < 60 이 있으면 drop
+    #   단, 같은 염색체 censat +/- pair 는 drop
+    #   단, 같은 두 censat locus 근처에서 보정 방향이 서로 반대인 pair 세트는 drop
+    # - 한쪽만 censat: 이 블록에서는 제거하지 않음
+    #   단, cen_fragment column 이 만들어진 chr 의 censat-noncensat pair 는
+    #   아래 offset 방향 mismatch 필터를 추가로 적용한다.
     with open(f'{PREFIX}/cen_fragment_data.pkl', 'rb') as f:
         cen_fragment_meta_for_filter = pkl.load(f)
     cent_fragment_chroms = set(cen_fragment_meta_for_filter.keys())
 
     # chunk가 overlap하는 censat interval이 chr 경계와 정확히 맞닿은 경우만 chr 끝 판정
-    # CHM13 v2.1 기준: chr13/14/15/21/22 (acrocentric) 의 censat이 s=0 에서 시작 → match
-
+    # CHM13 v2.1 기준: chr13/14/15/21/22 (acrocentric) 의 censat이 s=0 에서 시작 -> match
     def _censat_at_chr_end(idx):
         chrom = contig_data[idx][CHR_NAM]
         cl = chr_len.get(chrom, 0)
@@ -4205,35 +4381,93 @@ def nclose_calc():
         chunk_str = contig_data[idx][CHR_STR]
         chunk_end = contig_data[idx][CHR_END]
         for s, e in intervals:
-            if max(s, chunk_str) < min(e, chunk_end):  # chunk가 이 interval 과 overlap
-                if s == 0 or e == cl:  # interval이 chr 경계에 붙음 (strict)
+            if max(s, chunk_str) < min(e, chunk_end):
+                if s == 0 or e == cl:
                     return True
         return False
 
+    def _canonical_censat_pair_info(pair):
+        a, b = pair
+        contig_a = contig_data[a]
+        contig_b = contig_data[b]
+        a_key = (chr2int(contig_a[CHR_NAM]), contig_a[CHR_STR], contig_a[CHR_END])
+        b_key = (chr2int(contig_b[CHR_NAM]), contig_b[CHR_STR], contig_b[CHR_END])
+        if b_key < a_key:
+            a, b = b, a
+            contig_a, contig_b = contig_b, contig_a
+
+        is_for = a < b
+        return {
+            "chroms": (contig_a[CHR_NAM], contig_b[CHR_NAM]),
+            "idxs": (a, b),
+            "dirs": (
+                get_corr_dir(is_for, contig_a[CTG_DIR]),
+                get_corr_dir(is_for, contig_b[CTG_DIR]),
+            ),
+        }
+
+    def _opposite_dir_pair(dirs_a, dirs_b):
+        return dirs_a[0] != dirs_b[0] and dirs_a[1] != dirs_b[1]
+
+    censat_censat_mapq60_groups = defaultdict(list)
+    for ctg_name, pair_list in nclose_nodes.items():
+        for pair in pair_list:
+            s_censat = contig_data[pair[0]][CTG_CENSAT] != '0'
+            e_censat = contig_data[pair[1]][CTG_CENSAT] != '0'
+            if not (s_censat and e_censat):
+                continue
+            if contig_data[pair[0]][CTG_MAPQ] < 60 or contig_data[pair[1]][CTG_MAPQ] < 60:
+                continue
+            pair_info = _canonical_censat_pair_info(pair)
+            censat_censat_mapq60_groups[pair_info["chroms"]].append((ctg_name, tuple(pair), pair_info))
+
+    opposite_censat_censat_pairs = set()
+    for items in censat_censat_mapq60_groups.values():
+        for i in range(len(items)):
+            ctg_name_i, pair_i, info_i = items[i]
+            a_i, b_i = info_i["idxs"]
+            for j in range(i + 1, len(items)):
+                ctg_name_j, pair_j, info_j = items[j]
+                if not _opposite_dir_pair(info_i["dirs"], info_j["dirs"]):
+                    continue
+                a_j, b_j = info_j["idxs"]
+                if distance_checker(contig_data[a_i], contig_data[a_j]) <= NCLOSE_COMPRESS_LIMIT \
+                   and distance_checker(contig_data[b_i], contig_data[b_j]) <= NCLOSE_COMPRESS_LIMIT:
+                    opposite_censat_censat_pairs.add((ctg_name_i, pair_i))
+                    opposite_censat_censat_pairs.add((ctg_name_j, pair_j))
+
     censat_filtered_nclose_nodes = defaultdict(list)
     censat_removed_both = 0
-    censat_removed_one = 0
+    censat_removed_terminal_both = 0
+    censat_removed_same_chrom_opposite_dir = 0
+    censat_removed_opposite_dir = 0
     for ctg_name, pair_list in nclose_nodes.items():
         for pair in pair_list:
             s_censat = contig_data[pair[0]][CTG_CENSAT] != '0'
             e_censat = contig_data[pair[1]][CTG_CENSAT] != '0'
             if s_censat and e_censat:
-                censat_removed_both += 1
-                continue
-            if s_censat:
-                s_chr = contig_data[pair[0]][CHR_NAM]
-                if s_chr not in cent_fragment_chroms and not _censat_at_chr_end(pair[0]):
-                    censat_removed_one += 1
+                if _censat_at_chr_end(pair[0]) and _censat_at_chr_end(pair[1]):
+                    censat_removed_terminal_both += 1
                     continue
-            if e_censat:
-                e_chr = contig_data[pair[1]][CHR_NAM]
-                if e_chr not in cent_fragment_chroms and not _censat_at_chr_end(pair[1]):
-                    censat_removed_one += 1
+                if contig_data[pair[0]][CHR_NAM] == contig_data[pair[1]][CHR_NAM] \
+                   and contig_data[pair[0]][CTG_DIR] != contig_data[pair[1]][CTG_DIR]:
+                    censat_removed_same_chrom_opposite_dir += 1
+                    continue
+                if (ctg_name, tuple(pair)) in opposite_censat_censat_pairs:
+                    censat_removed_opposite_dir += 1
+                    continue
+                if contig_data[pair[0]][CTG_MAPQ] < 60 or contig_data[pair[1]][CTG_MAPQ] < 60:
+                    censat_removed_both += 1
                     continue
             censat_filtered_nclose_nodes[ctg_name].append(pair)
+
     nclose_nodes = censat_filtered_nclose_nodes
-    logging.info(f'Removed {censat_removed_both} censat-censat nclose, '
-                 f'{censat_removed_one} censat-* nclose (chr not in cent_fragment AND not at chr end)')
+    logging.info(
+        f'Removed {censat_removed_both} censat-censat nclose where either endpoint MAPQ < 60, '
+        f'{censat_removed_terminal_both} terminal-censat-to-terminal-censat nclose, '
+        f'{censat_removed_same_chrom_opposite_dir} same-chromosome opposite-direction censat-censat nclose, '
+        f'{censat_removed_opposite_dir} opposite-direction censat-censat nclose'
+    )
 
     # offset 방향 mismatch 필터:
     # offset(cent_fragment_chroms 에 속함) censat-noncensat 페어만 대상.
@@ -4299,13 +4533,103 @@ def nclose_calc():
     nclose_nodes = offset_filtered_nclose_nodes
     logging.info(f'Removed {offset_removed} offset-direction-mismatched censat-noncensat nclose pairs')
 
+    # If a non-cent-fragment censat endpoint competes for the same non-censat
+    # locus, prefer the synthetic simple_ctg_alt candidate in compressed output.
+    simple_alt_candidates = defaultdict(list)
+    for ctg_name, pair_list in nclose_nodes.items():
+        for pair in pair_list:
+            s_is_censat = contig_data[pair[0]][CTG_CENSAT] != '0'
+            e_is_censat = contig_data[pair[1]][CTG_CENSAT] != '0'
+            if s_is_censat == e_is_censat:
+                continue
+            if s_is_censat:
+                cidx, nidx = pair[0], pair[1]
+            else:
+                cidx, nidx = pair[1], pair[0]
+
+            censat_chr = contig_data[cidx][CHR_NAM]
+            if censat_chr in cent_fragment_chroms:
+                continue
+
+            noncensat_chr = contig_data[nidx][CHR_NAM]
+            noncensat_st = contig_data[nidx][CHR_STR]
+            noncensat_nd = contig_data[nidx][CHR_END]
+            is_simple_alt = (
+                ctg_name.startswith('simple_ctg_alt_') or
+                contig_data[pair[0]][CTG_NAM].startswith('simple_ctg_alt_') or
+                contig_data[pair[1]][CTG_NAM].startswith('simple_ctg_alt_')
+            )
+            simple_alt_candidates[(censat_chr, noncensat_chr)].append(
+                (ctg_name, pair, noncensat_st, noncensat_nd, is_simple_alt)
+            )
+
+    simple_alt_to_remove = set()
+    for items in simple_alt_candidates.values():
+        items.sort(key=lambda x: (x[2], x[3]))
+        i = 0
+        while i < len(items):
+            j = i + 1
+            group_end = items[i][3]
+            while j < len(items) and items[j][2] < group_end:
+                group_end = max(group_end, items[j][3])
+                j += 1
+            sub = items[i:j]
+            if any(it[4] for it in sub):
+                for it in sub:
+                    if not it[4]:
+                        simple_alt_to_remove.add((it[0], tuple(it[1])))
+            i = j
+
+    simple_alt_filtered_nclose_nodes = defaultdict(list)
+    simple_alt_removed = 0
+    for ctg_name, pair_list in nclose_nodes.items():
+        for pair in pair_list:
+            if (ctg_name, tuple(pair)) in simple_alt_to_remove:
+                simple_alt_removed += 1
+                continue
+            simple_alt_filtered_nclose_nodes[ctg_name].append(pair)
+    nclose_nodes = simple_alt_filtered_nclose_nodes
+    logging.info(
+        f'Removed {simple_alt_removed} non-simple censat-noncensat nclose pairs '
+        f'overlapping a simple_ctg_alt non-censat locus'
+    )
+
     # Subtelomeric tip-orientation filter:
     # 양끝 SUBTELO_TIP_LIMIT tip을 동등 boundary로 가정. 두 chunk가 같은 telomere
     # orientation type ({f+, b-} = telo-inward 또는 {f-, b+} = telo-outward) 이면
     # 결과 path가 "정상 chromosome path + tip swap"으로 환원되어 정보 추가가 없음.
     # 다른 type끼리는 양쪽 본체가 다 path에 들어가는 fusion/inversion이라 보존.
     # 같은 chromosome head-to-tail (chr1b+ => chr1f+) 은 type이 달라 자동 보존됨.
-    def _subtelo_orientation(idx):
+    #
+    # Telomere anchor가 실제 chromosome 끝이 아니라 중간 좌표에 잡힌 경우도 있다.
+    # telomere_connected_list의 anchor와 겹치거나 SUBTELO_TIP_LIMIT 안에서 연결 가능한
+    # chunk는 물리적 chr tip과 같은 방식으로 orientation을 부여한다.
+    telo_anchor_by_chrom = defaultdict(list)
+    telo_anchor_seen = set()
+
+    def _add_telo_anchor(telo_name, idx):
+        if idx < 0 or idx >= len(contig_data) or telo_name == '0':
+            return
+        key = (telo_name, idx)
+        if key in telo_anchor_seen:
+            return
+        telo_anchor_seen.add(key)
+        telo_anchor_by_chrom[contig_data[idx][CHR_NAM]].append((telo_name, idx))
+
+    for telo_name, edge_list in telo_contig.items():
+        for edge in edge_list:
+            _add_telo_anchor(telo_name, edge[1])
+
+    for idx, chunk in enumerate(contig_data):
+        if chunk[CTG_TELCON] != '0':
+            _add_telo_anchor(chunk[CTG_TELCON], idx)
+
+    def _orientation_from_telo_side(telo_side, ctg_dir):
+        if telo_side == 'f':
+            return 'inward' if ctg_dir == '+' else 'outward'
+        return 'outward' if ctg_dir == '+' else 'inward'
+
+    def _subtelo_orientations(idx):
         chrom = contig_data[idx][CHR_NAM]
         chr_str = contig_data[idx][CHR_STR]
         chr_end = contig_data[idx][CHR_END]
@@ -4313,25 +4637,32 @@ def nclose_calc():
         cl = chr_len.get(chrom, 0)
         at_front = chr_str < SUBTELO_TIP_LIMIT
         at_back = chr_end > cl - SUBTELO_TIP_LIMIT
-        if at_front == at_back:
-            return None
+        orientations = set()
         if at_front:
-            return 'inward' if ctg_dir == '+' else 'outward'
-        return 'outward' if ctg_dir == '+' else 'inward'
+            orientations.add(_orientation_from_telo_side('f', ctg_dir))
+        if at_back:
+            orientations.add(_orientation_from_telo_side('b', ctg_dir))
+
+        for telo_name, anchor_idx in telo_anchor_by_chrom.get(chrom, []):
+            if distance_checker(contig_data[idx], contig_data[anchor_idx]) < SUBTELO_TIP_LIMIT:
+                orientations.add(_orientation_from_telo_side(telo_name[-1], ctg_dir))
+
+        return orientations
 
     subtelo_filtered_nclose_nodes = defaultdict(list)
     subtelo_removed = 0
     for ctg_name, pair_list in nclose_nodes.items():
         for pair in pair_list:
-            t_s = _subtelo_orientation(pair[0])
-            t_e = _subtelo_orientation(pair[1])
-            if t_s is not None and t_s == t_e:
+            t_s = _subtelo_orientations(pair[0])
+            t_e = _subtelo_orientations(pair[1])
+            if t_s and not t_s.isdisjoint(t_e):
                 subtelo_removed += 1
                 continue
             subtelo_filtered_nclose_nodes[ctg_name].append(pair)
     nclose_nodes = subtelo_filtered_nclose_nodes
     logging.info(f"Removed {subtelo_removed} same-orientation subtelomeric tip nclose "
-                 f"(both junctions within {SUBTELO_TIP_LIMIT//1000}kb of telomere, same telo-in/out direction)")
+                 f"(both junctions within {SUBTELO_TIP_LIMIT//1000}kb of chromosome end or telomere anchor, "
+                 f"same telo-in/out direction)")
 
     nclose_type = defaultdict(list)
     for j in nclose_nodes:
@@ -4586,6 +4917,11 @@ parser.add_argument("--add_alt_ctg_simple",
                          "pair per simple_ctg_alt contig.",
                     action='store_true')
 
+parser.add_argument("--add_insertion_graph",
+                    dest="add_insertion_graph",
+                    help="Add selected type4 insertion rescue edges to the breakend graph without increasing graph dimensions.",
+                    action='store_true')
+
 args = parser.parse_args()
 
 # t = "02_Build_Breakend_Graph_Limited.py /home/hyunwoo/ACCtools-pipeline/90_skype_run/H1437/20_alignasm/H1437.ctg.aln.paf public_data/chm13v2.0.fa.fai public_data/chm13v2.0_telomere.bed public_data/chm13v2.0_repeat.m.bed public_data/chm13v2.0_censat_v2.1.m.bed /home/hyunwoo/ACCtools-pipeline/90_skype_run/H1437/01_depth/H1437_normalized.win.stat.gz 30_skype_pipe/H1437_23_00_00 /home/hyunwoo/ACCtools-pipeline/90_skype_run/H1437/01_depth/H1437.bam --alt /home/hyunwoo/ACCtools-pipeline/90_skype_run/H1437/20_alignasm/H1437.utg.aln.paf --orignal_paf_loc /home/hyunwoo/ACCtools-pipeline/90_skype_run/H1437/20_alignasm/H1437.ctg.paf /home/hyunwoo/ACCtools-pipeline/90_skype_run/H1437/20_alignasm/H1437.utg.paf --test --skip_bam_analysis -t 128"
@@ -4681,7 +5017,30 @@ if nclose_node_count > FAIL_NCLOSE_COUNT:
             logging.info("No method to reduce nclose node count.")
             sys.exit(1)
 
-bnd_graph_adjacency = initialize_bnd_graph(contig_data, nclose_nodes, telo_contig)
+selected_type4_insertion_graph_edges = []
+type4_insertion_zero_dim_edge_set = set()
+graph_nclose_nodes = nclose_nodes
+if args.add_insertion_graph:
+    type4_insertion_graph_candidates = collect_type4_insertion_graph_candidates(contig_data)
+    selected_type4_insertion_graph_edges = select_type4_insertion_graph_edges(
+        contig_data, nclose_nodes, type4_insertion_graph_candidates
+    )
+    graph_nclose_nodes = augment_nclose_nodes_with_type4_insertions(
+        nclose_nodes, selected_type4_insertion_graph_edges
+    )
+    type4_insertion_zero_dim_edge_set = get_type4_insertion_zero_dim_edge_set(
+        selected_type4_insertion_graph_edges
+    )
+    logging.info(
+        f'Added {len(type4_insertion_zero_dim_edge_set)} type4 insertion graph edges '
+        f'from {len(selected_type4_insertion_graph_edges) // 2} insertion candidates '
+        f'({len(type4_insertion_graph_candidates)} raw type4 insertion candidates >= {TYPE4_INSERTION_GRAPH_MIN_SPAN} bp)'
+    )
+
+bnd_graph_adjacency = initialize_bnd_graph(contig_data, graph_nclose_nodes, telo_contig)
+
+with open(f'{PREFIX}/{TYPE4_INSERTION_GRAPH_EDGE_PKL}', 'wb') as f:
+    pkl.dump(selected_type4_insertion_graph_edges, f)
 
 save_loc = PREFIX + '/00_raw'
 logging.info("Now saving results in folder : " + PREFIX)
@@ -4729,7 +5088,16 @@ def make_graph(CHR_CHANGE_LIMIT, DIR_CHANGE_LIMIT):
                         d = ds + de - overlap_calculator(contig_s, contig_e)
                     else:  
                         d = distance_checker(contig_s, contig_e) + ds + de 
-                if contig_s[CHR_NAM] != contig_e[CHR_NAM]:
+                is_type4_insertion_zero_dim_edge = (
+                    (tuple(node), tuple(edge[:2])) in type4_insertion_zero_dim_edge_set
+                )
+                if is_type4_insertion_zero_dim_edge:
+                    for j in range(0, CHR_CHANGE_LIMIT+1):
+                        for k in range(0, DIR_CHANGE_LIMIT+1):
+                            node_limit = tuple(list(node)+[j, k])
+                            edge_limit = tuple(list(edge)+[j, k])
+                            G.add_weighted_edges_from([(node_limit, edge_limit, d)])
+                elif contig_s[CHR_NAM] != contig_e[CHR_NAM]:
                     for j in range(0, CHR_CHANGE_LIMIT):
                         for k in range(0, DIR_CHANGE_LIMIT+1):
                             node_limit = tuple(list(node)+[j, k])
@@ -5214,7 +5582,7 @@ for k, v in path_di_list_dict_data:
 
 all_nclose_nodes = convert_all_nclose_comp_to_nclose_nodes(contig_data, all_nclose_comp)
 ecdna_nclose_nodes = build_ecdna_nclose_nodes(raw_nclose_nodes, all_nclose_nodes)
-logging.info(
+logging.debug(
     f"ecDNA nclose input: {sum(len(v) for v in raw_nclose_nodes.values())} filtered nclose, "
     f"{sum(len(v) for v in all_nclose_nodes.values())} all-file nclose, "
     f"{sum(len(v) for v in ecdna_nclose_nodes.values())} merged nclose"

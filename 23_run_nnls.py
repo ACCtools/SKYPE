@@ -52,23 +52,16 @@ FILTER_P_VALUE = 0.01
 
 CHROM_ERROR_FAIL_RATE = 2.0
 
-def normalize_path_nclose_tag(tag):
-    if isinstance(tag, (tuple, list)):
-        if len(tag) == 2:
-            return tuple(sorted(tag))
-        if len(tag) == 3 and tag[0] in {'front_jump', 'back_jump', 'ecdna'}:
-            event_type, event_idx, type2_merge_idx = tag
-            return (event_type, int(event_idx), int(type2_merge_idx))
-        if len(tag) == 3 and tag[0] == 'cent_fragment':
-            return tuple(tag)
-        
-    raise ValueError(f'Unexpected nclose tag format: {tag!r}')
+RECIPROCAL_PAIR_DISTANCE = 10 * K
+RECIPROCAL_FORBID_MAX_INTERVAL = 10 * K
 
-def normalize_path_nclose_set_dict(path_nclose_set_dict):
-    return {
-        k: {normalize_path_nclose_tag(tag) for tag in path_nclose_list}
-        for k, path_nclose_list in path_nclose_set_dict.items()
-    }
+RECIPROCAL_REPORT_NAME = 'reciprocal_translocation_no_span.tsv'
+
+def chr2int(x):
+    chrXY2int = {'chrX': 24, 'chrY': 25}
+    if x in chrXY2int:
+        return chrXY2int[x]
+    return int(x[3:])
 
 def import_ppc_contig_data(file_path: str) -> list:
     paf_file = open(file_path, "r")
@@ -95,36 +88,511 @@ def get_contig_pair(i, cd):
 
     return chr_name, chr_cord
 
-def get_chr_cord_data(contig_data, nclose_nodes, type4_nclose_nodes):
+def get_expected_high_side(i, cd):
+    nclose_loc = i == 0
+    nclose_dir = '+' == cd[CTG_DIR]
+
+    # If the breakend is at CHR_STR, the included/reference side is the
+    # higher-coordinate side; if it is at CHR_END, it is the lower side.
+    return 'right' if nclose_dir ^ nclose_loc else 'left'
+
+def get_chr_cord_data(contig_data, nclose_nodes, type4_nclose_nodes, type4_expected_high_side):
     chr_cord_dict = defaultdict(list)
-    ncloseidx2cord = defaultdict(list)
-    ncloseidx2path_tag = {}
+    path_tag2cord = {}
+    path_tag2nclose_key = {}
+    path_tag2expected_high_side = {}
+
+    def add_nclose_cords(path_tag, nclose_key, cords, expected_high_side):
+        path_tag2cord[path_tag] = cords
+        path_tag2nclose_key[path_tag] = nclose_key
+        path_tag2expected_high_side[path_tag] = expected_high_side
+
+        for side_idx, (chr_name, chr_cord) in enumerate(cords):
+            chr_cord_dict[chr_name].append((chr_cord, (path_tag, side_idx)))
     
     for ctg_name, nclose_idx_pair_list in nclose_nodes.items():
         for j, nclose_idx_pair in enumerate(nclose_idx_pair_list):
-            nclose_key = (ctg_name, j)
-            ncloseidx2path_tag[nclose_key] = normalize_path_nclose_tag(nclose_idx_pair)
-            for i, idx in enumerate(nclose_idx_pair):
-                chr_name, chr_cord = get_contig_pair(i, contig_data[idx])
-
-                chr_cord_dict[chr_name].append((chr_cord, nclose_key))
-                ncloseidx2cord[nclose_key].append((chr_name, chr_cord))
+            path_tag = (ctg_name, j)
+            nclose_key = tuple(nclose_idx_pair)
+            assert len(nclose_key) == 2 and nclose_key == tuple(sorted(nclose_key))
+            cords = [get_contig_pair(i, contig_data[idx]) for i, idx in enumerate(nclose_idx_pair)]
+            expected_high_side = [
+                get_expected_high_side(i, contig_data[idx])
+                for i, idx in enumerate(nclose_idx_pair)
+            ]
+            add_nclose_cords(path_tag, nclose_key, cords, expected_high_side)
                 
-
-    for type4_nclose_idx, (c1, i1, c2, i2) in type4_nclose_nodes.items():
-        type4_nclose_idx = normalize_path_nclose_tag(type4_nclose_idx)
-
-        chr_cord_dict[c1].append((i1, type4_nclose_idx))
-        chr_cord_dict[c2].append((i2, type4_nclose_idx))
-        ncloseidx2cord[type4_nclose_idx].append((c1, i1))
-        ncloseidx2cord[type4_nclose_idx].append((c2, i2))
-        ncloseidx2path_tag[type4_nclose_idx] = type4_nclose_idx
+    
+    for type4_nclose_key, (c1, i1, c2, i2) in type4_nclose_nodes.items():
+        add_nclose_cords(
+            type4_nclose_key, type4_nclose_key, [(c1, i1), (c2, i2)],
+            type4_expected_high_side.get(type4_nclose_key, [None, None])
+        )
 
 
     for l in chr_cord_dict.values():
         l.sort(key=lambda t: t[0])
 
-    return chr_cord_dict, ncloseidx2cord, ncloseidx2path_tag
+    return chr_cord_dict, path_tag2cord, path_tag2nclose_key, path_tag2expected_high_side
+
+def build_chr_cord_dict(path_tag2cord, path_tag2nclose_key, skip_nclose_set=None):
+    skip_nclose_set = skip_nclose_set or set()
+    chr_cord_dict = defaultdict(list)
+    for path_tag, cords in path_tag2cord.items():
+        if path_tag2nclose_key[path_tag] in skip_nclose_set:
+            continue
+        for side_idx, (chr_name, chr_cord) in enumerate(cords):
+            chr_cord_dict[chr_name].append((chr_cord, (path_tag, side_idx)))
+
+    for l in chr_cord_dict.values():
+        l.sort(key=lambda t: t[0])
+
+    return chr_cord_dict
+
+def collect_nclose_test_data(contig_data, nclose_nodes):
+    type4_tot_loc_list = []
+    for bv_paf_loc in glob.glob(f'{RATIO_OUTLIER_FOLDER}/front_jump/*_base.paf'):
+        type4_tot_loc_list.append(bv_paf_loc)
+
+    for bv_paf_loc in glob.glob(f'{RATIO_OUTLIER_FOLDER}/back_jump/*_base.paf'):
+        type4_tot_loc_list.append(bv_paf_loc)
+
+    type4_nclose_nodes = dict()
+    type4_expected_high_side = dict()
+    for paf_loc in type4_tot_loc_list:
+        event_type = paf_loc.split('/')[-2]
+        event_idx = int(paf_loc.split('/')[-1].split('_')[0])
+
+        type2_merge_paf_idx = -1
+        if not os.path.isfile(f'{RATIO_OUTLIER_FOLDER}/{event_type}/{event_idx}.paf'):
+            type2_merge_paf_loc = glob.glob(f'{RATIO_OUTLIER_FOLDER}/{event_type}/{event_idx}_type2_merge_*.paf')[0]
+            type2_merge_paf_idx = int(type2_merge_paf_loc.split('/')[-1].split('.')[0].split('_')[-1])
+
+        with open(paf_loc, "r") as f:
+            l = f.readline().rstrip().split("\t")
+            chr_nam1 = l[CHR_NAM]
+            chr_nam2 = l[CHR_NAM]
+            pos1, pos2 = sorted([int(l[CHR_STR]), int(l[CHR_END])])
+
+            type4_tag = (event_type, event_idx, type2_merge_paf_idx)
+            type4_nclose_nodes[type4_tag] = (chr_nam1, pos1, chr_nam2, pos2)
+            if event_type == 'front_jump':
+                # deletion: the outside of [pos1, pos2] should be higher.
+                type4_expected_high_side[type4_tag] = ['left', 'right']
+            elif event_type == 'back_jump':
+                # insertion/duplication: the inside of [pos1, pos2] should be higher.
+                type4_expected_high_side[type4_tag] = ['right', 'left']
+
+    return get_chr_cord_data(contig_data, nclose_nodes, type4_nclose_nodes, type4_expected_high_side)
+
+def build_path_nclose_count(weights_len, ordinary_candidate_nclose_keys, type4_candidate_nclose_keys,
+                            path_nclose_set_dict, path_list_dict, paf_sort_ans_list):
+    path_nclose_count = [Counter() for _ in range(weights_len)]
+    rpll = len(paf_sort_ans_list)
+
+    for col_idx in range(rpll):
+        paf_loc = paf_sort_ans_list[col_idx][0]
+        key = paf_loc.split('/')[-2]
+        cnt = int(paf_loc.split('/')[-1].split('.')[0]) - 1
+        idx_path = path_list_dict[key][cnt][0]
+        ctr = path_nclose_count[col_idx]
+        s = 1
+        while s < len(idx_path) - 2:
+            cand = tuple(sorted([idx_path[s][1], idx_path[s+1][1]]))
+            if cand in ordinary_candidate_nclose_keys:
+                ctr[cand] += 1
+                s += 2
+            else:
+                s += 1
+
+    for col_idx in range(weights_len):
+        ctr = Counter()
+        for nclose_key in path_nclose_set_dict.get(col_idx, set()):
+            if nclose_key in type4_candidate_nclose_keys:
+                ctr[nclose_key] += 1
+            elif col_idx >= rpll and nclose_key in ordinary_candidate_nclose_keys:
+                ctr[nclose_key] += 1
+        path_nclose_count[col_idx].update(ctr)
+
+    return path_nclose_count
+
+def calculate_nclose_depth(path_nclose_count, weight_full):
+    nclose_depth = defaultdict(float)
+    for col_idx, ctr in enumerate(path_nclose_count):
+        for nc, v in ctr.items():
+            nclose_depth[nc] += v * weight_full[col_idx]
+    return nclose_depth
+
+def canonical_nclose_layout(cords, expected_high_side):
+    order = [0, 1]
+    keys = [(chr2int(cords[i][0]), cords[i][1]) for i in order]
+    if keys[1] < keys[0]:
+        order = [1, 0]
+
+    return {
+        'chroms': tuple(cords[i][0] for i in order),
+        'coords': tuple(cords[i][1] for i in order),
+        'sides': tuple(expected_high_side[i] if i < len(expected_high_side) else None for i in order),
+    }
+
+def find_opposite_direction_depth_drop(path_tag2cord, path_tag2nclose_key,
+                                       path_tag2expected_high_side, nclose_depth,
+                                       max_depth_diff,
+                                       distance_threshold=1 * M):
+    layout_by_key = {}
+    for path_tag, cords in path_tag2cord.items():
+        nclose_key = path_tag2nclose_key[path_tag]
+        if len(nclose_key) != 2:
+            continue
+        layout = canonical_nclose_layout(
+            cords,
+            path_tag2expected_high_side.get(path_tag, [None, None])
+        )
+        if None in layout['sides']:
+            continue
+        layout_by_key[nclose_key] = layout
+
+    groups = defaultdict(list)
+    for nclose_key, layout in layout_by_key.items():
+        groups[layout['chroms']].append((nclose_key, layout))
+
+    drop_set = set()
+    dropped_pair_count = 0
+    for items in groups.values():
+        for i in range(len(items)):
+            key_i, layout_i = items[i]
+            depth_i = nclose_depth.get(key_i, 0.0)
+            for j in range(i + 1, len(items)):
+                key_j, layout_j = items[j]
+                if layout_i['sides'][0] == layout_j['sides'][0] or layout_i['sides'][1] == layout_j['sides'][1]:
+                    continue
+                if abs(layout_i['coords'][0] - layout_j['coords'][0]) > distance_threshold:
+                    continue
+                if abs(layout_i['coords'][1] - layout_j['coords'][1]) > distance_threshold:
+                    continue
+
+                depth_j = nclose_depth.get(key_j, 0.0)
+                if max(depth_i, depth_j) < 1e-6:
+                    continue
+                if abs(depth_i - depth_j) < max_depth_diff:
+                    drop_set.add(key_i)
+                    drop_set.add(key_j)
+                    dropped_pair_count += 1
+
+    return drop_set, dropped_pair_count
+
+def canonical_nclose_region_layout(contig_data, nclose_key, expected_high_side):
+    regions = []
+    cords = []
+    for side_idx, contig_idx in enumerate(nclose_key):
+        cd = contig_data[contig_idx]
+        cords.append(get_contig_pair(side_idx, cd))
+        regions.append((
+            cd[CHR_NAM],
+            int(cd[CHR_STR]),
+            int(cd[CHR_END]),
+            cd[CTG_NAM],
+            cd[CTG_DIR],
+        ))
+
+    order = [0, 1]
+    keys = [(chr2int(cords[i][0]), cords[i][1]) for i in order]
+    if keys[1] < keys[0]:
+        order = [1, 0]
+
+    return {
+        'chroms': tuple(cords[i][0] for i in order),
+        'coords': tuple(cords[i][1] for i in order),
+        'regions': tuple(regions[i] for i in order),
+        'sides': tuple(expected_high_side[i] if i < len(expected_high_side) else None for i in order),
+    }
+
+def get_inner_boundary_interval(region_a, region_b):
+    chrom_a, st_a, nd_a, _, _ = region_a
+    chrom_b, st_b, nd_b, _, _ = region_b
+    assert chrom_a == chrom_b
+
+    if (st_b, nd_b) < (st_a, nd_a):
+        st_a, nd_a, st_b, nd_b = st_b, nd_b, st_a, nd_a
+
+    if nd_a <= st_b:
+        return nd_a, st_b, 'gap'
+
+    return st_b, min(nd_a, nd_b), 'overlap'
+
+def get_outer_reference_interval(region_a, region_b):
+    chrom_a, st_a, nd_a, _, _ = region_a
+    chrom_b, st_b, nd_b, _, _ = region_b
+    assert chrom_a == chrom_b
+    return min(st_a, st_b), max(nd_a, nd_b)
+
+def load_utg_spans(paf_utg_path):
+    utg_spans = defaultdict(list)
+    if not paf_utg_path or not os.path.isfile(paf_utg_path):
+        logging.warning(f'Reciprocal translocation check skipped raw utg PAF load: {paf_utg_path}')
+        return utg_spans
+
+    with open(paf_utg_path, 'r') as f:
+        for line in f:
+            if not line.strip():
+                continue
+            fields = line.rstrip('\n').split('\t')
+            if len(fields) <= CHR_END:
+                continue
+            qname = fields[CTG_NAM]
+            if not qname.startswith('utg'):
+                continue
+            try:
+                st = int(fields[CHR_STR])
+                nd = int(fields[CHR_END])
+            except ValueError:
+                continue
+            if nd < st:
+                continue
+            utg_spans[fields[CHR_NAM]].append({
+                'qname': qname,
+                'st': st,
+                'nd': nd,
+            })
+
+    for spans in utg_spans.values():
+        spans.sort(key=lambda x: (x['st'], x['nd'], x['qname']))
+
+    return utg_spans
+
+def find_strict_spanning_utgs(utg_spans, chrom, st, nd):
+    hits = []
+    for span in utg_spans.get(chrom, []):
+        if span['st'] >= st:
+            break
+        if span['nd'] > nd:
+            hits.append(span)
+    return hits
+
+def build_censat_interval_dict(cdf):
+    censat_intervals = defaultdict(list)
+    for chrom, st, nd in cdf[['chr', 'st', 'nd']].itertuples(index=False, name=None):
+        censat_intervals[chrom].append((int(st), int(nd)))
+
+    for chrom in censat_intervals:
+        censat_intervals[chrom].sort()
+
+    return censat_intervals
+
+def overlaps_censat(censat_intervals, chrom, st, nd):
+    for censat_st, censat_nd in censat_intervals.get(chrom, []):
+        if nd <= st:
+            if censat_st <= st < censat_nd:
+                return True
+            if censat_st > st:
+                break
+            continue
+
+        if censat_nd <= st:
+            continue
+        if censat_st >= nd:
+            break
+        return True
+
+    return False
+
+def build_reciprocal_no_span_records(contig_data, path_tag2cord, path_tag2nclose_key,
+                                     path_tag2expected_high_side, utg_spans, censat_intervals,
+                                     distance_threshold=RECIPROCAL_PAIR_DISTANCE):
+    layout_by_key = {}
+    for path_tag, cords in path_tag2cord.items():
+        nclose_key = path_tag2nclose_key[path_tag]
+        if len(nclose_key) != 2:
+            continue
+        expected_high_side = path_tag2expected_high_side.get(path_tag, [None, None])
+        layout = canonical_nclose_layout(cords, expected_high_side)
+        if None in layout['sides']:
+            continue
+        layout.update(canonical_nclose_region_layout(contig_data, nclose_key, expected_high_side))
+        layout_by_key[nclose_key] = layout
+
+    groups = defaultdict(list)
+    for nclose_key, layout in layout_by_key.items():
+        groups[layout['chroms']].append((nclose_key, layout))
+
+    records = []
+    pair_id = 0
+    for chrom_pair, items in groups.items():
+        for i in range(len(items)):
+            key_i, layout_i = items[i]
+            for j in range(i + 1, len(items)):
+                key_j, layout_j = items[j]
+                if layout_i['sides'][0] == layout_j['sides'][0] or layout_i['sides'][1] == layout_j['sides'][1]:
+                    continue
+                if abs(layout_i['coords'][0] - layout_j['coords'][0]) > distance_threshold:
+                    continue
+                if abs(layout_i['coords'][1] - layout_j['coords'][1]) > distance_threshold:
+                    continue
+
+                side_records = []
+                for side_idx, chrom in enumerate(chrom_pair):
+                    inner_st, inner_nd, _ = get_inner_boundary_interval(
+                        layout_i['regions'][side_idx],
+                        layout_j['regions'][side_idx],
+                    )
+                    path_drop_st, path_drop_nd = get_outer_reference_interval(
+                        layout_i['regions'][side_idx],
+                        layout_j['regions'][side_idx],
+                    )
+                    inner_len = max(0, inner_nd - inner_st)
+                    no_spanning_utg = False
+                    if (
+                        inner_len <= RECIPROCAL_FORBID_MAX_INTERVAL and
+                        not overlaps_censat(censat_intervals, chrom, inner_st, inner_nd)
+                    ):
+                        no_spanning_utg = len(find_strict_spanning_utgs(utg_spans, chrom, inner_st, inner_nd)) == 0
+                    side_records.append({
+                        'side_id': f'R{pair_id}.{side_idx}',
+                        'chrom': chrom,
+                        'inner_st': inner_st,
+                        'inner_nd': inner_nd,
+                        'path_drop_st': path_drop_st,
+                        'path_drop_nd': path_drop_nd,
+                        'no_spanning_utg': no_spanning_utg,
+                        'crossing_cols': [],
+                        'accepted_forbid': False,
+                    })
+
+                records.append({
+                    'pair_id': pair_id,
+                    'nclose_key_a': key_i,
+                    'nclose_key_b': key_j,
+                    'chrom_pair': chrom_pair,
+                    'layout_a': layout_i,
+                    'layout_b': layout_j,
+                    'side_records': side_records,
+                    'pair_protected_from_1M_drop': False,
+                })
+                pair_id += 1
+
+    return records
+
+def read_component_ref_intervals(prefix, key_int, cache):
+    if key_int in cache:
+        return cache[key_int]
+
+    by_chrom = defaultdict(list)
+    paf_path = f'{prefix}/21_pat_depth/{key_int}.paf'
+    if not os.path.isfile(paf_path):
+        cache[key_int] = by_chrom
+        return by_chrom
+
+    with open(paf_path, 'r') as f:
+        for line in f:
+            if not line.strip():
+                continue
+            fields = line.rstrip('\n').split('\t')
+            if len(fields) <= CHR_END:
+                continue
+            try:
+                st = int(fields[CHR_STR])
+                nd = int(fields[CHR_END])
+            except ValueError:
+                continue
+            if nd < st:
+                continue
+            by_chrom[fields[CHR_NAM]].append((st, nd))
+
+    cache[key_int] = by_chrom
+    return by_chrom
+
+def merge_ref_intervals(intervals):
+    if not intervals:
+        return []
+    intervals = sorted(intervals)
+    merged = [list(intervals[0])]
+    for st, nd in intervals[1:]:
+        if st <= merged[-1][1]:
+            if nd > merged[-1][1]:
+                merged[-1][1] = nd
+        else:
+            merged.append([st, nd])
+    return [tuple(x) for x in merged]
+
+def assign_reciprocal_crossing_path_cols(records, prefix, paf_sort_ans_list):
+    forbidden_by_chrom = defaultdict(list)
+    side_by_id = {}
+    for record in records:
+        for side in record['side_records']:
+            side_by_id[side['side_id']] = side
+            if side['no_spanning_utg']:
+                forbidden_by_chrom[side['chrom']].append(side)
+
+    if not forbidden_by_chrom:
+        return side_by_id
+
+    component_cache = {}
+    target_chroms = set(forbidden_by_chrom)
+    for col_idx, (_, key_int_list) in enumerate(paf_sort_ans_list):
+        col_intervals_by_chrom = defaultdict(list)
+        for key_int in key_int_list:
+            key_intervals = read_component_ref_intervals(prefix, key_int, component_cache)
+            for chrom in target_chroms:
+                col_intervals_by_chrom[chrom].extend(key_intervals.get(chrom, []))
+
+        for chrom, side_list in forbidden_by_chrom.items():
+            merged = merge_ref_intervals(col_intervals_by_chrom.get(chrom, []))
+            if not merged:
+                continue
+            for side in side_list:
+                path_drop_st = side['path_drop_st']
+                path_drop_nd = side['path_drop_nd']
+                if any(st < path_drop_st and path_drop_nd < nd for st, nd in merged):
+                    side['crossing_cols'].append(col_idx)
+
+    return side_by_id
+
+def get_chrom_acc_sum_max(chr_filt_st_list, predict_a, predict_b):
+    chrom_acc_sum_dict = defaultdict(float)
+    chrom_acc_sum_dict_max = defaultdict(float)
+    for i, (chrom, _) in enumerate(chr_filt_st_list):
+        chrom_acc_sum_dict[chrom] += predict_a[i] - predict_b[i]
+        if abs(chrom_acc_sum_dict[chrom]) > chrom_acc_sum_dict_max[chrom]:
+            chrom_acc_sum_dict_max[chrom] = abs(chrom_acc_sum_dict[chrom])
+    return chrom_acc_sum_dict_max
+
+def get_fail_chrom_list(chrom_acc_sum_dict_max, chrom_acc_sum_dict_max_base, no_chrY):
+    fail_chrom_list = []
+    for chrom, acc_sum_max in chrom_acc_sum_dict_max.items():
+        if chrom == 'chrY' and no_chrY:
+            continue
+        acc_sum_max_base = chrom_acc_sum_dict_max_base[chrom]
+        if acc_sum_max_base == 0:
+            chrom_error_rate = float('inf') if acc_sum_max > 0 else 0
+        else:
+            chrom_error_rate = acc_sum_max / acc_sum_max_base
+        if chrom_error_rate > CHROM_ERROR_FAIL_RATE:
+            fail_chrom_list.append(chrom)
+    return fail_chrom_list
+
+def write_reciprocal_translocation_report(prefix, records):
+    report_path = f'{prefix}/{RECIPROCAL_REPORT_NAME}'
+    columns = [
+        'pair_id', 'nclose_key_a', 'nclose_key_b',
+        'chrom', 'start', 'end', 'is_single_translocation',
+    ]
+
+    with open(report_path, 'w') as f:
+        f.write('\t'.join(columns) + '\n')
+        for record in records:
+            for side in record['side_records']:
+                row = [
+                    str(record['pair_id']),
+                    str(record['nclose_key_a']),
+                    str(record['nclose_key_b']),
+                    side['chrom'],
+                    str(side['inner_st']),
+                    str(side['inner_nd']),
+                    str(side['accepted_forbid']),
+                ]
+                f.write('\t'.join(row) + '\n')
+
+    return report_path
 
 def group_close_coordinates(data_list, distance_threshold=50 * K):
     """
@@ -172,7 +640,7 @@ def group_close_coordinates(data_list, distance_threshold=50 * K):
 
     return result
 
-def merge_regions_iteratively(df_cov, df_exclude,
+def merge_regions_iteratively(df_cov, censat_intervals,
                               target_chr, chr_cord_dict,
                               p_value):
     """
@@ -184,15 +652,14 @@ def merge_regions_iteratively(df_cov, df_exclude,
     
     # Filter dataframes for the specific chromosome to speed up operations
     df_cov_chr = df_cov[df_cov['chr'] == target_chr].copy()
-    df_excl_chr = df_exclude[df_exclude['chr'] == target_chr]
     
     # Filter out the excluded regions from the coverage data upfront
     # Bins that overlap with any excluded region are completely removed
-    for _, excl_row in df_excl_chr.iterrows():
-        df_cov_chr = df_cov_chr[
-            (df_cov_chr['nd'] <= excl_row['st']) | 
-            (df_cov_chr['st'] >= excl_row['nd'])
-        ]
+    keep_mask = [
+        not overlaps_censat(censat_intervals, target_chr, int(st), int(nd))
+        for st, nd in df_cov_chr[['st', 'nd']].itertuples(index=False, name=None)
+    ]
+    df_cov_chr = df_cov_chr[keep_mask]
         
     # Copy the split points to safely modify the active list during iteration
     active_splits = split_points.copy()
@@ -208,10 +675,9 @@ def merge_regions_iteratively(df_cov, df_exclude,
             
             # Check if the specific split point itself falls within any excluded region
             # Skip the merge process if the exact point is located inside an excluded area
-            is_split_point_excluded = (
-                (df_excl_chr['st'] <= current_split) & 
-                (df_excl_chr['nd'] >= current_split)
-            ).any()
+            is_split_point_excluded = overlaps_censat(
+                censat_intervals, target_chr, current_split, current_split + 1
+            )
             
             if is_split_point_excluded:
                 continue
@@ -254,61 +720,40 @@ def merge_regions_iteratively(df_cov, df_exclude,
             
     return active_splits, out_split_points
 
-def get_censet_count(cdf, c1, i1, c2, i2):
+def get_censet_count(censat_intervals, c1, i1, c2, i2):
     cnt = 0
     for chr_name, chr_cord in [(c1, i1), (c2, i2)]:
-        mask = (cdf['chr'] == chr_name) & (cdf['st'] <= chr_cord) & (cdf['nd'] >= chr_cord)
-        if mask.any():
+        if overlaps_censat(censat_intervals, chr_name, chr_cord, chr_cord + 1):
             cnt += 1
 
     return cnt
 
-def filter_nclose_by_test(contig_data, nclose_nodes, df, cdf):
-    type4_tot_loc_list = []
-    for bv_paf_loc in glob.glob(f'{RATIO_OUTLIER_FOLDER}/front_jump/*_base.paf'):
-        type4_tot_loc_list.append(bv_paf_loc)
+def filter_nclose_by_test(contig_data, nclose_nodes, df, censat_intervals,
+                          pre_drop_nclose_set=None, nclose_test_data=None):
+    if nclose_test_data is None:
+        nclose_test_data = collect_nclose_test_data(contig_data, nclose_nodes)
 
-    for bv_paf_loc in glob.glob(f'{RATIO_OUTLIER_FOLDER}/back_jump/*_base.paf'):
-        type4_tot_loc_list.append(bv_paf_loc)
-
-    type4_nclose_nodes = dict()
-    for paf_loc in type4_tot_loc_list:
-        event_type = paf_loc.split('/')[-2]
-        event_idx = int(paf_loc.split('/')[-1].split('_')[0])
-
-        type2_merge_paf_idx = -1
-        if not os.path.isfile(f'{RATIO_OUTLIER_FOLDER}/{event_type}/{event_idx}.paf'):
-            type2_merge_paf_loc = glob.glob(f'{RATIO_OUTLIER_FOLDER}/{event_type}/{event_idx}_type2_merge_*.paf')[0]
-            type2_merge_paf_idx = int(type2_merge_paf_loc.split('/')[-1].split('.')[0].split('_')[-1])
-
-        with open(paf_loc, "r") as f:
-            l = f.readline().rstrip().split("\t")
-            chr_nam1 = l[CHR_NAM]
-            chr_nam2 = l[CHR_NAM]
-            pos1 = int(l[CHR_STR])
-            pos2 = int(l[CHR_END])
-
-            type4_tag = normalize_path_nclose_tag((event_type, event_idx, type2_merge_paf_idx))
-            type4_nclose_nodes[type4_tag] = (chr_nam1, pos1, chr_nam2, pos2)
-
-    chr_cord_dict, ncloseidx2cord, ncloseidx2path_tag = get_chr_cord_data(contig_data, nclose_nodes, type4_nclose_nodes)
+    _, path_tag2cord, path_tag2nclose_key, path_tag2expected_high_side = nclose_test_data
+    chr_cord_dict = build_chr_cord_dict(path_tag2cord, path_tag2nclose_key, pre_drop_nclose_set)
 
     in_cnt = defaultdict(lambda : [0, 0])
+    nclose_key_side_out = defaultdict(lambda: [False, False])
     for chr_key in chr_cord_dict:
-        if chr_key in {'chr1', 'chr18'}:
-            t = 1
+        in_split, out_split = merge_regions_iteratively(
+            df, censat_intervals, chr_key, chr_cord_dict, p_value=FILTER_P_VALUE
+        )
 
-        in_split, out_split = merge_regions_iteratively(df, cdf, chr_key, chr_cord_dict, p_value=FILTER_P_VALUE)
+        for ctg_idx, nclose_side_list in in_split:
+            for path_tag, side_idx in nclose_side_list:
+                in_cnt[path_tag][0] += 1
 
-        for ctg_idx, nclose_idx_list in in_split:
-            for nclose_idx in nclose_idx_list:
-                in_cnt[nclose_idx][0] += 1
+        for ctg_idx, nclose_side_list in out_split:
+            for path_tag, side_idx in nclose_side_list:
+                in_cnt[path_tag][1] += 1
+                nclose_key = path_tag2nclose_key[path_tag]
+                nclose_key_side_out[nclose_key][side_idx] = True
 
-        for ctg_idx, nclose_idx_list in out_split:
-            for nclose_idx in nclose_idx_list:
-                in_cnt[nclose_idx][1] += 1
-
-    return in_cnt, ncloseidx2cord, ncloseidx2path_tag
+    return in_cnt, path_tag2cord, path_tag2nclose_key, nclose_key_side_out, path_tag2expected_high_side
 
 def _group_consecutive(sorted_idx_list):
     """
@@ -358,6 +803,27 @@ def read_selected_columns_direct(dA, A, A_idx_list):
 
         dest_col += ncols
 
+
+def fit_nnls_warm(nnls, X, y, warm_start=None):
+    if warm_start is None:
+        nnls.coef_ = None
+    else:
+        warm_start = np.asarray(warm_start, dtype=X.dtype)
+        if warm_start.shape != (X.shape[1],):
+            raise ValueError(
+                f"warm_start has shape {warm_start.shape}, expected {(X.shape[1],)}"
+            )
+        nnls.coef_ = np.maximum(warm_start, 0).copy(order='F')
+
+    nnls.fit(X, y)
+    return nnls.coef_
+
+
+def scatter_subset_weights(weights, A_idx_list, n_features, dtype=None):
+    out = np.zeros(n_features, dtype=dtype or weights.dtype)
+    out[A_idx_list] = weights
+    return out
+
 warnings.simplefilter(action='ignore', category=FutureWarning)
 
 # logging 설정(레벨/포맷)은 skype_utils 에서 중앙 관리한다 (LOG_LEVEL).
@@ -374,18 +840,23 @@ parser.add_argument("main_stat_path", help="Path to the main depth statistics fi
 parser.add_argument("censat_bed_path", 
                     help="Path to the censat repeat information file.")
 
+parser.add_argument("paf_utg_path",
+                    help="Path to the raw unitig PAF file.")
+
 parser.add_argument("-t", "--thread", help="Number of threads", type=int)
 
-# args = parser.parse_args()
+args = parser.parse_args()
 
-t = "23_run_nnls.py /Data/hyunwoo/00_skype_run_data/HG008-T/20_alignasm/HG008-T.ctg.aln.paf.ppc.paf /Data/hyunwoo/00_skype_run_data/HG008-T/30_skype /Data/hyunwoo/00_skype_run_data/HG008-T/01_depth/HG008-T_normalized.win.stat.gz /hyunwoo/63_skype_test/deps/SKYPE/public_data/chm13v2.0_censat_v2.1.m.bed -t 72"
-args = parser.parse_args(t.split()[1:])
+# t = "23_run_nnls.py /Data/hyunwoo/00_skype_run_data/HG008-T/20_alignasm/HG008-T.ctg.aln.paf.ppc.paf /hyunwoo/63_skype_test/skype/HG008-T_18_08_06 /Data/hyunwoo/00_skype_run_data/HG008-T/01_depth/HG008-T_normalized.win.stat.gz /hyunwoo/63_skype_test/deps/SKYPE/public_data/chm13v2.0_censat_v2.1.m.bed -t 72"
+# t = "23_run_nnls.py /Data/hyunwoo/00_skype_run_data/COLO829/20_alignasm/COLO829.ctg.aln.paf.ppc.paf /hyunwoo/63_skype_test/skype/COLO829_15_06_54 /Data/hyunwoo/00_skype_run_data/COLO829/01_depth/COLO829_normalized.win.stat.gz /hyunwoo/63_skype_test/deps/SKYPE/public_data/chm13v2.0_censat_v2.1.m.bed -t 16"
+# args = parser.parse_args(t.split()[1:])
 
 PREPROCESSED_PAF_FILE_PATH = args.ppc_paf_file_path
 PREFIX = args.prefix
 main_stat_loc = args.main_stat_path
 THREAD = args.thread
 CENSAT_PATH = args.censat_bed_path
+PAF_UTG_LOC = args.paf_utg_path
 
 RATIO_OUTLIER_FOLDER = f"{PREFIX}/11_ref_ratio_outliers/"
 
@@ -406,14 +877,22 @@ contig_data = import_ppc_contig_data(PREPROCESSED_PAF_FILE_PATH)
 with open(f'{PREFIX}/nclose_chunk_data.pkl', 'rb') as f:
     nclose_nodes, _, _ = pkl.load(f)
 
+with open(f'{PREFIX}/cen_fragment_data.pkl', 'rb') as f:
+    cen_fragment_meta = pkl.load(f)
+
 df = pd.read_csv(main_stat_loc, compression='gzip', comment='#', sep='\t', names=['chr', 'st', 'nd', 'length', 'covsite', 'totaldepth', 'cov', 'meandepth'])
 df = df.query('chr != "chrM"')
+meandepth = np.median(df['meandepth'])
+N = meandepth / 2
 
 cdf = pd.read_csv(CENSAT_PATH, sep='\t', names=['chr', 'st', 'nd'])
 
 with open(f'{PREFIX}/23_input.pkl', 'rb') as f:
     chr_filt_st_list, path_nclose_set_dict, amplitude, bed_data = pkl.load(f)
-path_nclose_set_dict = normalize_path_nclose_set_dict(path_nclose_set_dict)
+# path_nclose_set_dict is keyed by matrix column index. Values are canonical event tags:
+# ordinary nclose: (left_contig_idx, right_contig_idx), sorted tuple of ints
+# type4/ecdna: (event_type, event_idx, type2_merge_idx)
+# cent_fragment: ('cent_fragment', chrom, direction_bool)
 
 ydf = df.query('chr == "chrY"')
 
@@ -447,47 +926,177 @@ with h5py.File(f"{PREFIX}/matrix.h5", "r") as f:
 nnls = GeneralizedLinearEstimator(
     datafit=Quadratic(),
     penalty=PositiveConstraint(),
-    solver=AndersonCD(fit_intercept=False)
+    solver=AndersonCD(fit_intercept=False, warm_start=True)
 )
 
-nnls.fit(A, B)
-weights_fullsize = nnls.coef_
+weights_fullsize = fit_nnls_warm(nnls, A, B)
 predict_suc_B_base = A.dot(weights_fullsize)
 
-chrom_acc_sum_dict_base = defaultdict(int)
-chrom_acc_sum_dict_max_base = defaultdict(int)
-for i, (chrom, st) in enumerate(chr_filt_st_list):
-    chrom_acc_sum_dict_base[chrom] += predict_suc_B_base[i] - B[i]
-    if abs(chrom_acc_sum_dict_base[chrom]) > chrom_acc_sum_dict_max_base[chrom]:
-        chrom_acc_sum_dict_max_base[chrom] = abs(chrom_acc_sum_dict_base[chrom])
+with open(f'{PREFIX}/path_data.pkl', 'rb') as f:
+    path_list_dict = pkl.load(f)
+with open(f'{PREFIX}/contig_pat_vec_data.pkl', 'rb') as f:
+    paf_sort_ans_list, _, _, _ = pkl.load(f)
+
+rpll = len(paf_sort_ans_list)
+assert len(weights_fullsize) >= rpll
+
+nclose_test_data = collect_nclose_test_data(contig_data, nclose_nodes)
+_, base_path_tag2cord, base_path_tag2nclose_key, base_path_tag2expected_high_side = nclose_test_data
+base_candidate_nclose_keys = set(base_path_tag2nclose_key.values())
+base_ordinary_candidate_nclose_keys = {
+    nclose_key for nclose_key in base_candidate_nclose_keys
+    if len(nclose_key) == 2
+}
+base_type4_candidate_nclose_keys = {
+    nclose_key for nclose_key in base_candidate_nclose_keys
+    if len(nclose_key) == 3
+}
+path_nclose_count = build_path_nclose_count(
+    len(weights_fullsize), base_ordinary_candidate_nclose_keys, base_type4_candidate_nclose_keys,
+    path_nclose_set_dict, path_list_dict, paf_sort_ans_list
+)
+
+base_nclose_depth = calculate_nclose_depth(path_nclose_count, weights_fullsize)
+chrom_acc_sum_dict_max_base = get_chrom_acc_sum_max(chr_filt_st_list, predict_suc_B_base, B)
+
+utg_spans = load_utg_spans(PAF_UTG_LOC)
+censat_intervals = build_censat_interval_dict(cdf)
+reciprocal_records = build_reciprocal_no_span_records(
+    contig_data,
+    base_path_tag2cord,
+    base_path_tag2nclose_key,
+    base_path_tag2expected_high_side,
+    utg_spans,
+    censat_intervals,
+)
+reciprocal_side_by_id = assign_reciprocal_crossing_path_cols(
+    reciprocal_records, PREFIX, paf_sort_ans_list
+)
+
+active_reciprocal_side_ids = {
+    side_id for side_id, side in reciprocal_side_by_id.items()
+    if side['no_spanning_utg']
+}
+reciprocal_path_drop_cols = set()
+reciprocal_retry_iter = 0
+while active_reciprocal_side_ids:
+    reciprocal_retry_iter += 1
+    next_drop_cols = set()
+    for side_id in active_reciprocal_side_ids:
+        next_drop_cols.update(reciprocal_side_by_id[side_id]['crossing_cols'])
+
+    A_idx_test = [
+        col_idx for col_idx in range(len(weights_fullsize))
+        if col_idx not in next_drop_cols
+    ]
+    if not A_idx_test:
+        active_reciprocal_side_ids = set()
+        reciprocal_path_drop_cols = set()
+        break
+
+    with h5py.File(f"{PREFIX}/matrix.h5", "r") as f:
+        dA = f["A"]
+        read_selected_columns_direct(dA, A, A_idx_test)
+
+    A_test = A[:, :len(A_idx_test)]
+    reciprocal_weights = fit_nnls_warm(
+        nnls, A_test, B, warm_start=weights_fullsize[A_idx_test]
+    )
+    reciprocal_predict_suc_B = A_test.dot(reciprocal_weights)
+
+    chrom_acc_sum_dict_max = get_chrom_acc_sum_max(
+        chr_filt_st_list, reciprocal_predict_suc_B, predict_suc_B_base
+    )
+    reciprocal_fail_chrom_list = get_fail_chrom_list(
+        chrom_acc_sum_dict_max, chrom_acc_sum_dict_max_base, no_chrY
+    )
+    if not reciprocal_fail_chrom_list:
+        reciprocal_path_drop_cols = next_drop_cols
+        break
+
+    fail_chrom_set = set(reciprocal_fail_chrom_list)
+    remove_side_ids = {
+        side_id for side_id in active_reciprocal_side_ids
+        if reciprocal_side_by_id[side_id]['chrom'] in fail_chrom_set
+    }
+    if not remove_side_ids:
+        logging.warning(
+            'Reciprocal translocation retry failed on chromosomes without matching '
+            f'candidate intervals: {",".join(sorted(fail_chrom_set))}'
+        )
+        active_reciprocal_side_ids = set()
+        reciprocal_path_drop_cols = set()
+        break
+
+    active_reciprocal_side_ids -= remove_side_ids
+    reciprocal_path_drop_cols = set()
+
+for side_id in active_reciprocal_side_ids:
+    reciprocal_side_by_id[side_id]['accepted_forbid'] = True
+
+reciprocal_transloc_nclose_set = set()
+for record in reciprocal_records:
+    if any(side['accepted_forbid'] for side in record['side_records']):
+        record['pair_protected_from_1M_drop'] = True
+        reciprocal_transloc_nclose_set.add(record['nclose_key_a'])
+        reciprocal_transloc_nclose_set.add(record['nclose_key_b'])
+
+reciprocal_report_path = write_reciprocal_translocation_report(PREFIX, reciprocal_records)
+logging.info(
+    f'Reciprocal translocation no-span candidates : {len(active_reciprocal_side_ids)}'
+)
+
+opposite_dir_depth_drop_set, opposite_dir_depth_pair_count = find_opposite_direction_depth_drop(
+    base_path_tag2cord, base_path_tag2nclose_key, base_path_tag2expected_high_side,
+    base_nclose_depth, max_depth_diff=0.1 * N
+)
+opposite_dir_depth_drop_set -= reciprocal_transloc_nclose_set
+logging.info(
+    f'Opposite-direction depth prefilter nclose count : {len(opposite_dir_depth_drop_set)} '
+    f'(protected reciprocal nclose count: {len(reciprocal_transloc_nclose_set)})'
+)
 
 # Loop start
 prev_fail_chrom_list = None
 fail_chrom_list = []
+nclose_filter_warm_fullsize = weights_fullsize.copy()
+
+in_cnt, path_tag2cord, path_tag2nclose_key, nclose_key_side_out, path_tag2expected_high_side = \
+    filter_nclose_by_test(
+        contig_data, nclose_nodes, df, censat_intervals,
+        pre_drop_nclose_set=opposite_dir_depth_drop_set,
+        nclose_test_data=nclose_test_data
+    )
 
 while True:
-    in_cnt, ncloseidx2cord, ncloseidx2path_tag = filter_nclose_by_test(contig_data, nclose_nodes, df, cdf)
+    not_using_nclose_set = set(opposite_dir_depth_drop_set)
+    hyp_test_nclose_set = set()
 
-    not_using_nclose_set = set()
+    for path_tag, nclose_cnt in in_cnt.items():
+        (c1, i1), (c2, i2) = path_tag2cord[path_tag]
+        nclose_key = path_tag2nclose_key[path_tag]
+        
+        if nclose_key in reciprocal_transloc_nclose_set:
+            continue
 
-    for nclose_key, nclose_cnt in in_cnt.items():
-        if nclose_key == ('utg008527l', 0):
-            q = 1
-        (c1, i1), (c2, i2) = ncloseidx2cord[nclose_key]
-        censat_count = get_censet_count(cdf, c1, i1, c2, i2)
+        censat_count = get_censet_count(censat_intervals, c1, i1, c2, i2)
         if (not (censat_count == 2 or nclose_cnt[0] - censat_count >= 1) and
             c1 not in fail_chrom_list and c2 not in fail_chrom_list):
-            not_using_nclose_set.add(ncloseidx2path_tag[nclose_key])
+            hyp_test_nclose_set.add(nclose_key)
+
+    not_using_nclose_set |= hyp_test_nclose_set
 
     fail_chrom_text = ','.join(fail_chrom_list) if fail_chrom_list else 'none'
-    logging.info(f'Hyp. test filtering nclose count : {len(not_using_nclose_set)} (fail chroms: {fail_chrom_text})')
+    logging.info(f'Hyp. test filtering nclose count : {len(hyp_test_nclose_set)} (fail chroms: {fail_chrom_text})')
     logging.debug(
         f'Hyp. test filtering nclose breakdown : '
-        f'{dict(Counter("ordinary" if len(tag) == 2 else tag[0] for tag in not_using_nclose_set))}'
+        f'{dict(Counter("ordinary" if len(tag) == 2 else tag[0] for tag in hyp_test_nclose_set))}'
     )
 
     A_idx_list = []
     for k, path_nclose_list in path_nclose_set_dict.items():
+        if k in reciprocal_path_drop_cols:
+            continue
         if not path_nclose_list or len(not_using_nclose_set & set(path_nclose_list)) == 0:
             A_idx_list.append(k)
 
@@ -503,27 +1112,22 @@ while True:
     A_new = A[:, :len(A_idx_list)]
     A_fail_new = A_fail[:, :len(A_idx_list)]
 
-    nnls.fit(A_new, B)
-    filter_weights = nnls.coef_
+    filter_weights = fit_nnls_warm(
+        nnls, A_new, B, warm_start=nclose_filter_warm_fullsize[A_idx_list]
+    )
+    nclose_filter_warm_fullsize = scatter_subset_weights(
+        filter_weights, A_idx_list, len(weights_fullsize), dtype=weights_fullsize.dtype
+    )
 
     predict_suc_B = A_new.dot(filter_weights)
     predict_fal_B = A_fail_new.dot(filter_weights)
 
-    chrom_acc_sum_dict = defaultdict(int)
-    chrom_acc_sum_dict_max = defaultdict(int)
-    for i, (chrom, st) in enumerate(chr_filt_st_list):
-        chrom_acc_sum_dict[chrom] += predict_suc_B[i] - predict_suc_B_base[i]
-        if abs(chrom_acc_sum_dict[chrom]) > chrom_acc_sum_dict_max[chrom]:
-            chrom_acc_sum_dict_max[chrom] = abs(chrom_acc_sum_dict[chrom])
-
-    new_fail_chrom_list = []
-    for chrom, acc_sum_max in chrom_acc_sum_dict_max.items():
-        if chrom == 'chrY' and no_chrY:
-            continue
-        acc_sum_max_base = chrom_acc_sum_dict_max_base[chrom]
-        chrom_error_rate = acc_sum_max / acc_sum_max_base
-        if chrom_error_rate > CHROM_ERROR_FAIL_RATE:
-            new_fail_chrom_list.append(chrom)
+    chrom_acc_sum_dict_max = get_chrom_acc_sum_max(
+        chr_filt_st_list, predict_suc_B, predict_suc_B_base
+    )
+    new_fail_chrom_list = get_fail_chrom_list(
+        chrom_acc_sum_dict_max, chrom_acc_sum_dict_max_base, no_chrY
+    )
 
     # 새로 발견된 fail chrom을 누적
     fail_chrom_list = sorted(set(fail_chrom_list + new_fail_chrom_list))
@@ -538,6 +1142,9 @@ while True:
 # nclose 필터링 직후를 fail 기준점(고정 baseline)으로 잡고, weight 작은 cent_fragment
 # 컬럼부터 누적 제거 시도. PASS 시 컬럼 누적 제거(=offset 누적)되며, fail 비교 대상
 # baseline 은 항상 nclose 필터링 직후로 고정 — 누적 drift 도 base 대비 한도 안이면 OK.
+CF_GREEDY_MIN_WEIGHT_N = 0.1
+CF_GREEDY_MIN_WEIGHT = CF_GREEDY_MIN_WEIGHT_N * N
+
 cent_fragment_col2chrom = {}
 for k, tags in path_nclose_set_dict.items():
     for tag in tags:
@@ -564,14 +1171,21 @@ predict_suc_B_curr = predict_suc_B.copy()
 predict_fal_B_curr = predict_fal_B.copy()
 filter_weights_curr = filter_weights.copy()
 
-logging.info(f'CF greedy start: pool={len(cent_fragment_col2chrom)} cent_fragment cols')
+logging.info(
+    f'CF greedy start: pool={len(cent_fragment_col2chrom)} cent_fragment cols '
+    f'(candidate weight >= {CF_GREEDY_MIN_WEIGHT_N}N)'
+)
 
 removed_cf = []
 while True:
-    break
     pos_of = {col: i for i, col in enumerate(A_idx_list_curr)}
-    pool = [(filter_weights_curr[pos_of[col]], col, chrom)
-            for col, chrom in cent_fragment_col2chrom.items() if col in pos_of]
+    pool = []
+    for col, chrom in cent_fragment_col2chrom.items():
+        if col not in pos_of:
+            continue
+        w = filter_weights_curr[pos_of[col]]
+        if w >= CF_GREEDY_MIN_WEIGHT:
+            pool.append((w, col, chrom))
     if not pool:
         break
     pool.sort(key=lambda x: x[0])
@@ -586,8 +1200,13 @@ while True:
         A_test = A[:, :len(A_idx_test)]
         A_fail_test = A_fail[:, :len(A_idx_test)]
 
-        nnls.fit(A_test, B)
-        weights_test = nnls.coef_
+        cf_warm_fullsize = scatter_subset_weights(
+            filter_weights_curr, A_idx_list_curr, len(weights_fullsize),
+            dtype=weights_fullsize.dtype
+        )
+        weights_test = fit_nnls_warm(
+            nnls, A_test, B, warm_start=cf_warm_fullsize[A_idx_test]
+        )
         predict_suc_B_test = A_test.dot(weights_test)
         predict_fal_B_test = A_fail_test.dot(weights_test)
 
@@ -626,7 +1245,8 @@ while True:
     if not progressed:
         break
 
-logging.info(f'CF greedy done. Removed {len(removed_cf)} cols: {removed_cf}')
+if removed_cf:
+    logging.info(f'CF greedy result chromosomes: {", ".join(chrom for _, chrom in removed_cf)}')
 
 A_idx_list = A_idx_list_curr
 filter_weights = filter_weights_curr
@@ -634,129 +1254,146 @@ predict_suc_B = predict_suc_B_curr
 predict_fal_B = predict_fal_B_curr
 
 # === BP step / depth ratio 기반 nclose 추가 필터링 ===
-# predict_suc_B와 B 각각에서, 정상 nclose (type 4 제외) 의 두 BP 점 양옆 ±500kb
-# 절대 step 을 (그 nclose 의 count*weight 합) 으로 나눈 ratio 가 모두 10% 미만이면 drop set에 추가.
+# predict_suc_B와 B 각각에서, ordinary nclose와 type4 indel의 두 BP 점 양옆 ±500kb를 확인.
+# ordinary nclose 는 side/방향에서, type4 는 front_jump(del)/back_jump(ins)에서
+# 예상되는 high-depth 쪽까지 확인한다.
+# 각 side가 hyp-test out_split이거나 BP step/depth ratio 기준을 통과하고, 양쪽 side가 모두 통과하면 drop set에 추가.
 # 최종 제거 대상은 predict_suc_B 기반 drop set과 B 기반 drop set의 union.
-# BP 가 censat 영역에 있거나 ±500kb window 못 만들면 false 처리 (=제거 안 함).
+# BP 가 censat 영역이면 cen_fragment_meta 방향으로 판정하고, 방향 정보가 없거나
+# ±500kb window 못 만들면 BP 기준은 false 처리 (=hyp-test out_split만 반영).
 # cent_fragment greedy off-test 가 끝나 weight 가 정리된 상태에서 적용 (cent_fragment 의 잔여 영향 배제).
-BP_STEP_WIN = 500 * K
-BP_STEP_RATIO_THRESHOLD = 0.25
+STEP_WIN = 500 * K
+STEP_RATIO_THRESHOLD = 0.25
 
-with open(f'{PREFIX}/path_data.pkl', 'rb') as f:
-    bp_path_list_dict = pkl.load(f)
-with open(f'{PREFIX}/contig_pat_vec_data.pkl', 'rb') as f:
-    bp_paf_sort_ans_list, _, _, _ = pkl.load(f)
-
-bp_nclose_set = set()
-for ctg, pairs in nclose_nodes.items():
-    for pair in pairs:
-        bp_nclose_set.add(tuple(pair))
-
-# 각 path column 의 nclose 사용 Counter (31번 path_nclose_usage 와 동일)
-bp_path_nclose_count = []
-for col_idx in range(len(bp_paf_sort_ans_list)):
-    paf_loc = bp_paf_sort_ans_list[col_idx][0]
-    key = paf_loc.split('/')[-2]
-    cnt = int(paf_loc.split('/')[-1].split('.')[0]) - 1
-    idx_path = bp_path_list_dict[key][cnt][0]
-    ctr = Counter()
-    s = 1
-    while s < len(idx_path) - 2:
-        cand = tuple(sorted([idx_path[s][1], idx_path[s+1][1]]))
-        if cand in bp_nclose_set:
-            ctr[cand] += 1
-            s += 2
-        else:
-            s += 1
-    bp_path_nclose_count.append(ctr)
+candidate_nclose_keys = set(path_tag2nclose_key.values())
+ordinary_candidate_nclose_keys = {nclose_key for nclose_key in candidate_nclose_keys if len(nclose_key) == 2}
+type4_candidate_nclose_keys = {nclose_key for nclose_key in candidate_nclose_keys if len(nclose_key) == 3}
 
 # 각 nclose 의 두 BP (chr, cord)
-bp_nclose_cords = {}
-for ctg, pairs in nclose_nodes.items():
-    for pair in pairs:
-        bp_nclose_cords[tuple(pair)] = [get_contig_pair(i, contig_data[idx]) for i, idx in enumerate(pair)]
+nclose_cords = {}
+nclose_expected_high_side = {}
+for path_tag, cords in path_tag2cord.items():
+    nclose_key = path_tag2nclose_key[path_tag]
+    if nclose_key in candidate_nclose_keys:
+        nclose_cords[nclose_key] = cords
+        nclose_expected_high_side[nclose_key] = path_tag2expected_high_side.get(path_tag, [None, None])
 
 # 현재 filter_weights 를 전체 column 길이로 unfold
-bp_weight_full = np.zeros(len(bp_paf_sort_ans_list), dtype=np.float64)
-for j, col in enumerate(A_idx_list):
-    if col < len(bp_paf_sort_ans_list):
-        bp_weight_full[col] = filter_weights[j]
+cf_weight_fullsize = np.zeros_like(weights_fullsize)
+cf_weight_fullsize[A_idx_list] = filter_weights
 
 # nclose 별 depth = Σ (count × weight)
-bp_nclose_depth = defaultdict(float)
-for col_idx, ctr in enumerate(bp_path_nclose_count):
-    for nc, v in ctr.items():
-        bp_nclose_depth[nc] += v * bp_weight_full[col_idx]
+cf_nclose_depth = calculate_nclose_depth(path_nclose_count, cf_weight_fullsize)
 
 # chr -> sorted [(bin_idx, st), ...]
-bp_chr_to_bins = defaultdict(list)
+chr_to_bins = defaultdict(list)
 for i, (chrom, st) in enumerate(chr_filt_st_list):
-    bp_chr_to_bins[chrom].append((i, st))
-for chrom in bp_chr_to_bins:
-    bp_chr_to_bins[chrom].sort(key=lambda x: x[1])
+    chr_to_bins[chrom].append((i, st))
+for chrom in chr_to_bins:
+    chr_to_bins[chrom].sort(key=lambda x: x[1])
 
-def bp_in_censat(chrom, cord):
-    mask = (cdf['chr'] == chrom) & (cdf['st'] <= cord) & (cdf['nd'] >= cord)
-    return bool(mask.any())
+def in_censat(chrom, cord):
+    return overlaps_censat(censat_intervals, chrom, cord, cord + 1)
 
-def bp_signal_passes_ratio(signal_B, left_bins, right_bins, depth_val):
+def censat_expected_high_side(chrom, cord):
+    if not in_censat(chrom, cord):
+        return None
+    info = cen_fragment_meta.get(chrom)
+    if info is None:
+        return None
+    return 'right' if info['dir'] else 'left'
+
+def censat_is_droppable_by_ratio(chrom, cord, depth_val, expected_high_side):
+    if expected_high_side is None:
+        return False
+    actual_high_side = censat_expected_high_side(chrom, cord)
+    if actual_high_side is None:
+        return False
+    depth_diff = cen_fragment_meta[chrom]['depth_diff']
+    step = depth_diff if expected_high_side == actual_high_side else -depth_diff
+    return (step / depth_val) < STEP_RATIO_THRESHOLD
+
+def signal_is_droppable_by_ratio(signal_B, left_bins, right_bins, depth_val, expected_high_side=None):
     left_rows = [b_start_ind + i for i in left_bins]
     right_rows = [b_start_ind + i for i in right_bins]
-    step_abs = abs(signal_B[right_rows].mean() - signal_B[left_rows].mean())
-    return (step_abs / depth_val) < BP_STEP_RATIO_THRESHOLD
+    left_mean = signal_B[left_rows].mean()
+    right_mean = signal_B[right_rows].mean()
+    if expected_high_side == 'left':
+        step = left_mean - right_mean
+    elif expected_high_side == 'right':
+        step = right_mean - left_mean
+    else:
+        step = abs(right_mean - left_mean)
+    return (step / depth_val) < STEP_RATIO_THRESHOLD
 
-def bp_passes_ratio(chrom, bp, depth_val, signal_B):
-    if bp_in_censat(chrom, bp):
-        return False
-    bins = bp_chr_to_bins.get(chrom, [])
-    left = [i for i, st in bins if bp - BP_STEP_WIN <= st < bp]
-    right = [i for i, st in bins if bp <= st < bp + BP_STEP_WIN]
+def side_passes_ratio(chrom, cord, depth_val, signal_B, expected_high_side=None):
+    if in_censat(chrom, cord):
+        return censat_is_droppable_by_ratio(chrom, cord, depth_val, expected_high_side)
+
+    bins = chr_to_bins.get(chrom, [])
+    left = [i for i, st in bins if cord - STEP_WIN <= st < cord]
+    right = [i for i, st in bins if cord <= st < cord + STEP_WIN]
     if not left or not right:
         return False
-    return bp_signal_passes_ratio(signal_B, left, right, depth_val)
+    return signal_is_droppable_by_ratio(signal_B, left, right, depth_val, expected_high_side)
 
-def bp_find_nclose_to_drop(signal_B):
+def side_is_droppable(nclose_key, side_idx, chrom, cord, depth_val, signal_B, expected_high_side=None):
+    ttest_out = nclose_key_side_out[nclose_key][side_idx]
+    return ttest_out or side_passes_ratio(chrom, cord, depth_val, signal_B, expected_high_side)
+
+def find_nclose_to_drop(signal_B, nclose_depth):
     nclose_to_drop = set()
-    for nc, cords in bp_nclose_cords.items():
-        if nc == (1921, 1922):
-            t = 1
-        depth = bp_nclose_depth.get(nc, 0.0)
+    for nclose_key, cords in nclose_cords.items():
+        if nclose_key in reciprocal_transloc_nclose_set:
+            continue
+        
+        depth = nclose_depth.get(nclose_key, 0.0)
         if depth < 1e-6:
             continue
-        if all(bp_passes_ratio(chrom, pos, depth, signal_B) for chrom, pos in cords):
-            nclose_to_drop.add(nc)
+        expected_high_side = nclose_expected_high_side.get(nclose_key, [None] * len(cords))
+        if all(
+            side_is_droppable(
+                nclose_key, side_idx, chrom, pos, depth, signal_B,
+                expected_high_side[side_idx] if side_idx < len(expected_high_side) else None
+            )
+            for side_idx, (chrom, pos) in enumerate(cords)
+        ):
+            nclose_to_drop.add(nclose_key)
     return nclose_to_drop
 
-bp_nclose_to_drop_predict = bp_find_nclose_to_drop(predict_suc_B)
-bp_nclose_to_drop_observed = bp_find_nclose_to_drop(B)
-bp_nclose_to_drop = bp_nclose_to_drop_predict | bp_nclose_to_drop_observed
+nclose_to_drop_predict = find_nclose_to_drop(predict_suc_B, cf_nclose_depth)
+nclose_to_drop_observed = find_nclose_to_drop(B, cf_nclose_depth)
+nclose_to_drop = nclose_to_drop_predict | nclose_to_drop_observed
 
 logging.info(
-    f'BP step/depth filter : nclose to remove = {len(bp_nclose_to_drop)} '
-    f'(predict={len(bp_nclose_to_drop_predict)}, observed={len(bp_nclose_to_drop_observed)})'
+    f'BP step/depth filter : nclose to remove = {len(nclose_to_drop)} '
+    f'(Source: predict={len(nclose_to_drop_predict)}, depth={len(nclose_to_drop_observed)})'
 )
 
-bp_drop_cols = set()
-for col_idx, ctr in enumerate(bp_path_nclose_count):
-    if any(nc in bp_nclose_to_drop for nc in ctr):
-        bp_drop_cols.add(col_idx)
+drop_cols = set()
+for col_idx, ctr in enumerate(path_nclose_count):
+    if any(nc in nclose_to_drop for nc in ctr):
+        drop_cols.add(col_idx)
 
-if bp_drop_cols:
-    bp_new_A_idx_list = sorted(c for c in A_idx_list if c not in bp_drop_cols)
+if drop_cols:
+    new_A_idx_list = sorted(c for c in A_idx_list if c not in drop_cols)
     with h5py.File(f"{PREFIX}/matrix.h5", "r") as f:
         dA = f["A"]
         dAf = f["A_fail"]
-        read_selected_columns_direct(dA, A, bp_new_A_idx_list)
-        read_selected_columns_direct(dAf, A_fail, bp_new_A_idx_list)
+        read_selected_columns_direct(dA, A, new_A_idx_list)
+        read_selected_columns_direct(dAf, A_fail, new_A_idx_list)
     
-    A_new = A[:, :len(bp_new_A_idx_list)]
-    A_fail_new = A_fail[:, :len(bp_new_A_idx_list)]
-    nnls.fit(A_new, B)
-    filter_weights = nnls.coef_
+    A_new = A[:, :len(new_A_idx_list)]
+    A_fail_new = A_fail[:, :len(new_A_idx_list)]
+    bp_warm_fullsize = scatter_subset_weights(
+        filter_weights, A_idx_list, len(weights_fullsize), dtype=weights_fullsize.dtype
+    )
+    filter_weights = fit_nnls_warm(
+        nnls, A_new, B, warm_start=bp_warm_fullsize[new_A_idx_list]
+    )
     predict_suc_B = A_new.dot(filter_weights)
     predict_fal_B = A_fail_new.dot(filter_weights)
-    A_idx_list = bp_new_A_idx_list
-    logging.info(f'BP step/depth filter : columns kept {len(A_idx_list)} after refit')
+    A_idx_list = new_A_idx_list
 else:
     logging.info('BP step/depth filter : no nclose removed, skip refit')
 

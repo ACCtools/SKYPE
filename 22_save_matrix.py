@@ -715,6 +715,10 @@ tmp_v = np.zeros(m, dtype=np.float32)
 
 tar_def_path_ind_dict = {}
 ncnt = 0
+# Matrix column index -> canonical event tags.
+# ordinary nclose: (left_contig_idx, right_contig_idx), sorted tuple of ints
+# type4/ecdna: (event_type, event_idx, type2_merge_idx)
+# cent_fragment: ('cent_fragment', chrom, direction_bool)
 path_nclose_dict_set = defaultdict(set)
 for path, key_int_list in tqdm(paf_ans_list, desc='Recover depth from separated paths',
                                     disable=not sys.stdout.isatty() and not args.progress):
