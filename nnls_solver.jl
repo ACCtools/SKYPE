@@ -832,13 +832,13 @@ end
 
 function load_nnls_array(filename::String)
     h5open(filename, "r") do file
-        return get_transpose_matrix(file["A"]), read(file["B"]), read(file["B_depth_start"])
+        return read(file["A"]), read(file["B"]), read(file["B_depth_start"])
     end
 end
 
 function load_fail_array(filename::String)
     h5open(filename, "r") do file
-        return get_transpose_matrix(file["A_fail"])
+        return read(file["A_fail"])
     end
 end
 

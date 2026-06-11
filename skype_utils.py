@@ -9,6 +9,7 @@ logging.basicConfig(
     format='%(asctime)s %(levelname)s:%(message)s',
     level=LOG_LEVEL,
     datefmt='%m/%d/%Y %I:%M:%S %p',
+    force=True
 )
 
 K = 1000

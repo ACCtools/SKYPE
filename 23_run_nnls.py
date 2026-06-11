@@ -2,8 +2,6 @@ import os
 import sys
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-from skype_utils import *
-
 import h5py
 import glob
 import psutil
@@ -15,15 +13,15 @@ import pickle as pkl
 import numpy as np
 import pandas as pd
 
+from types import SimpleNamespace
 from collections import defaultdict, Counter
 from scipy.stats import mannwhitneyu, ttest_ind
 
-from skglm import GeneralizedLinearEstimator
-from skglm.datafits import Quadratic
-from skglm.penalties import PositiveConstraint
-from skglm.solvers import AndersonCD
+from adelie.solver import bvls
 
 from h5py._hl import selections as sel
+
+from skype_utils import *
 
 CTG_NAM = 0
 CTG_LEN = 1
@@ -51,6 +49,8 @@ CTG_GLOBALIDX = 21
 FILTER_P_VALUE = 0.01
 
 CHROM_ERROR_FAIL_RATE = 2.0
+
+TOL_KKT = 1e-4
 
 RECIPROCAL_PAIR_DISTANCE = 10 * K
 RECIPROCAL_FORBID_MAX_INTERVAL = 10 * K
@@ -777,54 +777,82 @@ def _group_consecutive(sorted_idx_list):
     return ranges
 
 
-def read_selected_columns_direct(dA, A, A_idx_list):
+def read_selected_feature_rows_direct(dA, A_store, A_idx_list):
     """
-    Read specific columns from an HDF5 dataset directly into a slice of a
-    pre-allocated NumPy array using the low-level HDF5 API.
+    Read specific feature rows from a transposed HDF5 matrix into the top rows
+    of a pre-allocated NumPy array using the low-level HDF5 API.
 
     A_idx_list must be sorted. Consecutive indices are batched into
     contiguous slice reads for much better I/O performance.
     """
     ranges = _group_consecutive(A_idx_list)
 
-    dest_col = 0
+    dest_row = 0
     for start, end in ranges:
-        ncols = end - start + 1
+        nrows = end - start + 1
 
-        # Source: contiguous column slice in the file
-        source_sel = sel.select(dA.shape, np.s_[:, start:end + 1], dA)
+        # Source: contiguous feature-row slice in the file
+        source_sel = sel.select(dA.shape, np.s_[start:end + 1, :], dA)
         fspace = source_sel.id
 
         # Destination: corresponding slice in the output array
-        dest_sel = sel.select(A.shape, np.s_[:, dest_col:dest_col + ncols])
+        dest_sel = sel.select(A_store.shape, np.s_[dest_row:dest_row + nrows, :])
 
         for mspace in dest_sel.broadcast(source_sel.array_shape):
-            dA.id.read(mspace, fspace, A, dxpl=dA._dxpl)
+            dA.id.read(mspace, fspace, A_store, dxpl=dA._dxpl)
 
-        dest_col += ncols
+        dest_row += nrows
 
 
-def fit_nnls_warm(nnls, X, y, warm_start=None):
-    if warm_start is None:
-        nnls.coef_ = None
-    else:
-        warm_start = np.asarray(warm_start, dtype=X.dtype)
-        if warm_start.shape != (X.shape[1],):
-            raise ValueError(
-                f"warm_start has shape {warm_start.shape}, expected {(X.shape[1],)}"
-            )
-        nnls.coef_ = np.maximum(warm_start, 0).copy(order='F')
+def solver_matrix_from_store(A_store, n_features=None):
+    if n_features is not None:
+        A_store = A_store[:n_features, :]
+    return A_store.T
 
-    nnls.fit(X, y)
-    return nnls.coef_
+
+def make_bvls_warm_start(beta, lower, upper):
+    beta = np.asarray(beta, dtype=lower.dtype)
+    if beta.shape != lower.shape:
+        raise ValueError(
+            f"warm_start has shape {beta.shape}, expected {lower.shape}"
+        )
+    beta = np.maximum(beta, lower)
+    beta = np.minimum(beta, upper).copy()
+    is_active = (lower < beta) & (beta < upper)
+    active_set_size = int(is_active.sum())
+    active_set = np.empty(beta.shape[0], dtype=int)
+    active_set[:active_set_size] = np.flatnonzero(is_active)
+    return SimpleNamespace(
+        beta=beta,
+        active_set=active_set,
+        active_set_size=active_set_size,
+        is_active=is_active,
+    )
+
+
+def fit_nnls_warm(X, y, warm_start=None):
+    p = X.shape[1]
+    lower = np.zeros(p, dtype=X.dtype)
+    upper = np.full(p, np.finfo(X.dtype).max, dtype=X.dtype)
+    warm_state = None
+    if warm_start is not None:
+        warm_state = make_bvls_warm_start(warm_start, lower, upper)
+
+    state = bvls(
+        X,
+        y,
+        lower,
+        upper,
+        n_threads=1,
+        warm_start=warm_state,
+    )
+    return state.beta
 
 
 def scatter_subset_weights(weights, A_idx_list, n_features, dtype=None):
     out = np.zeros(n_features, dtype=dtype or weights.dtype)
     out[A_idx_list] = weights
     return out
-
-warnings.simplefilter(action='ignore', category=FutureWarning)
 
 # logging 설정(레벨/포맷)은 skype_utils 에서 중앙 관리한다 (LOG_LEVEL).
 logging.info("23_run_nnls start")
@@ -910,26 +938,22 @@ no_chrY = (chry_nz_len / len(ydf_not_censat)) < chrY_MINIMUM_RATIO
 
 with h5py.File(f"{PREFIX}/matrix.h5", "r") as f:
     dA = f["A"]
-    A = np.empty(dA.shape, dtype=dA.dtype)
-    dA.read_direct(A)
+    A_store = np.empty(dA.shape, dtype=dA.dtype)
+    dA.read_direct(A_store)
 
     dB = f["B"]
     B = np.empty(dB.shape, dtype=dB.dtype)
     dB.read_direct(B)
 
     dAf = f["A_fail"]
-    A_fail = np.empty(dAf.shape, dtype=dAf.dtype)
-    dAf.read_direct(A_fail)
+    A_fail_store = np.empty(dAf.shape, dtype=dAf.dtype)
+    dAf.read_direct(A_fail_store)
 
     b_start_ind = int(f["B_depth_start"][()])
 
-nnls = GeneralizedLinearEstimator(
-    datafit=Quadratic(),
-    penalty=PositiveConstraint(),
-    solver=AndersonCD(fit_intercept=False, warm_start=True)
-)
+A = solver_matrix_from_store(A_store)
 
-weights_fullsize = fit_nnls_warm(nnls, A, B)
+weights_fullsize = fit_nnls_warm(A, B)
 predict_suc_B_base = A.dot(weights_fullsize)
 
 with open(f'{PREFIX}/path_data.pkl', 'rb') as f:
@@ -996,11 +1020,11 @@ while active_reciprocal_side_ids:
 
     with h5py.File(f"{PREFIX}/matrix.h5", "r") as f:
         dA = f["A"]
-        read_selected_columns_direct(dA, A, A_idx_test)
+        read_selected_feature_rows_direct(dA, A_store, A_idx_test)
 
-    A_test = A[:, :len(A_idx_test)]
+    A_test = solver_matrix_from_store(A_store, len(A_idx_test))
     reciprocal_weights = fit_nnls_warm(
-        nnls, A_test, B, warm_start=weights_fullsize[A_idx_test]
+        A_test, B, warm_start=weights_fullsize[A_idx_test]
     )
     reciprocal_predict_suc_B = A_test.dot(reciprocal_weights)
 
@@ -1106,14 +1130,14 @@ while True:
         dA = f["A"]
         dAf = f["A_fail"]
 
-        read_selected_columns_direct(dA, A, A_idx_list)
-        read_selected_columns_direct(dAf, A_fail, A_idx_list)
+        read_selected_feature_rows_direct(dA, A_store, A_idx_list)
+        read_selected_feature_rows_direct(dAf, A_fail_store, A_idx_list)
 
-    A_new = A[:, :len(A_idx_list)]
-    A_fail_new = A_fail[:, :len(A_idx_list)]
+    A_new = solver_matrix_from_store(A_store, len(A_idx_list))
+    A_fail_new = solver_matrix_from_store(A_fail_store, len(A_idx_list))
 
     filter_weights = fit_nnls_warm(
-        nnls, A_new, B, warm_start=nclose_filter_warm_fullsize[A_idx_list]
+        A_new, B, warm_start=nclose_filter_warm_fullsize[A_idx_list]
     )
     nclose_filter_warm_fullsize = scatter_subset_weights(
         filter_weights, A_idx_list, len(weights_fullsize), dtype=weights_fullsize.dtype
@@ -1194,18 +1218,18 @@ while True:
     for w, col, chrom in pool:
         A_idx_test = sorted(set(A_idx_list_curr) - {col})
         with h5py.File(f"{PREFIX}/matrix.h5", "r") as f:
-            read_selected_columns_direct(f["A"], A, A_idx_test)
-            read_selected_columns_direct(f["A_fail"], A_fail, A_idx_test)
+            read_selected_feature_rows_direct(f["A"], A_store, A_idx_test)
+            read_selected_feature_rows_direct(f["A_fail"], A_fail_store, A_idx_test)
         
-        A_test = A[:, :len(A_idx_test)]
-        A_fail_test = A_fail[:, :len(A_idx_test)]
+        A_test = solver_matrix_from_store(A_store, len(A_idx_test))
+        A_fail_test = solver_matrix_from_store(A_fail_store, len(A_idx_test))
 
         cf_warm_fullsize = scatter_subset_weights(
             filter_weights_curr, A_idx_list_curr, len(weights_fullsize),
             dtype=weights_fullsize.dtype
         )
         weights_test = fit_nnls_warm(
-            nnls, A_test, B, warm_start=cf_warm_fullsize[A_idx_test]
+            A_test, B, warm_start=cf_warm_fullsize[A_idx_test]
         )
         predict_suc_B_test = A_test.dot(weights_test)
         predict_fal_B_test = A_fail_test.dot(weights_test)
@@ -1380,16 +1404,16 @@ if drop_cols:
     with h5py.File(f"{PREFIX}/matrix.h5", "r") as f:
         dA = f["A"]
         dAf = f["A_fail"]
-        read_selected_columns_direct(dA, A, new_A_idx_list)
-        read_selected_columns_direct(dAf, A_fail, new_A_idx_list)
+        read_selected_feature_rows_direct(dA, A_store, new_A_idx_list)
+        read_selected_feature_rows_direct(dAf, A_fail_store, new_A_idx_list)
     
-    A_new = A[:, :len(new_A_idx_list)]
-    A_fail_new = A_fail[:, :len(new_A_idx_list)]
+    A_new = solver_matrix_from_store(A_store, len(new_A_idx_list))
+    A_fail_new = solver_matrix_from_store(A_fail_store, len(new_A_idx_list))
     bp_warm_fullsize = scatter_subset_weights(
         filter_weights, A_idx_list, len(weights_fullsize), dtype=weights_fullsize.dtype
     )
     filter_weights = fit_nnls_warm(
-        nnls, A_new, B, warm_start=bp_warm_fullsize[new_A_idx_list]
+        A_new, B, warm_start=bp_warm_fullsize[new_A_idx_list]
     )
     predict_suc_B = A_new.dot(filter_weights)
     predict_fal_B = A_fail_new.dot(filter_weights)

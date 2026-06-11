@@ -702,7 +702,7 @@ with open(f"{PREFIX}/report.txt", 'r') as f:
 
 use_julia_solver = path_cnt <= HARD_PATH_COUNT_BASELINE
 
-shape = (ncm + m, n)
+shape = (n, ncm + m)
 A_arr = np.empty(shape, dtype=np.float32, order='C')
 
 fm = ncm + filter_len
@@ -752,9 +752,9 @@ for path, key_int_list in tqdm(paf_ans_list, desc='Recover depth from separated 
             if rev in cov_nclose_set:
                 tmp_n[nclose2int[rev]] += norm_nclose_weight
         
-        A_arr[:ncm, ncnt] = tmp_n
+        A_arr[ncnt, :ncm] = tmp_n
 
-    A_arr[ncm:, ncnt] = tmp_v
+    A_arr[ncnt, ncm:] = tmp_v
         
     path_rel = get_relative_path(path)
     if path_rel in tar_def_path_set:
@@ -785,14 +785,14 @@ for i in tqdm(range(1, fclen // 4 + 1), desc='Parse coverage from forward-direct
     bv = get_vec_from_stat_loc(bv_loc)
     
     if NCLOSE_WEIGHT_USE:
-        A_arr[:ncm, ncnt] = tmp_n
+        A_arr[ncnt, :ncm] = tmp_n
 
     if indel_idx in indel_exclude_idx_set:
         tv = tv_empty
     else:
         tv = ov - bv
     
-    A_arr[ncm:, ncnt] = tv
+    A_arr[ncnt, ncm:] = tv
         
     path_nclose_dict_set[ncnt].add((ov_loc.split('/')[-2], i, type2_ins_idx))
     ncnt += 1
@@ -800,8 +800,7 @@ for i in tqdm(range(1, fclen // 4 + 1), desc='Parse coverage from forward-direct
     
 init_cols = [tar_def_path_ind_dict[i] for i in tar_chr_data.values()]
 
-AT_pri = A_arr[ncm:fm, init_cols]
-A_pri = AT_pri
+A_pri = A_arr[init_cols, ncm:fm].T
 
 w_pri = nnls(A_pri, B[:filter_len])[0]
 
@@ -824,14 +823,14 @@ for i in tqdm(range(1, bclen // 4 + 1), desc='Parse coverage from backward-direc
     bv = get_vec_from_stat_loc(bv_loc)
 
     if NCLOSE_WEIGHT_USE:
-        A_arr[:ncm, ncnt] = tmp_n
+        A_arr[ncnt, :ncm] = tmp_n
     
     if indel_idx in indel_exclude_idx_set:
         tv = tv_empty
     else:
         tv = ov + bv
     
-    A_arr[ncm:, ncnt] = tv
+    A_arr[ncnt, ncm:] = tv
         
     path_nclose_dict_set[ncnt].add((ov_loc.split('/')[-2], i, type2_ins_idx))
     ncnt += 1
@@ -843,9 +842,9 @@ for i in range(1, eclen // 2 + 1):
     type2_ins_idx = -1
 
     if NCLOSE_WEIGHT_USE:
-        A_arr[:ncm, ncnt] = tmp_n
+        A_arr[ncnt, :ncm] = tmp_n
             
-    A_arr[ncm:, ncnt] = ov
+    A_arr[ncnt, ncm:] = ov
         
     path_nclose_dict_set[ncnt].add((ov_loc.split('/')[-2], i, type2_ins_idx))
     ncnt += 1
@@ -869,8 +868,8 @@ for chrom, info in cen_fragment_list:
             tv[idx] = 1.0
 
     if NCLOSE_WEIGHT_USE:
-        A_arr[:ncm, ncnt] = tmp_n
-    A_arr[ncm:, ncnt] = tv
+        A_arr[ncnt, :ncm] = tmp_n
+    A_arr[ncnt, ncm:] = tv
 
     path_nclose_dict_set[ncnt].add(('cent_fragment', chrom, info["dir"]))
     ncnt += 1
@@ -885,11 +884,11 @@ for (i1, i2) in itertools.pairwise(dep_list):
     assert(i1 >= i2)
 
 with h5py.File(f'{PREFIX}/matrix.h5', 'w') as hf:
-    dset_A = hf.create_dataset('A', shape=A_arr[:fm, :].shape, dtype=A_arr.dtype)
-    dset_A.write_direct(A_arr, source_sel=np.s_[:fm, :])
+    dset_A = hf.create_dataset('A', shape=A_arr[:, :fm].shape, dtype=A_arr.dtype)
+    dset_A.write_direct(A_arr, source_sel=np.s_[:, :fm])
 
-    dset_A_fail = hf.create_dataset('A_fail', shape=A_arr[fm:, :].shape, dtype=A_arr.dtype)
-    dset_A_fail.write_direct(A_arr, source_sel=np.s_[fm:, :])
+    dset_A_fail = hf.create_dataset('A_fail', shape=A_arr[:, fm:].shape, dtype=A_arr.dtype)
+    dset_A_fail.write_direct(A_arr, source_sel=np.s_[:, fm:])
 
 
     dset_B = hf.create_dataset('B', shape=B[:fm].shape, dtype=B.dtype)
