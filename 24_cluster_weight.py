@@ -519,7 +519,7 @@ no_chrY = (chry_nz_len / len(ydf_not_censat)) < chrY_MINIMUM_RATIO
 
 from juliacall import Main as jl
 
-jl.include(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'anderson_nnls.jl'))
+jl.include(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'nnls_solver.jl'))
 jl.seval("using HDF5, LinearAlgebra")
 
 A_jl, B_jl, b_start_ind = jl.load_nnls_array(f'{PREFIX}/matrix.h5')
