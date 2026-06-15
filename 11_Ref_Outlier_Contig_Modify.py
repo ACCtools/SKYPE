@@ -186,11 +186,11 @@ parser.add_argument("--alt",
 
 args = parser.parse_args()
 
-paf_file = []
-if args.alt is None:
-    paf_file = [import_origin_data(args.paf_file_path)]
-else:
-    paf_file = [import_origin_data(args.paf_file_path), import_origin_data(args.alt)]
+PAF_FILE_PATH_PKL = f'{args.prefix}/paf_file_path.pkl'
+with open(PAF_FILE_PATH_PKL, 'rb') as f:
+    PAF_FILE_PATH = pkl.load(f)
+
+paf_file = [import_origin_data(paf_loc) for paf_loc in PAF_FILE_PATH]
 
 PREPROCESSED_PAF_FILE_PATH = args.ppc_paf_file_path
 TYPE_4_VECTOR_PATH = f"{args.prefix}/11_ref_ratio_outliers"

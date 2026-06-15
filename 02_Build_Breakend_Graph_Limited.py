@@ -135,9 +135,10 @@ TYPE2_CHUKJI_AS_TYPE4 = 5 * M
 TYPE2_CONJOIN_COMPRESS_LIMIT = 1 * M
 TYPE2_DIST_FLIP_THRESHOLD = 100 * K
 
-TYPE4_INSERTION_GRAPH_EDGE_PKL = 'type4_insertion_graph_edges.pkl'
-TYPE4_INSERTION_GRAPH_NODE_KEY = '__type4_insertion_graph__'
-TYPE4_INSERTION_GRAPH_MIN_SPAN = 1 * M
+TYPE4_INDEL_GRAPH_EDGE_PKL = 'type4_indel_graph_edges.pkl'
+TYPE4_INDEL_GRAPH_MIN_SPAN = 1 * M
+TYPE4_INDEL_GRAPH_DEPTH_WINDOW = 500 * K
+TYPE4_INDEL_GRAPH_DEPTH_DIFF_RATIO = 0.2
 
 
 def import_data(file_path : str) -> list :
@@ -1277,6 +1278,52 @@ def edge_optimization(contig_data : list, contig_adjacency : list, telo_dict : d
                 telo_connected_graph_dict[chr_rev_corr[i]].append(k)
 
     return telo_connected_set, telo_connected_dict, telo_connected_graph_dict, telo_coverage
+
+def _flip_ctg_dir(ctg_dir):
+    return '-' if ctg_dir == '+' else '+'
+
+def _cen_fragment_target_dir_from_meta(cen_fragment_meta, chrom):
+    return '-' if cen_fragment_meta[chrom]['dir'] else '+'
+
+def _normalized_telo_censat_dir(telo_name, ctg_dir):
+    if telo_name[-1] == 'f':
+        return ctg_dir
+    return _flip_ctg_dir(ctg_dir)
+
+def filter_telomere_connected_cen_fragment_mismatch(
+    contig_data,
+    telo_connected_graph_dict,
+    cen_fragment_meta,
+    stage_name,
+):
+    filtered_graph_dict = defaultdict(list)
+    filtered_dict = {}
+    filtered_set = set()
+    removed = 0
+
+    for telo_name, edge_list in telo_connected_graph_dict.items():
+        for edge in edge_list:
+            node_idx = edge[1]
+            contig = contig_data[node_idx]
+            chrom = contig[CHR_NAM]
+            mismatch = False
+            if contig[CTG_CENSAT] != '0' and chrom in cen_fragment_meta and telo_name[-1] in ('f', 'b'):
+                norm_dir = _normalized_telo_censat_dir(telo_name, contig[CTG_DIR])
+                mismatch = norm_dir != _cen_fragment_target_dir_from_meta(cen_fragment_meta, chrom)
+
+            if mismatch:
+                removed += 1
+                continue
+
+            filtered_graph_dict[telo_name].append(edge)
+            filtered_dict[node_idx] = telo_name
+            filtered_set.add(node_idx)
+
+    logging.info(
+        f"Removed {removed} {stage_name} telomere-connected censat nodes "
+        f"with cen_fragment direction mismatch"
+    )
+    return filtered_set, filtered_dict, filtered_graph_dict
 
 def calc_ratio(contig_data : list) -> dict:
     contig_data_size = len(contig_data)
@@ -3490,7 +3537,13 @@ def contig_preprocessing_00(PAF_FILE_PATH_ : list):
 
     adjacency = initial_graph_build(real_final_contig, telo_bound_dict)
 
-    telo_connected_node, telo_connected_dict, _, telo_coverage = edge_optimization(real_final_contig, adjacency, telo_bound_dict, asm2cov)
+    telo_connected_node, telo_connected_dict, telo_connected_graph_dict, telo_coverage = edge_optimization(real_final_contig, adjacency, telo_bound_dict, asm2cov)
+    telo_connected_node, telo_connected_dict, telo_connected_graph_dict = filter_telomere_connected_cen_fragment_mismatch(
+        real_final_contig,
+        telo_connected_graph_dict,
+        cen_fragment_meta,
+        "pre-break",
+    )
     
     break_contig = break_double_telomere_contig(real_final_contig, telo_connected_node)
 
@@ -3792,6 +3845,12 @@ def contig_preprocessing_00(PAF_FILE_PATH_ : list):
     adjacency = initial_graph_build(real_final_contig, telo_bound_dict)
 
     telo_connected_node, telo_connected_dict, telo_connected_graph_dict, telo_coverage = edge_optimization(real_final_contig, adjacency, telo_bound_dict, asm2cov)
+    telo_connected_node, telo_connected_dict, telo_connected_graph_dict = filter_telomere_connected_cen_fragment_mismatch(
+        real_final_contig,
+        telo_connected_graph_dict,
+        cen_fragment_meta,
+        "final",
+    )
 
     rev_telo_connected_dict = defaultdict(list)
 
@@ -4057,13 +4116,96 @@ def get_graph_edge_weight(contig_data, src_idx, dst_idx):
         return ds + de - overlap_calculator(contig_s, contig_e)
     return distance_checker(contig_s, contig_e) + ds + de
 
-def get_type4_ref_span(contig_slice):
+def get_type4_breakend_span(contig_slice):
+    return (
+        get_breakend_coord(contig_slice[0], 0),
+        get_breakend_coord(contig_slice[-1], 1),
+    )
+
+def get_type4_outer_ref_span(contig_slice):
     if contig_slice[0][CTG_DIR] == '+':
         return contig_slice[0][CHR_STR], contig_slice[-1][CHR_END]
     return contig_slice[-1][CHR_STR], contig_slice[0][CHR_END]
 
-def collect_type4_insertion_graph_candidates(contig_data, min_span=TYPE4_INSERTION_GRAPH_MIN_SPAN):
+def point_overlaps_censat(censat_dict, chrom, coord):
+    for st, nd in censat_dict.get(chrom, []):
+        if max(st, coord) < min(nd, coord + 1):
+            return True
+    return False
+
+def span_overlaps_censat(censat_dict, chrom, span_st, span_nd):
+    for st, nd in censat_dict.get(chrom, []):
+        if max(st, span_st) < min(nd, span_nd):
+            return True
+    return False
+
+def make_depth_by_chrom(depth_df):
+    return {
+        chrom: chrom_df
+        for chrom, chrom_df in depth_df.groupby('chr', sort=False)
+    }
+
+def weighted_depth_mean(depth_by_chrom, chrom, start, end):
+    if end <= start:
+        return None
+    chrom_df = depth_by_chrom.get(chrom)
+    if chrom_df is None:
+        return None
+    mask = (chrom_df['nd'] > start) & (chrom_df['st'] < end)
+    if not mask.any():
+        return None
+
+    rows = chrom_df.loc[mask]
+    overlap_st = np.maximum(rows['st'].to_numpy(), start)
+    overlap_nd = np.minimum(rows['nd'].to_numpy(), end)
+    weights = overlap_nd - overlap_st
+    if weights.sum() <= 0:
+        return None
+    return float(np.average(rows['meandepth'].to_numpy(), weights=weights))
+
+def expected_depth_step(depth_by_chrom, chrom, coord, expected_high_side,
+                        window=TYPE4_INDEL_GRAPH_DEPTH_WINDOW):
+    left_mean = weighted_depth_mean(depth_by_chrom, chrom, coord - window, coord)
+    right_mean = weighted_depth_mean(depth_by_chrom, chrom, coord, coord + window)
+    if left_mean is None or right_mean is None:
+        return None
+    if expected_high_side == 'left':
+        return left_mean - right_mean
+    if expected_high_side == 'right':
+        return right_mean - left_mean
+    return None
+
+def type4_indel_expected_high_sides(indel_kind):
+    if indel_kind == 'deletion':
+        return ('left', 'right')
+    if indel_kind == 'insertion':
+        return ('right', 'left')
+    raise ValueError(f'Unknown type4 indel kind: {indel_kind}')
+
+def type4_indel_depth_supported(depth_by_chrom, censat_dict, chrom, span_st, span_nd,
+                                indel_kind, normal_haploid_depth):
+    if point_overlaps_censat(censat_dict, chrom, span_st) or \
+       point_overlaps_censat(censat_dict, chrom, span_nd):
+        return False, None, 'endpoint_censat'
+
+    expected_high_sides = type4_indel_expected_high_sides(indel_kind)
+    steps = [
+        expected_depth_step(depth_by_chrom, chrom, span_st, expected_high_sides[0]),
+        expected_depth_step(depth_by_chrom, chrom, span_nd, expected_high_sides[1]),
+    ]
+    if any(step is None for step in steps):
+        return False, steps, 'missing_depth_window'
+
+    min_step = TYPE4_INDEL_GRAPH_DEPTH_DIFF_RATIO * normal_haploid_depth
+    if all(step >= min_step for step in steps):
+        return True, steps, 'pass'
+    return False, steps, 'depth_direction_or_size'
+
+def collect_type4_indel_graph_candidates(contig_data, depth_df, censat_dict,
+                                         min_span=TYPE4_INDEL_GRAPH_MIN_SPAN):
     candidates = []
+    depth_by_chrom = make_depth_by_chrom(depth_df)
+    normal_haploid_depth = float(np.median(depth_df['meandepth'])) / 2
     s = 0
     contig_data_size = len(contig_data)
     while s < contig_data_size:
@@ -4073,24 +4215,58 @@ def collect_type4_insertion_graph_candidates(contig_data, min_span=TYPE4_INSERTI
         contig_e = contig_data[e]
 
         if contig_s[CTG_TYP] == 4 \
-           and contig_s[CHR_NAM] == contig_e[CHR_NAM] \
+            and contig_s[CHR_NAM] == contig_e[CHR_NAM] \
            and contig_s[CTG_DIR] == contig_e[CTG_DIR]:
             ratio, total_ref_len = calculate_single_contig_ref_ratio(contig_slice)
-            ref_a, ref_b = get_type4_ref_span(contig_slice)
+            ref_a, ref_b = get_type4_breakend_span(contig_slice)
+            outer_ref_a, outer_ref_b = get_type4_outer_ref_span(contig_slice)
             span_st, span_nd = sorted((ref_a, ref_b))
+            outer_span_st, outer_span_nd = sorted((outer_ref_a, outer_ref_b))
             span_len = span_nd - span_st
 
-            if ratio < 0 and span_len >= min_span:
+            indel_kind = None
+            if ratio < 0:
+                indel_kind = 'insertion'
+            elif ratio > 0:
+                indel_kind = 'deletion'
+
+            if indel_kind is not None and span_len >= min_span:
+                censat_jump = span_overlaps_censat(censat_dict, contig_s[CHR_NAM], span_st, span_nd)
+                if indel_kind == 'deletion' and not censat_jump:
+                    s = e + 1
+                    continue
+
+                depth_pass, depth_steps, depth_filter_reason = type4_indel_depth_supported(
+                    depth_by_chrom, censat_dict, contig_s[CHR_NAM], span_st, span_nd,
+                    indel_kind, normal_haploid_depth
+                )
+                if not depth_pass:
+                    s = e + 1
+                    continue
+
                 candidates.append({
                     'type4_tuple': (s, e),
                     'src': (DIR_FOR, s),
                     'dst': (DIR_FOR, e),
+                    'type4_kind': f'raw_type4_{indel_kind}',
+                    'indel_kind': indel_kind,
                     'chrom': contig_s[CHR_NAM],
+                    'base_chrom': contig_s[CHR_NAM],
+                    'base_st': span_st,
+                    'base_nd': span_nd,
+                    'outer_base_st': outer_span_st,
+                    'outer_base_nd': outer_span_nd,
                     'span_st': span_st,
                     'span_nd': span_nd,
                     'span_len': span_len,
                     'ratio': ratio,
                     'total_ref_len': total_ref_len,
+                    'normal_haploid_depth': normal_haploid_depth,
+                    'expected_high_sides': type4_indel_expected_high_sides(indel_kind),
+                    'depth_steps': tuple(depth_steps),
+                    'depth_min_step': TYPE4_INDEL_GRAPH_DEPTH_DIFF_RATIO * normal_haploid_depth,
+                    'depth_filter_reason': depth_filter_reason,
+                    'censat_jump': censat_jump,
                     'contig_name': contig_s[CTG_NAM],
                 })
 
@@ -4098,11 +4274,11 @@ def collect_type4_insertion_graph_candidates(contig_data, min_span=TYPE4_INSERTI
 
     return candidates
 
-def select_type4_insertion_graph_edges(contig_data, nclose_nodes, type4_ins_candidates):
+def select_type4_indel_graph_edges(contig_data, nclose_nodes, type4_indel_candidates):
     breakends_by_chrom = collect_nclose_breakends(contig_data, nclose_nodes)
     selected_edges = []
 
-    for type4_idx, candidate in enumerate(type4_ins_candidates):
+    for type4_idx, candidate in enumerate(type4_indel_candidates):
         s, e = candidate['type4_tuple']
         chrom = candidate['chrom']
         span_st = candidate['span_st']
@@ -4112,7 +4288,7 @@ def select_type4_insertion_graph_edges(contig_data, nclose_nodes, type4_ins_cand
             for bp, pair_key, _ in breakends_by_chrom.get(chrom, [])
             if span_st <= bp <= span_nd
         }
-        if len(inside_nclose_pairs) < 2:
+        if candidate['indel_kind'] == 'insertion' and len(inside_nclose_pairs) < 2:
             continue
 
         edge_specs = [
@@ -4121,41 +4297,51 @@ def select_type4_insertion_graph_edges(contig_data, nclose_nodes, type4_ins_cand
         ]
         for src, dst in edge_specs:
             selected_edges.append({
-                'type4_kind': 'raw_type4_insertion',
+                'type4_kind': candidate['type4_kind'],
                 'type4_idx': type4_idx,
                 'type4_tuple': tuple(candidate['type4_tuple']),
                 'src': src,
                 'dst': dst,
                 'dist': get_graph_edge_weight(contig_data, src[1], dst[1]),
+                'indel_kind': candidate['indel_kind'],
                 'chrom': chrom,
+                'base_chrom': candidate['base_chrom'],
+                'base_st': candidate['base_st'],
+                'base_nd': candidate['base_nd'],
+                'outer_base_st': candidate['outer_base_st'],
+                'outer_base_nd': candidate['outer_base_nd'],
                 'span_st': span_st,
                 'span_nd': span_nd,
                 'span_len': candidate['span_len'],
                 'inside_nclose_count': len(inside_nclose_pairs),
+                'ratio': candidate['ratio'],
+                'expected_high_sides': candidate['expected_high_sides'],
+                'depth_steps': candidate['depth_steps'],
+                'depth_min_step': candidate['depth_min_step'],
+                'censat_jump': candidate['censat_jump'],
                 'contig_name': candidate['contig_name'],
             })
 
     return selected_edges
 
-def augment_nclose_nodes_with_type4_insertions(nclose_nodes, selected_edges):
+def augment_nclose_nodes_with_type4_indels(nclose_nodes, selected_edges):
     augmented_nclose_nodes = defaultdict(list)
+    existing_pairs = defaultdict(set)
     for key, pair_list in nclose_nodes.items():
         augmented_nclose_nodes[key].extend(pair_list)
+        existing_pairs[key].update(tuple(pair) for pair in pair_list)
 
-    selected_pairs = []
-    selected_pair_set = set()
     for edge in selected_edges:
         pair = tuple(edge['type4_tuple'])
-        if pair not in selected_pair_set:
-            selected_pairs.append(pair)
-            selected_pair_set.add(pair)
-
-    if selected_pairs:
-        augmented_nclose_nodes[TYPE4_INSERTION_GRAPH_NODE_KEY].extend(selected_pairs)
+        key = edge['contig_name']
+        if pair in existing_pairs[key]:
+            continue
+        augmented_nclose_nodes[key].append(pair)
+        existing_pairs[key].add(pair)
 
     return augmented_nclose_nodes
 
-def get_type4_insertion_zero_dim_edge_set(selected_edges):
+def get_type4_indel_zero_dim_edge_set(selected_edges):
     zero_dim_edge_set = set()
     for edge in selected_edges:
         src = tuple(edge['src'])
@@ -4365,9 +4551,8 @@ def nclose_calc():
     # - 양쪽 모두 censat: both endpoint MAPQ == 60 이면 keep, MAPQ < 60 이 있으면 drop
     #   단, 같은 염색체 censat +/- pair 는 drop
     #   단, 같은 두 censat locus 근처에서 보정 방향이 서로 반대인 pair 세트는 drop
-    # - 한쪽만 censat: 이 블록에서는 제거하지 않음
-    #   단, cen_fragment column 이 만들어진 chr 의 censat-noncensat pair 는
-    #   아래 offset 방향 mismatch 필터를 추가로 적용한다.
+    # - cen_fragment column 이 만들어진 chr 의 censat endpoint 는 아래에서
+    #   depth 방향과 nclose 방향이 모두 match 해야만 보존한다.
     with open(f'{PREFIX}/cen_fragment_data.pkl', 'rb') as f:
         cen_fragment_meta_for_filter = pkl.load(f)
     cent_fragment_chroms = set(cen_fragment_meta_for_filter.keys())
@@ -4409,6 +4594,22 @@ def nclose_calc():
     def _opposite_dir_pair(dirs_a, dirs_b):
         return dirs_a[0] != dirs_b[0] and dirs_a[1] != dirs_b[1]
 
+    def _flip_dir(ctg_dir):
+        return '-' if ctg_dir == '+' else '+'
+
+    def _cen_fragment_target_dir(chrom):
+        return '-' if cen_fragment_meta_for_filter[chrom]['dir'] else '+'
+
+    def _normalized_censat_endpoint_dirs(pair):
+        endpoint_dirs = []
+        for order_idx, node_idx in enumerate(pair):
+            if contig_data[node_idx][CTG_CENSAT] == '0':
+                continue
+            ctg_dir = contig_data[node_idx][CTG_DIR]
+            norm_dir = ctg_dir if order_idx == 0 else _flip_dir(ctg_dir)
+            endpoint_dirs.append((node_idx, norm_dir))
+        return endpoint_dirs
+
     censat_censat_mapq60_groups = defaultdict(list)
     for ctg_name, pair_list in nclose_nodes.items():
         for pair in pair_list:
@@ -4446,7 +4647,7 @@ def nclose_calc():
             s_censat = contig_data[pair[0]][CTG_CENSAT] != '0'
             e_censat = contig_data[pair[1]][CTG_CENSAT] != '0'
             if s_censat and e_censat:
-                if _censat_at_chr_end(pair[0]) and _censat_at_chr_end(pair[1]):
+                if _censat_at_chr_end(pair[0]) or _censat_at_chr_end(pair[1]):
                     censat_removed_terminal_both += 1
                     continue
                 if contig_data[pair[0]][CHR_NAM] == contig_data[pair[1]][CHR_NAM] \
@@ -4464,9 +4665,44 @@ def nclose_calc():
     nclose_nodes = censat_filtered_nclose_nodes
     logging.info(
         f'Removed {censat_removed_both} censat-censat nclose where either endpoint MAPQ < 60, '
-        f'{censat_removed_terminal_both} terminal-censat-to-terminal-censat nclose, '
+        f'{censat_removed_terminal_both} censat-censat nclose with a terminal-censat endpoint, '
         f'{censat_removed_same_chrom_opposite_dir} same-chromosome opposite-direction censat-censat nclose, '
         f'{censat_removed_opposite_dir} opposite-direction censat-censat nclose'
+    )
+
+    # censat-censat 의 cen_fragment 방향 mismatch 필터:
+    # 두 endpoint 중 cen_fragment 로 잡힌 censat 은 모두 depth 방향과 match 해야만 보존한다.
+    #   pair[0] censat: CTG_DIR 그대로
+    #   pair[1] censat: pair 를 reverse-complement 해서 censat 이 앞에 온 것으로 보고 CTG_DIR flip
+    # 정규화 후 '+' 는 앞쪽(low coord, p-arm) 높음(dir == False), '-' 는 뒤쪽(high coord, q-arm)
+    # 높음(dir == True) 과 match 해야 한다.
+    cen_fragment_dir_filtered_nclose_nodes = defaultdict(list)
+    cen_fragment_dir_removed_censat_censat = 0
+    for ctg_name, pair_list in nclose_nodes.items():
+        for pair in pair_list:
+            s_is_censat = contig_data[pair[0]][CTG_CENSAT] != '0'
+            e_is_censat = contig_data[pair[1]][CTG_CENSAT] != '0'
+            if not (s_is_censat and e_is_censat):
+                cen_fragment_dir_filtered_nclose_nodes[ctg_name].append(pair)
+                continue
+
+            mismatch = False
+            for node_idx, norm_dir in _normalized_censat_endpoint_dirs(pair):
+                chrom = contig_data[node_idx][CHR_NAM]
+                if chrom not in cent_fragment_chroms:
+                    continue
+                if norm_dir != _cen_fragment_target_dir(chrom):
+                    mismatch = True
+                    break
+
+            if mismatch:
+                cen_fragment_dir_removed_censat_censat += 1
+                continue
+            cen_fragment_dir_filtered_nclose_nodes[ctg_name].append(pair)
+    nclose_nodes = cen_fragment_dir_filtered_nclose_nodes
+    logging.info(
+        f'Removed {cen_fragment_dir_removed_censat_censat} censat-censat '
+        f'nclose pairs with cen_fragment direction mismatch'
     )
 
     # offset 방향 mismatch 필터:
@@ -4493,13 +4729,13 @@ def nclose_calc():
                 censat_norm_dir = contig_data[cidx][CTG_DIR]
             else:
                 cidx, nidx = pair[1], pair[0]
-                censat_norm_dir = '-' if contig_data[cidx][CTG_DIR] == '+' else '+'
+                censat_norm_dir = _flip_dir(contig_data[cidx][CTG_DIR])
             censat_chr = contig_data[cidx][CHR_NAM]
             if censat_chr not in cent_fragment_chroms:
                 continue
             noncensat_chr = contig_data[nidx][CHR_NAM]
             noncensat_pos = (contig_data[nidx][CHR_STR] + contig_data[nidx][CHR_END]) // 2
-            offset_filter_candidates.append((ctg_name, pair, censat_chr, noncensat_chr, noncensat_pos, censat_norm_dir))
+            offset_filter_candidates.append((ctg_name, tuple(pair), censat_chr, noncensat_chr, noncensat_pos, censat_norm_dir))
 
     offset_group_map = defaultdict(list)
     for cand in offset_filter_candidates:
@@ -4507,7 +4743,7 @@ def nclose_calc():
 
     offset_to_remove = set()
     for (censat_chr, _), items in offset_group_map.items():
-        target_norm_dir = '-' if cen_fragment_meta_for_filter[censat_chr]['dir'] else '+'
+        target_norm_dir = _cen_fragment_target_dir(censat_chr)
         items.sort(key=lambda x: x[4])
         i = 0
         while i < len(items):
@@ -4526,7 +4762,7 @@ def nclose_calc():
     offset_removed = 0
     for ctg_name, pair_list in nclose_nodes.items():
         for pair in pair_list:
-            if (ctg_name, pair) in offset_to_remove:
+            if (ctg_name, tuple(pair)) in offset_to_remove:
                 offset_removed += 1
                 continue
             offset_filtered_nclose_nodes[ctg_name].append(pair)
@@ -4917,9 +5153,9 @@ parser.add_argument("--add_alt_ctg_simple",
                          "pair per simple_ctg_alt contig.",
                     action='store_true')
 
-parser.add_argument("--add_insertion_graph",
-                    dest="add_insertion_graph",
-                    help="Add selected type4 insertion rescue edges to the breakend graph without increasing graph dimensions.",
+parser.add_argument("--add_indel_graph",
+                    dest="add_indel_graph",
+                    help="Add selected type4 indel rescue edges to the breakend graph without increasing graph dimensions.",
                     action='store_true')
 
 args = parser.parse_args()
@@ -5017,30 +5253,42 @@ if nclose_node_count > FAIL_NCLOSE_COUNT:
             logging.info("No method to reduce nclose node count.")
             sys.exit(1)
 
-selected_type4_insertion_graph_edges = []
-type4_insertion_zero_dim_edge_set = set()
+selected_type4_indel_graph_edges = []
+type4_indel_zero_dim_edge_set = set()
 graph_nclose_nodes = nclose_nodes
-if args.add_insertion_graph:
-    type4_insertion_graph_candidates = collect_type4_insertion_graph_candidates(contig_data)
-    selected_type4_insertion_graph_edges = select_type4_insertion_graph_edges(
-        contig_data, nclose_nodes, type4_insertion_graph_candidates
+if args.add_indel_graph:
+    type4_indel_graph_candidates = collect_type4_indel_graph_candidates(
+        contig_data, df, repeat_censat_data
     )
-    graph_nclose_nodes = augment_nclose_nodes_with_type4_insertions(
-        nclose_nodes, selected_type4_insertion_graph_edges
+    selected_type4_indel_graph_edges = select_type4_indel_graph_edges(
+        contig_data, nclose_nodes, type4_indel_graph_candidates
     )
-    type4_insertion_zero_dim_edge_set = get_type4_insertion_zero_dim_edge_set(
-        selected_type4_insertion_graph_edges
+    graph_nclose_nodes = augment_nclose_nodes_with_type4_indels(
+        nclose_nodes, selected_type4_indel_graph_edges
+    )
+    type4_indel_zero_dim_edge_set = get_type4_indel_zero_dim_edge_set(
+        selected_type4_indel_graph_edges
+    )
+    selected_type4_indel_kind_by_tuple = {
+        edge['type4_tuple']: edge['indel_kind']
+        for edge in selected_type4_indel_graph_edges
+    }
+    selected_type4_indel_kind_count = Counter(selected_type4_indel_kind_by_tuple.values())
+    type4_indel_candidate_kind_count = Counter(
+        candidate['indel_kind'] for candidate in type4_indel_graph_candidates
     )
     logging.info(
-        f'Added {len(type4_insertion_zero_dim_edge_set)} type4 insertion graph edges '
-        f'from {len(selected_type4_insertion_graph_edges) // 2} insertion candidates '
-        f'({len(type4_insertion_graph_candidates)} raw type4 insertion candidates >= {TYPE4_INSERTION_GRAPH_MIN_SPAN} bp)'
+        f'Added {len(type4_indel_zero_dim_edge_set)} type4 indel graph edges '
+        f'from {len(selected_type4_indel_kind_by_tuple)} selected type4 indel events '
+        f'({dict(selected_type4_indel_kind_count)} selected; '
+        f'{len(type4_indel_graph_candidates)} depth-supported candidates '
+        f'{dict(type4_indel_candidate_kind_count)} >= {TYPE4_INDEL_GRAPH_MIN_SPAN} bp)'
     )
 
 bnd_graph_adjacency = initialize_bnd_graph(contig_data, graph_nclose_nodes, telo_contig)
 
-with open(f'{PREFIX}/{TYPE4_INSERTION_GRAPH_EDGE_PKL}', 'wb') as f:
-    pkl.dump(selected_type4_insertion_graph_edges, f)
+with open(f'{PREFIX}/{TYPE4_INDEL_GRAPH_EDGE_PKL}', 'wb') as f:
+    pkl.dump(selected_type4_indel_graph_edges, f)
 
 save_loc = PREFIX + '/00_raw'
 logging.info("Now saving results in folder : " + PREFIX)
@@ -5088,10 +5336,10 @@ def make_graph(CHR_CHANGE_LIMIT, DIR_CHANGE_LIMIT):
                         d = ds + de - overlap_calculator(contig_s, contig_e)
                     else:  
                         d = distance_checker(contig_s, contig_e) + ds + de 
-                is_type4_insertion_zero_dim_edge = (
-                    (tuple(node), tuple(edge[:2])) in type4_insertion_zero_dim_edge_set
+                is_type4_indel_zero_dim_edge = (
+                    (tuple(node), tuple(edge[:2])) in type4_indel_zero_dim_edge_set
                 )
-                if is_type4_insertion_zero_dim_edge:
+                if is_type4_indel_zero_dim_edge:
                     for j in range(0, CHR_CHANGE_LIMIT+1):
                         for k in range(0, DIR_CHANGE_LIMIT+1):
                             node_limit = tuple(list(node)+[j, k])

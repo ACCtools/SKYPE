@@ -66,7 +66,7 @@ DEPTH_THREAD = 1
 NCLOSE_COMPRESS_LIMIT = 50*K
 VIRTUAL_CONTIG_PREFIX = "virtual_contig"
 
-TYPE4_INSERTION_GRAPH_EDGE_PKL = 'type4_insertion_graph_edges.pkl'
+TYPE4_INDEL_GRAPH_EDGE_PKL = 'type4_indel_graph_edges.pkl'
 
 def import_data(file_path : list) -> list :
     contig_data = []
@@ -1358,38 +1358,38 @@ for vl in nclose_nodes_pkl.values():
     for v in vl:
         nclose_nodes.extend(list(v))
 
-type4_insertion_edge_path = f'{PREFIX}/{TYPE4_INSERTION_GRAPH_EDGE_PKL}'
-if os.path.isfile(type4_insertion_edge_path):
-    with open(type4_insertion_edge_path, 'rb') as f:
-        selected_type4_insertion_graph_edges = pkl.load(f)
+type4_indel_edge_path = f'{PREFIX}/{TYPE4_INDEL_GRAPH_EDGE_PKL}'
+if os.path.isfile(type4_indel_edge_path):
+    with open(type4_indel_edge_path, 'rb') as f:
+        selected_type4_indel_graph_edges = pkl.load(f)
 else:
-    selected_type4_insertion_graph_edges = []
+    selected_type4_indel_graph_edges = []
 
-type4_insertion_nodes = []
-type4_insertion_node_set = set()
-for edge in selected_type4_insertion_graph_edges:
+type4_indel_nodes = []
+type4_indel_node_set = set()
+for edge in selected_type4_indel_graph_edges:
     for node in (edge['src'], edge['dst']):
         node_idx = node[1]
-        if node_idx not in type4_insertion_node_set:
-            type4_insertion_nodes.append(node_idx)
-            type4_insertion_node_set.add(node_idx)
+        if node_idx not in type4_indel_node_set:
+            type4_indel_nodes.append(node_idx)
+            type4_indel_node_set.add(node_idx)
 
 bnd_connected_graph = connect_nclose_telo(
-    contig_data, using_node, type_3_graph, nclose_nodes + type4_insertion_nodes, telo_contig
+    contig_data, using_node, type_3_graph, nclose_nodes + type4_indel_nodes, telo_contig
 )
 
-added_type4_insertion_edges = set()
-for edge in selected_type4_insertion_graph_edges:
+added_type4_indel_edges = set()
+for edge in selected_type4_indel_graph_edges:
     src = tuple(edge['src'])
     dst = tuple(edge['dst'])
     edge_key = (src, dst)
-    if edge_key in added_type4_insertion_edges:
+    if edge_key in added_type4_indel_edges:
         continue
     bnd_connected_graph[src].append([dst[0], dst[1], edge.get('dist', 0)])
-    added_type4_insertion_edges.add(edge_key)
+    added_type4_indel_edges.add(edge_key)
 
-if added_type4_insertion_edges:
-    logging.info(f'Added {len(added_type4_insertion_edges)} type4 insertion graph edges for depth PAF reconstruction')
+if added_type4_indel_edges:
+    logging.info(f'Added {len(added_type4_indel_edges)} type4 indel graph edges for depth PAF reconstruction')
 
 os.makedirs(f'{PREFIX}/11_ref_ratio_outliers/ecdna', exist_ok=True)
 with open(f'{PREFIX}/ecdna_circuit_data.pkl', 'rb') as f:
@@ -1405,7 +1405,7 @@ for vl in raw_nclose_nodes.values():
 
 G = nx.DiGraph()
 
-for node in telo_contig + raw_nclose_nodes_list + type4_insertion_nodes:
+for node in telo_contig + raw_nclose_nodes_list + type4_indel_nodes:
     G.add_node((DIR_IN, node))
     G.add_node((DIR_OUT, node))
 
@@ -1427,7 +1427,7 @@ create_final_depth_paf_type2(type4_ins_del, PREFIX)
 
 G = nx.DiGraph()
 
-for node in telo_contig + nclose_nodes + type4_insertion_nodes:
+for node in telo_contig + nclose_nodes + type4_indel_nodes:
     G.add_node((DIR_IN, node))
     G.add_node((DIR_OUT, node))
 

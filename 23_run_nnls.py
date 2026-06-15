@@ -50,8 +50,6 @@ FILTER_P_VALUE = 0.01
 
 CHROM_ERROR_FAIL_RATE = 2.0
 
-TOL_KKT = 1e-4
-
 RECIPROCAL_PAIR_DISTANCE = 10 * K
 RECIPROCAL_FORBID_MAX_INTERVAL = 10 * K
 
@@ -159,29 +157,52 @@ def collect_nclose_test_data(contig_data, nclose_nodes):
 
     type4_nclose_nodes = dict()
     type4_expected_high_side = dict()
+
+    def parse_type4_event_breakend_cords(paf_loc):
+        paf_rows = []
+        with open(paf_loc, 'r') as f:
+            for line in f:
+                if line.strip():
+                    paf_rows.append(line.rstrip().split('\t'))
+        if not paf_rows:
+            return None
+
+        def event_breakend_coord(row, side_idx):
+            nclose_loc = side_idx == 0
+            nclose_dir = row[CTG_DIR] == '+'
+            coord_idx = CHR_STR if nclose_dir ^ nclose_loc else CHR_END
+            return row[CHR_NAM], int(row[coord_idx])
+
+        cords = [
+            event_breakend_coord(paf_rows[0], 0),
+            event_breakend_coord(paf_rows[-1], 1),
+        ]
+        cords.sort(key=lambda x: (chr2int(x[0]), x[1]))
+        return cords
+
     for paf_loc in type4_tot_loc_list:
         event_type = paf_loc.split('/')[-2]
         event_idx = int(paf_loc.split('/')[-1].split('_')[0])
 
         type2_merge_paf_idx = -1
-        if not os.path.isfile(f'{RATIO_OUTLIER_FOLDER}/{event_type}/{event_idx}.paf'):
+        event_paf_loc = f'{RATIO_OUTLIER_FOLDER}/{event_type}/{event_idx}.paf'
+        if not os.path.isfile(event_paf_loc):
             type2_merge_paf_loc = glob.glob(f'{RATIO_OUTLIER_FOLDER}/{event_type}/{event_idx}_type2_merge_*.paf')[0]
             type2_merge_paf_idx = int(type2_merge_paf_loc.split('/')[-1].split('.')[0].split('_')[-1])
+            event_paf_loc = type2_merge_paf_loc
 
-        with open(paf_loc, "r") as f:
-            l = f.readline().rstrip().split("\t")
-            chr_nam1 = l[CHR_NAM]
-            chr_nam2 = l[CHR_NAM]
-            pos1, pos2 = sorted([int(l[CHR_STR]), int(l[CHR_END])])
+        cords = parse_type4_event_breakend_cords(event_paf_loc)
+        if cords is None:
+            continue
 
-            type4_tag = (event_type, event_idx, type2_merge_paf_idx)
-            type4_nclose_nodes[type4_tag] = (chr_nam1, pos1, chr_nam2, pos2)
-            if event_type == 'front_jump':
-                # deletion: the outside of [pos1, pos2] should be higher.
-                type4_expected_high_side[type4_tag] = ['left', 'right']
-            elif event_type == 'back_jump':
-                # insertion/duplication: the inside of [pos1, pos2] should be higher.
-                type4_expected_high_side[type4_tag] = ['right', 'left']
+        type4_tag = (event_type, event_idx, type2_merge_paf_idx)
+        type4_nclose_nodes[type4_tag] = (cords[0][0], cords[0][1], cords[1][0], cords[1][1])
+        if event_type == 'front_jump':
+            # deletion: the outside of the breakend span should be higher.
+            type4_expected_high_side[type4_tag] = ['left', 'right']
+        elif event_type == 'back_jump':
+            # insertion/duplication: the inside of the breakend span should be higher.
+            type4_expected_high_side[type4_tag] = ['right', 'left']
 
     return get_chr_cord_data(contig_data, nclose_nodes, type4_nclose_nodes, type4_expected_high_side)
 
