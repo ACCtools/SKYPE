@@ -3,9 +3,12 @@ using BioAlignments
 using ProgressMeter
 using DataStructures
 
-Tv = Vector{Tuple{Int, Bool}}
-AlnInfo = Tuple{Int, Int, Bool, Int, Int, Int}
-Counter = DefaultDict{Int, Int, Int}
+SplitHit = Tuple{Int, Bool}
+Tv = Vector{SplitHit}
+AlnInfo = Tuple{Bool, Int, Int, Int}
+RawCountKey = Tuple{Int, Int}
+RawCounter = DefaultDict{RawCountKey, Int, Int}
+RawAnchor = Tuple{Int, Int, Int, Int, Int, Int, Bool}
 
 const QRY_OPS = (
     OP_MATCH,        # M
@@ -24,14 +27,9 @@ const REF_OPS = (
     OP_SKIP          # N
 )
 
-const DIR2INT = Dict(
-    (true,  false) => 1,
-    (false, true)  => 2,
-    (true,  true)  => 3,
-    (false, false) => 4
-)
-
-const NCLOSE_COMPRESS_LIMIT::Int = 100 * 1e3
+const RAW_TRANSLOCATION_WINDOW::Int = 5 * 1e3
+const PANDEPTH_EXCLUDE_FLAGS::UInt16 = UInt16(1796)
+const PANDEPTH_MIN_MAPQ::UInt8 = UInt8(0)
 
 function get_chr2int(fai_loc::String)
     chr2int = Dict{String, Int}()
@@ -49,165 +47,169 @@ function get_chr2int(fai_loc::String)
 end
 
 function get_alignment_info(rec::XAM.BAM.Record)
-    # destructure into op-codes and lengths
     cigar_ops, cigar_lens = XAM.BAM.cigar_rle(rec)
-
-    # count front and tail clips (hard/soft)
-    front_clip = 0
-    if !isempty(cigar_ops) && (cigar_ops[1] == OP_HARD_CLIP || cigar_ops[1] == OP_SOFT_CLIP)
-        front_clip = cigar_lens[1]
-        if length(cigar_ops) > 1 && cigar_ops[2] == OP_SOFT_CLIP
-            front_clip += cigar_lens[2]
-        end
-    end
-    tail_clip = 0
-    n = length(cigar_ops)
-    if n > 0 && (cigar_ops[n] == OP_HARD_CLIP || cigar_ops[n] == OP_SOFT_CLIP)
-        tail_clip = cigar_lens[n]
-        if n > 1 && cigar_ops[n-1] == OP_SOFT_CLIP
-            tail_clip += cigar_lens[n-1]
-        end
-    end
-
-    # compute full query length (including soft/hard clips and insertions)
-    qlen = sum(len for (op, len) in zip(cigar_ops, cigar_lens) if op in QRY_OPS)
-
-    # determine 1-based aligned span on query, accounting for strand
-    aln_dir_flag = XAM.BAM.ispositivestrand(rec)
-    if aln_dir_flag
-        qstart = front_clip + 1
-        qend   = qlen - tail_clip
-    else
-        qstart = tail_clip + 1
-        qend   = qlen - front_clip
-    end
 
     # compute reference-aligned length (M, =, X, D, N)
     rlen = sum(len for (op, len) in zip(cigar_ops, cigar_lens) if op in REF_OPS)
 
-    # 1-based reference start and end (inclusive)
-    rstart = XAM.BAM.position(rec) + 1        # POS is 0-based in SAM
+    # XAM.BAM.position is already 1-based; keep an inclusive reference span.
+    rstart = XAM.BAM.position(rec)
     rend   = rstart + rlen - 1
 
     # strand symbol and reference name
-    aln_dir = aln_dir_flag
+    aln_dir = XAM.BAM.ispositivestrand(rec)
     rname   = chr2int[XAM.BAM.refname(rec)]
 
-    return qstart, qend, aln_dir, rname, rstart, rend
+    return aln_dir, rname, rstart, rend
 end
 
-function analyze_alignments!(read_name::String, align_infos::Vector{AlnInfo},
-                             nclose_cnt_vec::Vector{Counter}, wa_nclose_cnt::Counter)
+function pass_raw_record(rec::XAM.BAM.Record)
+    return XAM.ismapped(rec) &&
+           (XAM.flags(rec) & PANDEPTH_EXCLUDE_FLAGS) == 0 &&
+           XAM.BAM.mappingquality(rec) >= PANDEPTH_MIN_MAPQ
+end
 
-    tar_data = DefaultDict{Int, Tuple{Tv, Tv}}(() -> (Tv(), Tv()))
+function query_pos_at_ref(rec::XAM.BAM.Record, coord::Int, aln::Bool)
+    cigar_ops, cigar_lens = XAM.BAM.cigar_rle(rec)
+    qlen = sum(len for (op, len) in zip(cigar_ops, cigar_lens) if op in QRY_OPS)
+    ref_pos = XAM.BAM.position(rec)
+    query_pos = 1
 
-    for (qst, qnd, aln, rid, rst, rnd) in align_infos
-        qlen = qnd - qst + 1
-        search_range = NCLOSE_COMPRESS_LIMIT + qlen
+    for (op, len) in zip(cigar_ops, cigar_lens)
+        consumes_ref = op in REF_OPS
+        consumes_query = op in QRY_OPS
 
-        cord_data = chr_cord_data[rid]
-        cord_info_data = chr_cord_info_data[rid]
-
-        i = searchsortedfirst(cord_data, rst - search_range)
-        j = searchsortedlast(cord_data, rnd + search_range)
-
-        for idx in i:j
-            nidx, pairid, isfront = cord_info_data[idx] 
-
-            push!(tar_data[nidx][pairid], (qst, isfront == aln))
-        end
-    end
-
-    nclose_total_set = DefaultDict{Int, Set{Int}}(() -> Set{Int}())
-    for (nidx, (qry_data_vec1, qry_data_vec2)) in pairs(tar_data)
-        result = Set{Tuple{Bool,Bool}}()
-
-        if !isempty(qry_data_vec1) && !isempty(qry_data_vec2)
-            sort!(qry_data_vec1, by = x -> x[1])
-            sort!(qry_data_vec2, by = x -> x[1])
-
-            i = 1
-            j = 1
-            n1 = length(qry_data_vec1)
-            n2 = length(qry_data_vec2)
-
-            while i <= n1 && j <= n2
-                q1cord, q1dir = qry_data_vec1[i]
-                q2cord, q2dir = qry_data_vec2[j]
-
-                if q1cord < q2cord
-                    push!(result, (q1dir, q2dir))
-                    i += 1
-                elseif q2cord < q1cord
-                    push!(result, (q2dir, q1dir))
-                    j += 1
-                else
-                    i += 1
-                    j += 1
+        if consumes_ref
+            ref_end = ref_pos + len - 1
+            if ref_pos <= coord <= ref_end
+                if !consumes_query
+                    return nothing
                 end
+                qpos = query_pos + (coord - ref_pos)
+                return aln ? qpos : (qlen - qpos + 1)
             end
+            ref_pos = ref_end + 1
         end
-        
-        if length(result) > 0
-            ncl = idx2nclose[nidx]
-            if length(result) == 1
-                push!(nclose_total_set[ncl], DIR2INT[first(result)])
-            else
-                push!(nclose_total_set[ncl], 0)
-            end
+
+        if consumes_query
+            query_pos += len
         end
     end
 
-    for (ncl, type_set) in nclose_total_set
-        if length(type_set) == 1
-            d = first(type_set)
-            if d == 0
-                wa_nclose_cnt[ncl] += 1
-            else
-                nclose_cnt_vec[d][ncl] += 1
-            end
-        else
-            wa_nclose_cnt[ncl] += 1
+    return nothing
+end
+
+function prepare_raw_translocation(raw_junction_spans::Vector{Vector{Any}})
+    raw_anchor_data = Vector{Vector{RawAnchor}}([RawAnchor[] for _ in 1:length(chr2int)])
+    raw_fetch_intervals = Vector{Tuple{String, Int, Int}}()
+
+    for row in raw_junction_spans
+        pair_id = Int(row[1])
+        count_idx = Int(row[2])
+        anchor_idx = Int(row[3])
+        chr = String(row[4])
+        span_st = Int(row[5])
+        span_nd = Int(row[6])
+        point_coord = Int(row[7])
+        expected_positive = Bool(row[8])
+
+        if !haskey(chr2int, chr) || anchor_idx < 1 || anchor_idx > 2
+            continue
         end
+        if span_nd < span_st
+            span_st, span_nd = span_nd, span_st
+        end
+        if span_nd < span_st
+            continue
+        end
+
+        push!(
+            raw_anchor_data[chr2int[chr]],
+            (span_st, span_nd, point_coord, pair_id, count_idx, anchor_idx, expected_positive)
+        )
+        push!(raw_fetch_intervals, (chr, span_st, span_nd))
+    end
+
+    return raw_anchor_data, unique(raw_fetch_intervals)
+end
+
+function add_raw_anchor_hits!(read_hits, rec::XAM.BAM.Record, info::AlnInfo)
+    aln, rid, rst, rnd = info
+    if rid > length(raw_anchor_data)
+        return
+    end
+
+    local_hits = Vector{Tuple{Int, Int, Int, Int, Bool}}()
+    for (_span_st, _span_nd, point_coord, pair_id, count_idx, anchor_idx, expected_positive) in raw_anchor_data[rid]
+        if rst <= point_coord <= rnd
+            qpos = query_pos_at_ref(rec, point_coord, aln)
+            if qpos === nothing
+                continue
+            end
+            push!(local_hits, (pair_id, count_idx, anchor_idx, qpos, aln == expected_positive))
+        end
+    end
+
+    if isempty(local_hits)
+        return
+    end
+
+    read_name = XAM.BAM.tempname(rec)
+    hits_by_key = get!(read_hits, read_name) do
+        DefaultDict{RawCountKey, Tuple{Tv, Tv}}(() -> (Tv(), Tv()))
+    end
+    for (pair_id, count_idx, anchor_idx, qpos, matches_expected) in local_hits
+        push!(hits_by_key[(pair_id, count_idx)][anchor_idx], (qpos, matches_expected))
     end
 end
 
-function anal_bam(bam_loc::String, fai_loc::String, nclose_cord_list::Vector{Vector{Any}}, is_progress_bar::Bool)
-    global chr2int, chr_cord_data, chr_cord_info_data, idx2nclose
-    chr2int = get_chr2int(fai_loc)
+function point_pair_is_supported!(hits1::Tv, hits2::Tv)
+    if isempty(hits1) || isempty(hits2)
+        return false
+    end
 
-    chr_cord_data = Vector{Vector{Int}}([Vector{Int}() for _ in 1:length(chr2int)])
-    chr_cord_info_data = Vector{Vector{Tuple{Int, Int, Bool}}}([Vector{Tuple{Int, Bool}}() for _ in 1:length(chr2int)])
-
-    idx2nclose = Dict{Int, Int}()
-    for (i, (chr1, cord1, dir1, chr2, cord2, dir2, num)) in enumerate(nclose_cord_list)
-        for (chr, cord, dir, is_front) in [(chr1, cord1, dir1, true), (chr2, cord2, dir2, false)]
-            dir = string(dir)
-            is_front_dir = dir == "+"
-            ci = chr2int[chr]
-
-            push!(chr_cord_data[ci], cord)
-            push!(chr_cord_info_data[ci], (i, is_front ? 1 : 2, is_front_dir == is_front))
+    for (q1, m1) in hits1
+        for (q2, m2) in hits2
+            if m1 && m2 && q1 <= q2
+                return true
+            end
+            if !m1 && !m2 && q2 <= q1
+                return true
+            end
         end
-        
-        idx2nclose[i] = num
     end
 
-    for i in eachindex(chr_cord_data)
-        si = sortperm(chr_cord_data[i])
+    return false
+end
 
-        chr_cord_data[i] = chr_cord_data[i][si]
-        chr_cord_info_data[i] = chr_cord_info_data[i][si]
+function count_raw_anchor_hits(read_hits)
+    raw_count = RawCounter(0)
+    for (_, hits_by_key) in read_hits
+        for (key, (hits1, hits2)) in pairs(hits_by_key)
+            if point_pair_is_supported!(hits1, hits2)
+                raw_count[key] += 1
+            end
+        end
     end
+    return raw_count
+end
 
-    current_read_name = nothing
-    align_infos = Vector{AlnInfo}()
+function find_bam_index(bam_loc::String)
+    candidates = String[bam_loc * ".bai"]
+    if endswith(bam_loc, ".bam")
+        push!(candidates, bam_loc[1:end-4] * ".bai")
+    end
+    for candidate in candidates
+        if isfile(candidate)
+            return candidate
+        end
+    end
+    return nothing
+end
 
+function scan_bam_all!(read_hits, bam_loc::String, is_progress_bar::Bool)
     reader = open(BAM.Reader, bam_loc)
     record = BAM.Record()
-
-    nclose_cnt_vec = [Counter(0) for _ in 1:4]
-    wa_nclose_cnt = Counter(0)
 
     if is_progress_bar
         p = ProgressUnknown(desc="Analysis bam alignments:", dt=0.1, showspeed=true)
@@ -216,33 +218,64 @@ function anal_bam(bam_loc::String, fai_loc::String, nclose_cord_list::Vector{Vec
     while !eof(reader)
         empty!(record)
         read!(reader, record)
-        
+
         if is_progress_bar
             next!(p)
         end
-        read_name = XAM.BAM.tempname(record)
 
-        if read_name != current_read_name
-            if current_read_name !== nothing && length(align_infos) >= 2
-                analyze_alignments!(current_read_name, align_infos, nclose_cnt_vec, wa_nclose_cnt)
-            end
-
-            current_read_name = read_name
-            empty!(align_infos)
-        end
-
-        if XAM.ismapped(record)
-            push!(align_infos, get_alignment_info(record))
+        if pass_raw_record(record)
+            add_raw_anchor_hits!(read_hits, record, get_alignment_info(record))
         end
     end
 
     if is_progress_bar
         println()
     end
-    
-    if current_read_name !== nothing && length(align_infos) >= 2
-        analyze_alignments!(current_read_name, align_infos, nclose_cnt_vec, wa_nclose_cnt)
+    close(reader)
+end
+
+function scan_bam_indexed!(read_hits, bam_loc::String, index_loc::String,
+                           is_progress_bar::Bool)
+    reader = open(BAM.Reader, bam_loc; index=index_loc)
+
+    if is_progress_bar
+        p = Progress(length(raw_fetch_intervals), desc="Analysis bam candidate intervals:", dt=0.1)
     end
 
-    return [[(k, v) for (k, v) in nclose_cnt_vec[i]] for i in 1:4], [(k, v) for (k, v) in wa_nclose_cnt]
+    for (chr, span_st, span_nd) in raw_fetch_intervals
+        for record in BAM.eachoverlap(reader, chr, span_st:span_nd)
+            if pass_raw_record(record)
+                add_raw_anchor_hits!(read_hits, record, get_alignment_info(record))
+            end
+        end
+        if is_progress_bar
+            next!(p)
+        end
+    end
+
+    close(reader)
+end
+
+function anal_bam(bam_loc::String, fai_loc::String, is_progress_bar::Bool,
+                  raw_junction_spans::Vector{Vector{Any}}=Vector{Vector{Any}}())
+    global chr2int
+    global raw_anchor_data, raw_fetch_intervals
+    chr2int = get_chr2int(fai_loc)
+
+    raw_anchor_data, raw_fetch_intervals = prepare_raw_translocation(raw_junction_spans)
+    if all(isempty, raw_anchor_data)
+        return Tuple{Int, Int, Int}[]
+    end
+
+    read_hits = Dict{String, DefaultDict{RawCountKey, Tuple{Tv, Tv}}}()
+    index_loc = find_bam_index(bam_loc)
+    if index_loc === nothing
+        scan_bam_all!(read_hits, bam_loc, is_progress_bar)
+    else
+        scan_bam_indexed!(read_hits, bam_loc, index_loc, is_progress_bar)
+    end
+
+    raw_translocation_count = count_raw_anchor_hits(read_hits)
+    raw_count_list = [(k[1], k[2], v) for (k, v) in raw_translocation_count]
+    return raw_count_list
 end

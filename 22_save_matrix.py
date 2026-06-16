@@ -50,8 +50,6 @@ CTG_MAINFLOWDIR = 19
 CTG_MAINFLOWCHR = 20
 CTG_GLOBALIDX = 21
 
-DEFAULT_NCLOSE_WEIGHT = 0.1
-
 ABS_MAX_COVERAGE_RATIO = 3
 MAX_PATH_CNT = 100
 
@@ -305,12 +303,6 @@ def np_safe_divide(a, b):
 def get_relative_path(p):
     return tuple(p.split('/')[-3:])
 
-def norm_B(B, B_nclose):
-    l2x = np.linalg.norm(B, 2)
-    l2y = np.linalg.norm(B_nclose, 2)
-
-    return l2x / l2y
-
 parser = argparse.ArgumentParser(description="SKYPE depth analysis")
 
 parser.add_argument("censat_bed_path",
@@ -336,13 +328,6 @@ parser.add_argument("prefix",
 
 parser.add_argument("-t", "--thread",
                     help="Number of thread", type=int)
-
-parser.add_argument("--nclose_weight",
-                    help="Nclose weight", type=float, default=DEFAULT_NCLOSE_WEIGHT)
-
-parser.add_argument("--use_nclose_weight",
-                    dest="nclose_weight_use",
-                    help="Use nclose weight", action='store_true', default=False)
 
 parser.add_argument("--progress",
                     help="Show progress bar", action='store_true')
@@ -370,9 +355,6 @@ type2_ins_contig_path = RATIO_OUTLIER_FOLDER + "type2_ins/"
 TELO_CONNECT_NODES_INFO_PATH = PREFIX + "/telomere_connected_list.txt"
 NCLOSE_FILE_PATH = f"{PREFIX}/nclose_nodes_index.txt"
 
-NCLOSE_WEIGHT = args.nclose_weight
-NCLOSE_WEIGHT_USE = args.nclose_weight_use
-
 df = pd.read_csv(main_stat_loc, compression='gzip', comment='#', sep='\t',
                  names=['chr', 'st', 'nd', 'length', 'covsite', 'totaldepth', 'cov', 'meandepth'])
 df = df.query('chr != "chrM"')
@@ -390,42 +372,6 @@ for vl in nclose_nodes_pkl.values():
 
 with open(f'{PREFIX}/path_data.pkl', 'rb') as f:
     path_list_dict = pkl.load(f)
-
-if NCLOSE_WEIGHT_USE:
-    try:
-        with open(f'{PREFIX}/nclose2cov.pkl', 'rb') as f:
-            nclose2cov = pkl.load(f)
-    except:
-        nclose2cov = {}
-
-    if len(nclose2cov) == 0:
-        NCLOSE_WEIGHT_USE = False
-else:
-    nclose2cov = {}
-
-ncm = 0
-nclose2int = dict()
-
-cov_nclose_set = set()
-cov_telo_set = set()
-
-B_nclose_list = []
-
-if NCLOSE_WEIGHT_USE:
-    for k, v in nclose2cov.items():
-        if v > 0:
-            nclose2int[k] = ncm
-            ncm += 1
-            B_nclose_list.append(v)
-
-            if isinstance(k, tuple):
-                cov_nclose_set.add(k)
-            elif isinstance(k, int):
-                cov_telo_set.add(k)
-            else:
-                assert(False)
-
-B_nclose = np.asarray(B_nclose_list, dtype=np.float32)
 
 telo_connected_node_dict = collections.defaultdict(list)
 for chr_info, contig_id in telo_connected_node:
@@ -635,12 +581,6 @@ for cs in chr_no_filt_st_list:
 
 B = np.asarray(v, dtype=np.float32)
 
-norm_nclose_weight = 0
-if NCLOSE_WEIGHT_USE:
-    norm_nclose_weight = norm_B(B, B_nclose) * NCLOSE_WEIGHT
-    B_nclose *= norm_nclose_weight
-    logging.info(f"Nclose norm weight : {norm_nclose_weight}")
-
 grouped_data = defaultdict(lambda: {"positions": [], "values": []})
 for i, (chrom, pos) in enumerate(chr_filt_st_list + chr_no_filt_st_list):
     grouped_data[chrom]["positions"].append(pos)
@@ -702,15 +642,14 @@ with open(f"{PREFIX}/report.txt", 'r') as f:
 
 use_julia_solver = path_cnt <= HARD_PATH_COUNT_BASELINE
 
-shape = (n, ncm + m)
+shape = (n, m)
 A_arr = np.empty(shape, dtype=np.float32, order='C')
 
-fm = ncm + filter_len
+fm = filter_len
 
 filter_vec_list = []
 tot_loc_list = []
 
-tmp_n = np.zeros(ncm, dtype=np.float32)
 tmp_v = np.zeros(m, dtype=np.float32)
 
 tar_def_path_ind_dict = {}
@@ -739,22 +678,7 @@ for path, key_int_list in tqdm(paf_ans_list, desc='Recover depth from separated 
         else:
             s+=1
 
-    if NCLOSE_WEIGHT_USE:
-        tmp_n.fill(0)
-        idx_edge_nclose_list = [pair[1] for pair in import_index_path(path)[1:-1]]
-        for i in [0, -1]:
-            if idx_edge_nclose_list[i] in cov_telo_set:
-                tmp_n[nclose2int[idx_edge_nclose_list[i]]] += norm_nclose_weight
-        for pair in itertools.pairwise(idx_edge_nclose_list):
-            rev = (pair[1], pair[0])
-            if pair in cov_nclose_set:
-                tmp_n[nclose2int[pair]] += norm_nclose_weight
-            if rev in cov_nclose_set:
-                tmp_n[nclose2int[rev]] += norm_nclose_weight
-        
-        A_arr[ncnt, :ncm] = tmp_n
-
-    A_arr[ncnt, ncm:] = tmp_v
+    A_arr[ncnt, :] = tmp_v
         
     path_rel = get_relative_path(path)
     if path_rel in tar_def_path_set:
@@ -767,7 +691,6 @@ tv_empty = np.zeros(len(chr_filt_st_list) + len(chr_no_filt_st_list), dtype=np.f
 
 indel_idx = 0
 # Process forward-directed outlier contigs
-tmp_n.fill(0)
 for i in tqdm(range(1, fclen // 4 + 1), desc='Parse coverage from forward-directed outlier contig gz files',
               disable=not sys.stdout.isatty() and not args.progress):
     ov_loc = front_contig_path + f"{i}.win.stat.gz"
@@ -784,15 +707,12 @@ for i in tqdm(range(1, fclen // 4 + 1), desc='Parse coverage from forward-direct
     bv_loc = front_contig_path + f"{i}_base.win.stat.gz"
     bv = get_vec_from_stat_loc(bv_loc)
     
-    if NCLOSE_WEIGHT_USE:
-        A_arr[ncnt, :ncm] = tmp_n
-
     if indel_idx in indel_exclude_idx_set:
         tv = tv_empty
     else:
         tv = ov - bv
     
-    A_arr[ncnt, ncm:] = tv
+    A_arr[ncnt, :] = tv
         
     path_nclose_dict_set[ncnt].add((ov_loc.split('/')[-2], i, type2_ins_idx))
     ncnt += 1
@@ -800,7 +720,7 @@ for i in tqdm(range(1, fclen // 4 + 1), desc='Parse coverage from forward-direct
     
 init_cols = [tar_def_path_ind_dict[i] for i in tar_chr_data.values()]
 
-A_pri = A_arr[init_cols, ncm:fm].T
+A_pri = A_arr[init_cols, :fm].T
 
 w_pri = nnls(A_pri, B[:filter_len])[0]
 
@@ -822,15 +742,12 @@ for i in tqdm(range(1, bclen // 4 + 1), desc='Parse coverage from backward-direc
     bv_loc = back_contig_path + f"{i}_base.win.stat.gz"
     bv = get_vec_from_stat_loc(bv_loc)
 
-    if NCLOSE_WEIGHT_USE:
-        A_arr[ncnt, :ncm] = tmp_n
-    
     if indel_idx in indel_exclude_idx_set:
         tv = tv_empty
     else:
         tv = ov + bv
     
-    A_arr[ncnt, ncm:] = tv
+    A_arr[ncnt, :] = tv
         
     path_nclose_dict_set[ncnt].add((ov_loc.split('/')[-2], i, type2_ins_idx))
     ncnt += 1
@@ -841,10 +758,7 @@ for i in range(1, eclen // 2 + 1):
     ov = get_vec_from_stat_loc(ov_loc)
     type2_ins_idx = -1
 
-    if NCLOSE_WEIGHT_USE:
-        A_arr[ncnt, :ncm] = tmp_n
-            
-    A_arr[ncnt, ncm:] = ov
+    A_arr[ncnt, :] = ov
         
     path_nclose_dict_set[ncnt].add((ov_loc.split('/')[-2], i, type2_ins_idx))
     ncnt += 1
@@ -853,7 +767,6 @@ for i in range(1, eclen // 2 + 1):
 # 02번에서 detect 된 (chrom, dir, mid_censat) 기반으로 fragment 1개 = column 1개.
 # 단위 indicator vector(0/1)로 채우면 NNLS weight ≈ 추가 copy 수.
 all_st_list = chr_filt_st_list + chr_no_filt_st_list
-tmp_n.fill(0)
 for chrom, info in cen_fragment_list:
     mid = info["mid"]
     chr_length = info["chr_len"]
@@ -867,14 +780,10 @@ for chrom, info in cen_fragment_list:
         if c == chrom and st_lo <= st < st_hi:
             tv[idx] = 1.0
 
-    if NCLOSE_WEIGHT_USE:
-        A_arr[ncnt, :ncm] = tmp_n
-    A_arr[ncnt, ncm:] = tv
+    A_arr[ncnt, :] = tv
 
     path_nclose_dict_set[ncnt].add(('cent_fragment', chrom, info["dir"]))
     ncnt += 1
-
-B = np.hstack((B_nclose, B))
 
 dep_list.extend([0] * (fclen // 4 + bclen // 4 + eclen // 2 + len(cen_fragment_list)))
 
@@ -897,7 +806,7 @@ with h5py.File(f'{PREFIX}/matrix.h5', 'w') as hf:
     dset_B_fail = hf.create_dataset('B_fail', shape=B[fm:].shape, dtype=B.dtype)
     dset_B_fail.write_direct(B, source_sel=np.s_[fm:])
 
-    hf.create_dataset('B_depth_start', data=ncm)
+    hf.create_dataset('B_depth_start', data=0)
 
 with open(f"{PREFIX}/23_input.pkl", "wb") as f:
     pkl.dump((chr_filt_st_list, path_nclose_dict_set, amplitude, bed_data), f)
@@ -905,4 +814,4 @@ with open(f"{PREFIX}/23_input.pkl", "wb") as f:
 with open(f"{PREFIX}/tar_chr_data.pkl", "wb") as f:
     pkl.dump(tar_chr_data, f)
 
-np.save(f'{PREFIX}/B.npy', B[ncm:])
+np.save(f'{PREFIX}/B.npy', B)

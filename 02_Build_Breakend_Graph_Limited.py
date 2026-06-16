@@ -140,6 +140,10 @@ TYPE4_INDEL_GRAPH_MIN_SPAN = 1 * M
 TYPE4_INDEL_GRAPH_DEPTH_WINDOW = 500 * K
 TYPE4_INDEL_GRAPH_DEPTH_DIFF_RATIO = 0.2
 
+RAW_TRANSLOCATION_CANDIDATE_PKL = 'raw_translocation_candidates.pkl'
+RAW_TRANSLOCATION_WINDOW = 5 * K
+RAW_TRANSLOCATION_MIN_SAME_CHROM_SPAN = 10 * M
+
 
 def import_data(file_path : str) -> list :
     contig_data = []
@@ -196,7 +200,6 @@ def import_telo_data(file_path : str, chr_len : dict) -> dict :
 
 
 def import_repeat_data_00(file_path : str) -> dict :
-    logging.info("Contig preprocessing start")
     fai_file = open(file_path, "r")
     repeat_data = defaultdict(list)
     for curr_data in fai_file:
@@ -4079,6 +4082,237 @@ def get_breakend_coord(contig, side_idx):
     nclose_dir = contig[CTG_DIR] == '+'
     return contig[CHR_STR if nclose_dir ^ nclose_loc else CHR_END]
 
+def get_expected_high_side_from_contig(contig, side_idx):
+    nclose_loc = side_idx == 0
+    nclose_dir = contig[CTG_DIR] == '+'
+    return 'right' if nclose_dir ^ nclose_loc else 'left'
+
+def get_raw_endpoint(contig, side_idx, contig_idx):
+    nclose_loc = side_idx == 0
+    is_front_dir = contig[CTG_DIR] == '+'
+    return {
+        'chrom': contig[CHR_NAM],
+        'coord': int(get_breakend_coord(contig, side_idx)),
+        'dir': contig[CTG_DIR],
+        'match_forward': bool(is_front_dir == nclose_loc),
+        'contig_idx': int(contig_idx),
+        'ctg_name': contig[CTG_NAM],
+        'ctg_st': int(contig[CTG_STR]),
+        'ctg_nd': int(contig[CTG_END]),
+        'ref_st': int(contig[CHR_STR]),
+        'ref_nd': int(contig[CHR_END]),
+        'expected_high_side': get_expected_high_side_from_contig(contig, side_idx),
+    }
+
+def canonical_raw_nclose_layout(contig_data, nclose_pair):
+    ordered_endpoints = [
+        get_raw_endpoint(contig_data[contig_idx], side_idx, contig_idx)
+        for side_idx, contig_idx in enumerate(nclose_pair)
+    ]
+
+    order = [0, 1]
+    keys = [(chr2int(ordered_endpoints[i]['chrom']), ordered_endpoints[i]['coord']) for i in order]
+    if keys[1] < keys[0]:
+        order = [1, 0]
+
+    endpoints = [ordered_endpoints[i] for i in order]
+    return {
+        'nclose_key': tuple(sorted(int(x) for x in nclose_pair)),
+        'chroms': tuple(ep['chrom'] for ep in endpoints),
+        'coords': tuple(ep['coord'] for ep in endpoints),
+        'sides': tuple(ep['expected_high_side'] for ep in endpoints),
+        'endpoints': tuple(endpoints),
+        'ordered_endpoints': tuple(ordered_endpoints),
+    }
+
+def get_inner_boundary_interval(region_a, region_b):
+    st_a, nd_a = int(region_a['ref_st']), int(region_a['ref_nd'])
+    st_b, nd_b = int(region_b['ref_st']), int(region_b['ref_nd'])
+
+    if (st_b, nd_b) < (st_a, nd_a):
+        st_a, nd_a, st_b, nd_b = st_b, nd_b, st_a, nd_a
+
+    if nd_a <= st_b:
+        return nd_a, st_b
+
+    return st_b, min(nd_a, nd_b)
+
+def get_outer_reference_interval(region_a, region_b):
+    return (
+        min(int(region_a['ref_st']), int(region_b['ref_st'])),
+        max(int(region_a['ref_nd']), int(region_b['ref_nd'])),
+    )
+
+def centered_reference_interval(chrom, inner_st, inner_nd, chr_len, size=RAW_TRANSLOCATION_WINDOW):
+    center = int(round((int(inner_st) + int(inner_nd)) / 2))
+    chrom_len = int(chr_len.get(chrom, center + size))
+    st = center - size // 2
+    nd = st + size
+
+    if st < 0:
+        st = 0
+        nd = min(size, chrom_len)
+    elif nd > chrom_len:
+        nd = chrom_len
+        st = max(0, nd - size)
+
+    return int(st), int(nd)
+
+def layout_has_split_contig_endpoint(layout):
+    return any(
+        str(endpoint['ctg_name']).startswith('split_contig_')
+        for endpoint in layout['ordered_endpoints']
+    )
+
+def layout_endpoint_dirs_are_opposite(layout):
+    endpoints = layout['ordered_endpoints']
+    return len(endpoints) == 2 and endpoints[0]['dir'] != endpoints[1]['dir']
+
+def is_large_same_chrom_raw_candidate(chrom_pair, layout_a, layout_b):
+    if chrom_pair[0] != chrom_pair[1]:
+        return False
+    if not layout_endpoint_dirs_are_opposite(layout_a):
+        return False
+    if not layout_endpoint_dirs_are_opposite(layout_b):
+        return False
+    if layout_has_split_contig_endpoint(layout_a) or layout_has_split_contig_endpoint(layout_b):
+        return False
+
+    span_a = abs(int(layout_a['coords'][1]) - int(layout_a['coords'][0]))
+    span_b = abs(int(layout_b['coords'][1]) - int(layout_b['coords'][0]))
+    return max(span_a, span_b) >= RAW_TRANSLOCATION_MIN_SAME_CHROM_SPAN
+
+def build_raw_translocation_candidates(contig_data, nclose_nodes, chr_len,
+                                       distance_threshold=RAW_TRANSLOCATION_WINDOW,
+                                       candidate_filter=None):
+    layout_by_key = {}
+    for _, pair_list in nclose_nodes.items():
+        for pair in pair_list:
+            nclose_key = tuple(sorted(int(x) for x in pair))
+            if len(nclose_key) != 2:
+                continue
+            layout_by_key[nclose_key] = canonical_raw_nclose_layout(contig_data, tuple(int(x) for x in pair))
+
+    groups = defaultdict(list)
+    for nclose_key, layout in layout_by_key.items():
+        groups[layout['chroms']].append((nclose_key, layout))
+
+    candidates = []
+    seen_candidate_signatures = set()
+    pair_id = 0
+    for chrom_pair, items in groups.items():
+        for i in range(len(items)):
+            key_i, layout_i = items[i]
+            for j in range(i + 1, len(items)):
+                key_j, layout_j = items[j]
+                if layout_i['sides'][0] == layout_j['sides'][0] or layout_i['sides'][1] == layout_j['sides'][1]:
+                    continue
+                if abs(layout_i['coords'][0] - layout_j['coords'][0]) > distance_threshold:
+                    continue
+                if abs(layout_i['coords'][1] - layout_j['coords'][1]) > distance_threshold:
+                    continue
+
+                if layout_i['sides'][0] == 'left':
+                    key_a, layout_a = key_i, layout_i
+                    key_b, layout_b = key_j, layout_j
+                else:
+                    key_a, layout_a = key_j, layout_j
+                    key_b, layout_b = key_i, layout_i
+
+                if candidate_filter is not None and not candidate_filter(chrom_pair, layout_a, layout_b):
+                    continue
+
+                candidate_signature = (
+                    chrom_pair,
+                    layout_a['coords'],
+                    layout_a['sides'],
+                    layout_b['coords'],
+                    layout_b['sides'],
+                )
+                if candidate_signature in seen_candidate_signatures:
+                    continue
+                seen_candidate_signatures.add(candidate_signature)
+
+                side_records = []
+                for side_idx, chrom in enumerate(chrom_pair):
+                    inner_st, inner_nd = get_inner_boundary_interval(
+                        layout_a['endpoints'][side_idx],
+                        layout_b['endpoints'][side_idx],
+                    )
+                    ref_st, ref_nd = centered_reference_interval(chrom, inner_st, inner_nd, chr_len)
+                    path_drop_st, path_drop_nd = get_outer_reference_interval(
+                        layout_a['endpoints'][side_idx],
+                        layout_b['endpoints'][side_idx],
+                    )
+                    side_records.append({
+                        'side_id': f'R{pair_id}.{side_idx}',
+                        'chrom': chrom,
+                        'inner_st': int(inner_st),
+                        'inner_nd': int(inner_nd),
+                        'ref_count_st': int(ref_st),
+                        'ref_count_nd': int(ref_nd),
+                        'path_drop_st': int(path_drop_st),
+                        'path_drop_nd': int(path_drop_nd),
+                        'no_spanning_rawread': False,
+                        'no_spanning_utg': False,
+                        'crossing_cols': [],
+                        'accepted_forbid': False,
+                    })
+
+                candidates.append({
+                    'pair_id': pair_id,
+                    'nclose_key_a': key_a,
+                    'nclose_key_b': key_b,
+                    'chrom_pair': chrom_pair,
+                    'layout_a': layout_a,
+                    'layout_b': layout_b,
+                    'split_junctions': [
+                        {'count_name': 'd1', 'count_idx': 1, 'nclose_key': key_a, 'endpoints': layout_a['ordered_endpoints']},
+                        {'count_name': 'd4', 'count_idx': 4, 'nclose_key': key_b, 'endpoints': layout_b['ordered_endpoints']},
+                    ],
+                    'span_junctions': [
+                        {'count_name': 'd2', 'count_idx': 2, 'side_idx': 0, 'side_id': side_records[0]['side_id']},
+                        {'count_name': 'd3', 'count_idx': 3, 'side_idx': 1, 'side_id': side_records[1]['side_id']},
+                    ],
+                    'side_records': side_records,
+                    'pair_protected_from_1M_drop': False,
+                })
+                pair_id += 1
+
+    return candidates
+
+def raw_translocation_candidate_signature(candidate):
+    return (
+        candidate['chrom_pair'],
+        candidate['layout_a']['coords'],
+        candidate['layout_a']['sides'],
+        candidate['layout_b']['coords'],
+        candidate['layout_b']['sides'],
+    )
+
+def renumber_raw_translocation_candidates(candidates):
+    for pair_id, candidate in enumerate(candidates):
+        candidate['pair_id'] = pair_id
+        for side_idx, side_record in enumerate(candidate['side_records']):
+            side_record['side_id'] = f'R{pair_id}.{side_idx}'
+        for span_junction in candidate['span_junctions']:
+            side_idx = span_junction.get('side_idx')
+            if side_idx is not None and 0 <= side_idx < len(candidate['side_records']):
+                span_junction['side_id'] = candidate['side_records'][side_idx]['side_id']
+    return candidates
+
+def merge_raw_translocation_candidates(*candidate_lists):
+    merged = []
+    seen = set()
+    for candidate_list in candidate_lists:
+        for candidate in candidate_list:
+            signature = raw_translocation_candidate_signature(candidate)
+            if signature in seen:
+                continue
+            seen.add(signature)
+            merged.append(candidate)
+    return renumber_raw_translocation_candidates(merged)
+
 def collect_nclose_breakends(contig_data, nclose_nodes):
     breakends_by_chrom = defaultdict(list)
     for ctg_name, pair_list in nclose_nodes.items():
@@ -4943,109 +5177,41 @@ def nclose_calc():
                     print(list_a, list_b, file=f)
             print("", file=f)
 
-    nclose_cord_list = []
-    total_nclose_cord_list_contig_name = []
-    nclose_idx_corr = []
-    total_dir_data = {}
-    transloc_k_set = set()
-
-    trusted_nclose_count = 0
-    for j in nclose_nodes:
-        for i in nclose_nodes[j]:
-            tf_set = set()
-
-            s = i[0]
-            e = i[1]
-
-            # Ignore inversion
-            if contig_data[s][CHR_NAM] != contig_data[e][CHR_NAM]:
-                curr_nclose_cord_list = []
-                dir_data = defaultdict(dict)
-                nclose_cord_list_contig_name = []
-                nclose_maxcover_s = contig_data[s][CHR_END] if contig_data[s][CTG_DIR] == '+' else contig_data[s][CHR_STR]
-                nclose_maxcover_e = contig_data[e][CHR_STR] if contig_data[e][CTG_DIR] == '+' else contig_data[e][CHR_END]
-                start_chr = contig_data[s][CHR_NAM]
-                end_chr = contig_data[e][CHR_NAM]
-                temp_list = [start_chr, nclose_maxcover_s, contig_data[s][CTG_DIR],
-                            end_chr, nclose_maxcover_e, contig_data[e][CTG_DIR],
-                            trusted_nclose_count]
-
-                template_dir = (contig_data[s][CTG_DIR], contig_data[e][CTG_DIR])
-                tf_set.add((True, False))
-
-                dir_data[trusted_nclose_count][(True, False)] = (contig_data[s][CTG_NAM], s, e, contig_data[s][CTG_TYP])
-                curr_nclose_cord_list.append(temp_list)
-                nclose_cord_list_contig_name.append(curr_nclose_cord_list[-1]+[contig_data[s][CTG_NAM]])
-
-                for compressed_contig in nclose_compress_track[tuple(i)]:
-                    compressed_contig = sorted(compressed_contig)
-                    
-                    is_forward = None
-                    if contig_data[compressed_contig[0]][CHR_NAM] == start_chr and contig_data[compressed_contig[1]][CHR_NAM] == end_chr:
-                        compress_s = compressed_contig[0]
-                        compress_e = compressed_contig[1]
-                        is_forward = True
-                    elif contig_data[compressed_contig[0]][CHR_NAM] == end_chr and contig_data[compressed_contig[1]][CHR_NAM] == start_chr:
-                        compress_s = compressed_contig[1]
-                        compress_e = compressed_contig[0]
-                        is_forward = False
-                    else:
-                        assert(False)
-
-                    nclose_corr_dir = (get_corr_dir(is_forward, contig_data[compress_s][CTG_DIR]),
-                                       get_corr_dir(is_forward, contig_data[compress_e][CTG_DIR]))
-                    
-                    nclose_maxcover_s = contig_data[compress_s][CHR_END] if nclose_corr_dir[0] == '+' else contig_data[compress_s][CHR_STR]
-                    nclose_maxcover_e = contig_data[compress_e][CHR_STR] if nclose_corr_dir[1] == '+' else contig_data[compress_e][CHR_END]
-
-                    temp_list = [start_chr, nclose_maxcover_s, nclose_corr_dir[0],
-                                end_chr, nclose_maxcover_e, nclose_corr_dir[1],
-                                trusted_nclose_count]
-
-                    reference_dir = (True if nclose_corr_dir[0] == template_dir[0] else False, 
-                                    False if nclose_corr_dir[1] == template_dir[1] else True)
-
-                    if reference_dir not in dir_data[trusted_nclose_count]:
-                        dir_data[trusted_nclose_count][reference_dir] = (contig_data[compress_s][CTG_NAM], compress_s, compress_e, contig_data[compress_s][CTG_TYP])
-                    
-                    tf_set.add(reference_dir)
-                    nclose_cord_list_contig_name.append(temp_list + [contig_data[compress_e][CTG_NAM]])
-                
-                if len(tf_set) >= 1:
-                    if tf_set == {(True, False), (False, True)} and template_dir[0] == template_dir[1]:
-                        transloc_k_set.add(trusted_nclose_count)
-                    
-                    assert(len(dir_data.values()) == 1)
-                    dd = list(dir_data.values())[0]
-
-                    assert(len(dd) >= 1)
-                    assert((True, False) in dd)
-
-                    nclose_cord_list += curr_nclose_cord_list
-                    total_nclose_cord_list_contig_name += nclose_cord_list_contig_name
-                    nclose_idx_corr.append(i)
-                    total_dir_data.update(dir_data)
-                    trusted_nclose_count += 1
-
-    with open(f"{PREFIX}/03_anal_bam_input.pkl", "wb") as f:
-        pkl.dump((nclose_cord_list, nclose_idx_corr, total_nclose_cord_list_contig_name,
-                  total_dir_data, transloc_k_set, nclose_nodes), f)
+    base_raw_translocation_candidates = build_raw_translocation_candidates(contig_data, nclose_nodes, chr_len)
+    all_raw_candidate_nclose_nodes = convert_all_nclose_comp_to_nclose_nodes(contig_data, all_nclose_comp)
+    raw_candidate_nclose_nodes = build_ecdna_nclose_nodes(raw_nclose_nodes, all_raw_candidate_nclose_nodes)
+    logging.info(
+        f"Raw-read translocation candidate input : "
+        f"{sum(len(v) for v in raw_nclose_nodes.values())} raw nclose, "
+        f"{sum(len(v) for v in all_raw_candidate_nclose_nodes.values())} all nclose, "
+        f"{sum(len(v) for v in raw_candidate_nclose_nodes.values())} merged nclose"
+    )
+    large_same_chrom_raw_translocation_candidates = build_raw_translocation_candidates(
+        contig_data,
+        raw_candidate_nclose_nodes,
+        chr_len,
+        candidate_filter=is_large_same_chrom_raw_candidate,
+    )
+    raw_translocation_candidates = merge_raw_translocation_candidates(
+        base_raw_translocation_candidates,
+        large_same_chrom_raw_translocation_candidates,
+    )
+    with open(f"{PREFIX}/{RAW_TRANSLOCATION_CANDIDATE_PKL}", "wb") as f:
+        pkl.dump(raw_translocation_candidates, f)
+    logging.info(
+        f"Raw-read translocation candidates : {len(raw_translocation_candidates)} "
+        f"({len(base_raw_translocation_candidates)} final-nclose, "
+        f"{len(large_same_chrom_raw_translocation_candidates)} large same-chrom)"
+    )
 
     if SKIP_BAM_ANAL:
-        task_cnt = Counter()
+        logging.info("Raw-read translocation BAM analysis skipped")
     else:
-        thread_lim = min(16, THREAD)
+        thread_lim = min(8, THREAD)
         PROGRESS = ['--progress'] if args.progress else []
         subprocess.run(['python', "-X", f"juliacall-threads={thread_lim}", "-X", "juliacall-handle-signals=yes", 
                         os.path.join(os.path.dirname(os.path.abspath(__file__)), '03_Anal_bam.py'),
-                        PREFIX, read_bam_loc, CENSAT_PATH, CHROMOSOME_INFO_FILE_PATH, main_stat_loc] + PROGRESS)
-
-        with open(f"{PREFIX}/03_anal_bam_output.pkl", "rb") as f:
-            nclose_nodes, task_cnt = pkl.load(f)
-    
-    logging.info(f"Deleted NClose node with no coverage : {task_cnt[3]}")
-    logging.info(f"Added directed NClose node with coverage : {task_cnt[1]}")
-    logging.info(f"Translocation NClose node with coverage : {task_cnt[2]}")
+                        PREFIX, read_bam_loc, CHROMOSOME_INFO_FILE_PATH, main_stat_loc] + PROGRESS)
 
     if args.exclude_nclose_list_loc is not None:
         with open(args.exclude_nclose_list_loc, 'r') as f:
