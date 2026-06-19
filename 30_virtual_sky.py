@@ -11,6 +11,7 @@ import matplotlib.pyplot as plt
 import pickle as pkl
 import matplotlib.patches as patches
 
+import csv
 import re
 import ast
 import glob
@@ -70,6 +71,8 @@ TYPE4_CLUSTER_SIZE = 10 * M
 TYPE4_MEANDEPTH_FLANKING_LENGTH = 500 * K
 NCLOSE_SIM_COMPARE_RATIO = 1.2
 NCLOSE_SIM_DIFF_THRESHOLD = 5
+RAW_TRANSLOCATION_RESULT_PKL = 'raw_translocation_result.pkl'
+RAW_TRANSLOCATION_REPORT_TSV = 'raw_translocation_read_counts.tsv'
 
 JOIN_BASELINE = 0.8
 KARYOTYPE_SECTION_MINIMUM_LENGTH = 100 * K
@@ -278,6 +281,9 @@ def distance_checker(node_a : tuple, node_b : tuple) -> int :
 def telo_condition(node : list, need_label_index : dict) -> bool:
     return node in need_label_index
 
+def virtual_event_label(event_type : str) -> str:
+    return {'d': 'del', 'i': 'ins', 'v': 'inv'}[event_type]
+
 # SKY Figure
 def plot_virtual_chromosome(ax, segments_data, maxh, cell_col, def_cell_col, label=None, karyotype_str=None):
     """
@@ -371,8 +377,8 @@ def plot_indel(ax, indel, maxh, cell_col, def_cell_col, chr_len, label=None):
     radius = width / 2.0
     round_radius = min(radius, total_length / 4)
     chr_color = CHR_COLORS.get(real_chr, "gray")
-    background_color = 'white' if indel[0]=='i' else chr_color
-    face_color = chr_color if indel[0]=='i' else 'white'
+    background_color = 'white' if indel[0] in {'i', 'v'} else chr_color
+    face_color = chr_color if indel[0] in {'i', 'v'} else 'white'
 
     clip_patch = patches.FancyBboxPatch(
         (x_center - radius, 0),
@@ -430,14 +436,15 @@ def plot_indel(ax, indel, maxh, cell_col, def_cell_col, chr_len, label=None):
             linewidth=1,
             color='black')
     
-    text_obj = ax.text(x_end+radius/5, midy, f"{'del' if indel[0] == 'd' else 'ins'}({indel[-2][3:]})", ha='left', va='center', fontsize=10, color='black')
+    event_label = virtual_event_label(indel[0])
+    text_obj = ax.text(x_end+radius/5, midy, f"{event_label}({indel[-2][3:]})", ha='left', va='center', fontsize=10, color='black')
 
     mark_overlapping_texts_with_arrows(ax, [text_obj], min_gap=5)
 
     if label:
         ax.text(x_center, -5, label, ha='center', va='top', fontsize=10)
     # 아래: 다른 염색체와 동일하게 ISCN indel 표기
-    ax.text(x_center, -10, f"{'del' if indel[0] == 'd' else 'ins'}({chrom_to_iscn(indel[4])})", ha='center', va='top', fontsize=10)
+    ax.text(x_center, -10, f"{event_label}({chrom_to_iscn(indel[4])})", ha='center', va='top', fontsize=10)
 
     ax.set_xlim(0, 60 * cell_col / def_cell_col)
     ax.set_ylim(0, 100)
@@ -940,6 +947,212 @@ def chrom_to_iscn(chrom : str) -> str:
     """'chr1' -> '1', 'chrX' -> 'X' (plot_virtual_chromosome 라벨과 동일 규칙)."""
     return chrom[3:] if chrom.startswith('chr') else chrom
 
+def parse_optional_float(value):
+    if value is None or value == '*':
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if np.isfinite(parsed) else None
+
+def load_raw_translocation_report(prefix):
+    report_path = f'{prefix}/{RAW_TRANSLOCATION_REPORT_TSV}'
+    if not os.path.isfile(report_path):
+        return {}
+
+    rows_by_pair = {}
+    with open(report_path, 'r') as f:
+        for row in csv.DictReader(f, delimiter='\t'):
+            try:
+                pair_id = int(row['pair_id'])
+            except (KeyError, TypeError, ValueError):
+                continue
+            rows_by_pair[pair_id] = row
+    return rows_by_pair
+
+def finite_mean(values):
+    finite_values = [
+        float(value) for value in values
+        if value is not None and np.isfinite(value)
+    ]
+    if not finite_values:
+        return None
+    return sum(finite_values) / len(finite_values)
+
+def estimate_raw_virtual_inv_depth(record, report_row=None):
+    estimate = record.get('depth_weighted_nclose_estimate', {})
+    expected_depth = parse_optional_float(estimate.get('weighted_expected_nclose_depth'))
+    if expected_depth is not None:
+        return expected_depth
+
+    if report_row is not None:
+        expected_depth = parse_optional_float(report_row.get('weighted_expected_nclose_depth'))
+        if expected_depth is not None:
+            return expected_depth
+
+    counts = record.get('read_counts', {})
+    point_depth = record.get('point_500k_depth', {})
+    side_inputs = [
+        (point_depth.get('point_a', {}), counts.get('d1', 0), counts.get('d2', 0)),
+        (point_depth.get('point_b', {}), counts.get('d4', 0), counts.get('d3', 0)),
+    ]
+
+    weighted_sum = 0.0
+    weight_sum = 0
+    for depth_pair, nclose_count, point_count in side_inputs:
+        point_mean = finite_mean([depth_pair.get('front'), depth_pair.get('back')])
+        if point_mean is None:
+            continue
+        try:
+            weight = int(nclose_count) + int(point_count)
+            nclose_count = int(nclose_count)
+        except (TypeError, ValueError):
+            continue
+        if weight <= 0:
+            continue
+        weighted_sum += point_mean * (nclose_count / weight) * weight
+        weight_sum += weight
+
+    if weight_sum == 0:
+        return None
+    return weighted_sum / weight_sum
+
+def record_depth_is_balanced(record, report_row=None):
+    if 'depth_balanced_translocation' in record:
+        return bool(record.get('depth_balanced_translocation'))
+    # The TSV is emitted after the depth-balance filter, so an old-schema pkl can
+    # be treated as balanced only when its pair_id still exists in the TSV.
+    return report_row is not None
+
+def raw_false_value(value):
+    return value is False or value == 0 or value == 'False' or value == 'false'
+
+def record_has_both_point_spans(record):
+    raw_no_span = record.get('raw_point_no_spanning')
+    if isinstance(raw_no_span, dict):
+        return raw_false_value(raw_no_span.get('point_a')) and raw_false_value(raw_no_span.get('point_b'))
+
+    side_records = record.get('side_records', [])
+    if len(side_records) < 2:
+        return False
+    side_flags = [
+        side.get('raw_point_no_spanning', side.get('no_spanning_rawread'))
+        for side in side_records[:2]
+    ]
+    return raw_false_value(side_flags[0]) and raw_false_value(side_flags[1])
+
+def directed_entry_coord(endpoint):
+    return int(endpoint['ref_st']) if endpoint['dir'] == '+' else int(endpoint['ref_nd'])
+
+def record_display_points(record, report_row=None):
+    if report_row is not None:
+        chrom_a = report_row.get('chrom_a')
+        chrom_b = report_row.get('chrom_b')
+        try:
+            point_a = int(report_row.get('point_a'))
+            point_b = int(report_row.get('point_b'))
+        except (TypeError, ValueError):
+            chrom_a = chrom_b = None
+        else:
+            if chrom_a and chrom_b:
+                return chrom_a, point_a, chrom_b, point_b
+
+    chrom_pair = record.get('chrom_pair', ('*', '*'))
+    layout_a = record.get('layout_a', {})
+    layout_b = record.get('layout_b', {})
+    endpoints_a = list(layout_a.get('endpoints', ()))
+    endpoints_b = list(layout_b.get('endpoints', ()))
+    side_records = record.get('side_records', [])
+
+    chrom_a = chrom_pair[0] if len(chrom_pair) > 0 else '*'
+    chrom_b = chrom_pair[1] if len(chrom_pair) > 1 else '*'
+    coord_a = None
+    coord_b = None
+
+    if len(endpoints_b) > 0:
+        coord_a = directed_entry_coord(endpoints_b[0])
+    elif len(side_records) > 0:
+        coord_a = int(side_records[0]['inner_st'])
+
+    if len(endpoints_a) > 1:
+        coord_b = directed_entry_coord(endpoints_a[1])
+    elif len(side_records) > 1:
+        coord_b = int(side_records[1]['inner_nd'])
+
+    return chrom_a, coord_a, chrom_b, coord_b
+
+def point_to_chrom_end_interval(chrom, point, side, chrom_lengths):
+    chrom_len = int(chrom_lengths[chrom])
+    point = max(0, min(int(point), chrom_len))
+    if side == 'left':
+        st, nd = 0, point
+    else:
+        st, nd = point, chrom_len
+    if nd <= st:
+        return None
+    return st, nd
+
+def layout_side(record, layout_name, side_idx, default='right'):
+    sides = record.get(layout_name, {}).get('sides', ())
+    if side_idx < len(sides):
+        return sides[side_idx]
+    return default
+
+def build_virtual_inv_events(prefix, meandepth, chrom_lengths, min_depth_N=0.0):
+    result_path = f'{prefix}/{RAW_TRANSLOCATION_RESULT_PKL}'
+    if not os.path.isfile(result_path) or meandepth <= 0:
+        return []
+
+    report_by_pair = load_raw_translocation_report(prefix)
+    with open(result_path, 'rb') as f:
+        records = pkl.load(f)
+
+    display_inv = []
+    for record in records:
+        try:
+            pair_id = int(record.get('pair_id'))
+        except (TypeError, ValueError):
+            continue
+
+        report_row = report_by_pair.get(pair_id)
+        if not record_depth_is_balanced(record, report_row):
+            continue
+        if not record_has_both_point_spans(record):
+            continue
+
+        expected_depth = estimate_raw_virtual_inv_depth(record, report_row)
+        if expected_depth is None:
+            continue
+        depth_N = expected_depth / meandepth * 2
+        if depth_N < min_depth_N:
+            continue
+
+        chrom_a, point_a, chrom_b, point_b = record_display_points(record, report_row)
+        if chrom_a not in chrom_lengths or chrom_b not in chrom_lengths:
+            continue
+        if point_a is None or point_b is None:
+            continue
+
+        if chrom_a == chrom_b:
+            st, nd = sorted([int(point_a), int(point_b)])
+            st = max(0, min(st, int(chrom_lengths[chrom_a])))
+            nd = max(0, min(nd, int(chrom_lengths[chrom_a])))
+            if nd > st:
+                display_inv.append(('v', st, nd, depth_N, chrom_a, f'RAW_TRANSLOCATION_PAIR_{pair_id}'))
+            continue
+
+        side_a = layout_side(record, 'layout_b', 0)
+        side_b = layout_side(record, 'layout_a', 1)
+        interval_a = point_to_chrom_end_interval(chrom_a, point_a, side_a, chrom_lengths)
+        interval_b = point_to_chrom_end_interval(chrom_b, point_b, side_b, chrom_lengths)
+        if interval_a is not None:
+            display_inv.append(('v', interval_a[0], interval_a[1], depth_N, chrom_a, f'RAW_TRANSLOCATION_PAIR_{pair_id}_A'))
+        if interval_b is not None:
+            display_inv.append(('v', interval_b[0], interval_b[1], depth_N, chrom_b, f'RAW_TRANSLOCATION_PAIR_{pair_id}_B'))
+
+    return display_inv
+
 def karyotype_path_to_iscn(pieces : list):
     """get_karyotype_summary 가 만든 pieces([((chrom, strand), length_bp), ...]) 를
     ISCN 문자열로 변환한다. KARYOTYPE_MIN_SEGMENT_LENGTH(1Mb) 미만 segment 는 무시.
@@ -1080,6 +1293,9 @@ def build_karyotype_diagram(fig_prefix : str = '', filter_depth_N : float = TARG
         #    check_near_type4(chrom, pos2, pos2):
         display_indel[chrom].append(("i", pos1, pos2, insertion_path_dict[path]/meandepth * 2, chrom, path))
 
+    virtual_inv_display = build_virtual_inv_events(
+        PREFIX, meandepth, chr_len, min_depth_N=filter_depth_N
+    )
         
     loc2weight = dict(zip(tot_loc_list, weights))
     
@@ -1117,8 +1333,14 @@ def build_karyotype_diagram(fig_prefix : str = '', filter_depth_N : float = TARG
                 fragment_display.append((chrom, side, info["mid"], info["chr_len"], w / meandepth * 2))
 
     cols = 10
+    display_chroms = sorted(
+        set(grouped_norm_data.keys()) | set(display_indel.keys()),
+        key=chr2int,
+    )
+
     rows = 0
-    for chr_name, data_list in grouped_norm_data.items():
+    for chr_name in display_chroms:
+        data_list = grouped_norm_data.get(chr_name, [])
         chr_indel = display_indel.get(chr_name, [])
         indel_len = len(chr_indel)
 
@@ -1126,6 +1348,9 @@ def build_karyotype_diagram(fig_prefix : str = '', filter_depth_N : float = TARG
 
     if len(fragment_display) > 0:
         rows += (len(fragment_display) - 1) // cols + 1
+
+    if len(virtual_inv_display) > 0:
+        rows += (len(virtual_inv_display) - 1) // cols + 1
 
     # if len(long_ecdna_path) > 0:
     #     rows += ((len(long_ecdna_path)-1) // cols + 1)
@@ -1148,7 +1373,10 @@ def build_karyotype_diagram(fig_prefix : str = '', filter_depth_N : float = TARG
         for ax in ax_list:
             ax.axis('off')
 
-    sorted_grouped_norm_data_items = sorted(grouped_norm_data.items(), key=lambda t: chr2int(t[0]))
+    sorted_grouped_norm_data_items = [
+        (chr_name, grouped_norm_data.get(chr_name, []))
+        for chr_name in display_chroms
+    ]
 
     now_col = 1
     for chr_name, data_list in sorted_grouped_norm_data_items:
@@ -1172,6 +1400,24 @@ def build_karyotype_diagram(fig_prefix : str = '', filter_depth_N : float = TARG
         now_col += ((len(data_list) + indel_len - 1) // cols + 1) if len(data_list) + indel_len > 0 else 0
         for col in range(bef_now_col, now_col):
             plot_scale_bar(ax_array[col][len(prefix_ratios) - 1], chr_name, maxh)
+
+    if len(virtual_inv_display) > 0:
+        bef_now_col = now_col
+        plot_chr_name(ax_array[now_col][0], 'virtual inv')
+        for i, data in enumerate(virtual_inv_display):
+            chrom = data[4]
+            plot_indel(
+                ax_array[i // cols + now_col][i % cols + len(prefix_ratios)],
+                data,
+                maxh,
+                cell_col,
+                def_cell_col,
+                chr_len[chrom] / maxh * 100,
+                label=f"{round(data[3], 2)}N",
+            )
+        now_col += (len(virtual_inv_display) - 1) // cols + 1
+        for col in range(bef_now_col, now_col):
+            plot_scale_bar(ax_array[col][len(prefix_ratios) - 1], 'virtual inv', maxh)
 
     if len(fragment_display) > 0:
         bef_now_col = now_col
@@ -1240,7 +1486,12 @@ def build_karyotype_diagram(fig_prefix : str = '', filter_depth_N : float = TARG
             if abs(pos2 - pos1) < KARYOTYPE_MIN_SEGMENT_LENGTH:
                 continue
             name = chrom_to_iscn(chrom)
-            karyotype_rows.append((f"del({name})" if typ == 'd' else f"ins({name})", depth_N))
+            karyotype_rows.append((f"{virtual_event_label(typ)}({name})", depth_N))
+    for inv_event in virtual_inv_display:
+        typ, pos1, pos2, depth_N, chrom, _name = inv_event
+        if abs(pos2 - pos1) < KARYOTYPE_MIN_SEGMENT_LENGTH:
+            continue
+        karyotype_rows.append((f"{virtual_event_label(typ)}({chrom_to_iscn(chrom)})", depth_N))
     for chrom, side, mid_bp, chr_len_bp, depth_N in fragment_display:
         arm = 'q' if side == 'right' else 'p'  # right=q arm, left=p arm
         karyotype_rows.append((f"i({chrom_to_iscn(chrom)})({arm}10)", depth_N))

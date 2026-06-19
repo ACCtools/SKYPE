@@ -141,6 +141,7 @@ TYPE4_INDEL_GRAPH_DEPTH_WINDOW = 500 * K
 TYPE4_INDEL_GRAPH_DEPTH_DIFF_RATIO = 0.2
 
 RAW_TRANSLOCATION_CANDIDATE_PKL = 'raw_translocation_candidates.pkl'
+RAW_TRANSLOCATION_RESULT_PKL = 'raw_translocation_result.pkl'
 RAW_TRANSLOCATION_WINDOW = 5 * K
 RAW_TRANSLOCATION_MIN_SAME_CHROM_SPAN = 10 * M
 
@@ -4313,6 +4314,61 @@ def merge_raw_translocation_candidates(*candidate_lists):
             merged.append(candidate)
     return renumber_raw_translocation_candidates(merged)
 
+def raw_false_value(value):
+    return value is False or value == 0 or value == 'False' or value == 'false'
+
+def raw_record_has_both_point_spans(record):
+    no_span = record.get('raw_point_no_spanning')
+    if isinstance(no_span, dict):
+        return raw_false_value(no_span.get('point_a')) and raw_false_value(no_span.get('point_b'))
+
+    side_records = record.get('side_records', [])
+    if len(side_records) < 2:
+        return False
+    side_flags = [
+        side.get('raw_point_no_spanning', side.get('no_spanning_rawread'))
+        for side in side_records[:2]
+    ]
+    return raw_false_value(side_flags[0]) and raw_false_value(side_flags[1])
+
+def raw_record_is_depth_balanced(record):
+    if 'depth_balanced_translocation' not in record:
+        return True
+    return bool(record.get('depth_balanced_translocation'))
+
+def collect_raw_virtual_inv_nclose_pairs(prefix):
+    result_path = f'{prefix}/{RAW_TRANSLOCATION_RESULT_PKL}'
+    if not os.path.isfile(result_path):
+        return set()
+
+    with open(result_path, 'rb') as f:
+        records = pkl.load(f)
+
+    pairs_to_remove = set()
+    for record in records:
+        if not raw_record_has_both_point_spans(record):
+            continue
+        if not raw_record_is_depth_balanced(record):
+            continue
+        for key_name in ('nclose_key_a', 'nclose_key_b'):
+            key = record.get(key_name)
+            if key is None:
+                continue
+            pairs_to_remove.add(tuple(sorted(int(x) for x in key)))
+
+    return pairs_to_remove
+
+def remove_nclose_pairs(nclose_nodes, pairs_to_remove):
+    filtered = defaultdict(list)
+    removed = 0
+    for ctg_name, pair_list in nclose_nodes.items():
+        for pair in pair_list:
+            if tuple(sorted(int(x) for x in pair)) in pairs_to_remove:
+                removed += 1
+                continue
+            filtered[ctg_name].append(pair)
+    return filtered, removed
+
 def collect_nclose_breakends(contig_data, nclose_nodes):
     breakends_by_chrom = defaultdict(list)
     for ctg_name, pair_list in nclose_nodes.items():
@@ -5134,48 +5190,47 @@ def nclose_calc():
                  f"(both junctions within {SUBTELO_TIP_LIMIT//1000}kb of chromosome end or telomere anchor, "
                  f"same telo-in/out direction)")
 
-    nclose_type = defaultdict(list)
-    for j in nclose_nodes:
-        for pair in nclose_nodes[j]:
-            contig_a = contig_data[pair[0]]
-            contig_b = contig_data[pair[1]]
-            if chr2int(contig_a[CHR_NAM]) <= chr2int(contig_b[CHR_NAM]):
-                nclose_type[(contig_a[CHR_NAM], contig_b[CHR_NAM])].append(pair)
-            else:
-                nclose_type[(contig_b[CHR_NAM], contig_a[CHR_NAM])].append((pair[1], pair[0]))
-    
-    transloc_nclose_pair_count = 0  
-    with open(f"{PREFIX}/compressed_nclose_nodes_list.txt", "wt") as f:
-        for i in nclose_type:
-            print(f"{i[0]}, {i[1]}, {len(nclose_type[i])}", file=f)
-            if i[0] != i[1]: 
-                transloc_nclose_pair_count += len(nclose_type[i])
-
-            st_flag = False
-            ed_flag = False
-            if (('=', i[0]), ('=', i[1])) in nclose_start_compress:
-                st_flag = True
-            if (('=', i[0]), ('=', i[1])) in nclose_end_compress:
-                ed_flag = True
-            for pair in nclose_type[i]:
+    def write_compressed_nclose_nodes_list(current_nclose_nodes):
+        nclose_type = defaultdict(list)
+        for j in current_nclose_nodes:
+            for pair in current_nclose_nodes[j]:
                 contig_a = contig_data[pair[0]]
                 contig_b = contig_data[pair[1]]
-
-                if st_flag:
-                    if contig_a[CTG_NAM] in nclose_start_compress[(('=', i[0]), ('=', i[1]))]:
-                        pass
-                
-                is_for = pair[0] < pair[1]
-                list_a = [contig_a[CTG_NAM], get_corr_dir(is_for, contig_a[CTG_DIR]), contig_a[CHR_STR], contig_a[CHR_END]]
-                list_b = [contig_b[CTG_NAM], get_corr_dir(is_for, contig_b[CTG_DIR]), contig_b[CHR_STR], contig_b[CHR_END]]
-                original_nclose = tuple(sorted(pair))
-                
-                assert(original_nclose not in not_using_nclose_node or original_nclose in saved_not_using_nclose_node)
-                if contig_a[CTG_NAM] in rpt_con:
-                    print(list_a, list_b, "all_repeat", file=f)
+                if chr2int(contig_a[CHR_NAM]) <= chr2int(contig_b[CHR_NAM]):
+                    nclose_type[(contig_a[CHR_NAM], contig_b[CHR_NAM])].append(pair)
                 else:
-                    print(list_a, list_b, file=f)
-            print("", file=f)
+                    nclose_type[(contig_b[CHR_NAM], contig_a[CHR_NAM])].append((pair[1], pair[0]))
+
+        transloc_nclose_pair_count = 0
+        with open(f"{PREFIX}/compressed_nclose_nodes_list.txt", "wt") as f:
+            for i in nclose_type:
+                print(f"{i[0]}, {i[1]}, {len(nclose_type[i])}", file=f)
+                if i[0] != i[1]:
+                    transloc_nclose_pair_count += len(nclose_type[i])
+
+                st_flag = False
+                if (('=', i[0]), ('=', i[1])) in nclose_start_compress:
+                    st_flag = True
+                for pair in nclose_type[i]:
+                    contig_a = contig_data[pair[0]]
+                    contig_b = contig_data[pair[1]]
+
+                    if st_flag:
+                        if contig_a[CTG_NAM] in nclose_start_compress[(('=', i[0]), ('=', i[1]))]:
+                            pass
+
+                    is_for = pair[0] < pair[1]
+                    list_a = [contig_a[CTG_NAM], get_corr_dir(is_for, contig_a[CTG_DIR]), contig_a[CHR_STR], contig_a[CHR_END]]
+                    list_b = [contig_b[CTG_NAM], get_corr_dir(is_for, contig_b[CTG_DIR]), contig_b[CHR_STR], contig_b[CHR_END]]
+                    original_nclose = tuple(sorted(pair))
+
+                    assert(original_nclose not in not_using_nclose_node or original_nclose in saved_not_using_nclose_node)
+                    if contig_a[CTG_NAM] in rpt_con:
+                        print(list_a, list_b, "all_repeat", file=f)
+                    else:
+                        print(list_a, list_b, file=f)
+                print("", file=f)
+        return transloc_nclose_pair_count
 
     base_raw_translocation_candidates = build_raw_translocation_candidates(contig_data, nclose_nodes, chr_len)
     all_raw_candidate_nclose_nodes = convert_all_nclose_comp_to_nclose_nodes(contig_data, all_nclose_comp)
@@ -5206,12 +5261,32 @@ def nclose_calc():
 
     if SKIP_BAM_ANAL:
         logging.info("Raw-read translocation BAM analysis skipped")
+        raw_virtual_inv_nclose_pairs = set()
     else:
         thread_lim = min(8, THREAD)
         PROGRESS = ['--progress'] if args.progress else []
-        subprocess.run(['python', "-X", f"juliacall-threads={thread_lim}", "-X", "juliacall-handle-signals=yes", 
-                        os.path.join(os.path.dirname(os.path.abspath(__file__)), '03_Anal_bam.py'),
-                        PREFIX, read_bam_loc, CHROMOSOME_INFO_FILE_PATH, main_stat_loc] + PROGRESS)
+        raw_bam_result = subprocess.run(
+            ['python', "-X", f"juliacall-threads={thread_lim}", "-X", "juliacall-handle-signals=yes",
+             os.path.join(os.path.dirname(os.path.abspath(__file__)), '03_Anal_bam.py'),
+             PREFIX, read_bam_loc, CHROMOSOME_INFO_FILE_PATH, main_stat_loc] + PROGRESS
+        )
+        if raw_bam_result.returncode == 0:
+            raw_virtual_inv_nclose_pairs = collect_raw_virtual_inv_nclose_pairs(PREFIX)
+        else:
+            logging.warning(
+                f"Raw-read translocation BAM analysis failed with exit code {raw_bam_result.returncode}; "
+                "skip raw virtual-inversion nclose removal"
+            )
+            raw_virtual_inv_nclose_pairs = set()
+
+    if raw_virtual_inv_nclose_pairs:
+        nclose_nodes, raw_virtual_inv_removed = remove_nclose_pairs(
+            nclose_nodes, raw_virtual_inv_nclose_pairs
+        )
+        logging.info(
+            f"Removed {raw_virtual_inv_removed} raw-read virtual-inversion nclose pairs "
+            f"({len(raw_virtual_inv_nclose_pairs)} unique pairs) from final compressed nclose"
+        )
 
     if args.exclude_nclose_list_loc is not None:
         with open(args.exclude_nclose_list_loc, 'r') as f:
@@ -5236,6 +5311,8 @@ def nclose_calc():
 
     with open(f'{PREFIX}/indel_exclude_idx_set.pkl', 'wb') as f:
         pkl.dump(indel_exclude_idx_set, f)
+
+    transloc_nclose_pair_count = write_compressed_nclose_nodes_list(nclose_nodes)
 
     nclose_node_count = 0
     with open(f"{PREFIX}/nclose_nodes_index.txt", "wt") as f: 

@@ -53,7 +53,6 @@ CHROM_ERROR_FAIL_RATE = 2.0
 RECIPROCAL_PAIR_DISTANCE = 10 * K
 RECIPROCAL_FORBID_MAX_INTERVAL = 10 * K
 
-RECIPROCAL_REPORT_NAME = 'reciprocal_translocation_no_span.tsv'
 RAW_TRANSLOCATION_RESULT_PKL = 'raw_translocation_result.pkl'
 
 def chr2int(x):
@@ -572,6 +571,18 @@ def assign_reciprocal_crossing_path_cols(records, prefix, paf_sort_ans_list):
 def side_is_forbidden_by_raw_read(side):
     return bool(side.get('no_spanning_rawread', side.get('no_spanning_utg', False)))
 
+def record_has_raw_point_no_span(record):
+    no_span = record.get('raw_point_no_spanning')
+    if isinstance(no_span, dict):
+        return bool(no_span.get('point_a', False) or no_span.get('point_b', False))
+
+    side_flags = [
+        side.get('raw_point_no_spanning')
+        for side in record.get('side_records', [])
+        if 'raw_point_no_spanning' in side
+    ]
+    return any(bool(flag) for flag in side_flags)
+
 def load_raw_translocation_records(prefix):
     result_path = f'{prefix}/{RAW_TRANSLOCATION_RESULT_PKL}'
     if not os.path.isfile(result_path):
@@ -612,37 +623,6 @@ def get_fail_chrom_list(chrom_acc_sum_dict_max, chrom_acc_sum_dict_max_base, no_
         if chrom_error_rate > CHROM_ERROR_FAIL_RATE:
             fail_chrom_list.append(chrom)
     return fail_chrom_list
-
-def write_reciprocal_translocation_report(prefix, records):
-    report_path = f'{prefix}/{RECIPROCAL_REPORT_NAME}'
-    columns = [
-        'pair_id', 'nclose_key_a', 'nclose_key_b',
-        'chrom', 'start', 'end', 'is_single_translocation',
-        'nclose_a_read_count', 'point_a_norm_read_count',
-        'nclose_b_read_count', 'point_b_norm_read_count',
-    ]
-
-    with open(report_path, 'w') as f:
-        f.write('\t'.join(columns) + '\n')
-        for record in records:
-            counts = record.get('read_counts', {})
-            for side in record['side_records']:
-                row = [
-                    str(record['pair_id']),
-                    str(record['nclose_key_a']),
-                    str(record['nclose_key_b']),
-                    side['chrom'],
-                    str(side['inner_st']),
-                    str(side['inner_nd']),
-                    str(side['accepted_forbid']),
-                    str(counts.get('d1', '*')),
-                    str(counts.get('d2', '*')),
-                    str(counts.get('d4', '*')),
-                    str(counts.get('d3', '*')),
-                ]
-                f.write('\t'.join(row) + '\n')
-
-    return report_path
 
 def group_close_coordinates(data_list, distance_threshold=50 * K):
     """
@@ -1040,7 +1020,10 @@ reciprocal_side_by_id = assign_reciprocal_crossing_path_cols(
 )
 
 active_reciprocal_side_ids = {
-    side_id for side_id, side in reciprocal_side_by_id.items()
+    side['side_id']
+    for record in reciprocal_records
+    if record_has_raw_point_no_span(record)
+    for side in record.get('side_records', [])
     if side_is_forbidden_by_raw_read(side)
 }
 reciprocal_path_drop_cols = set()
@@ -1102,12 +1085,14 @@ for side_id in active_reciprocal_side_ids:
 
 reciprocal_transloc_nclose_set = set()
 for record in reciprocal_records:
-    if any(side['accepted_forbid'] for side in record['side_records']):
+    if (
+        record_has_raw_point_no_span(record) and
+        any(side['accepted_forbid'] for side in record['side_records'])
+    ):
         record['pair_protected_from_1M_drop'] = True
         reciprocal_transloc_nclose_set.add(record['nclose_key_a'])
         reciprocal_transloc_nclose_set.add(record['nclose_key_b'])
 
-reciprocal_report_path = write_reciprocal_translocation_report(PREFIX, reciprocal_records)
 logging.info(
     f'Reciprocal translocation no-span candidates : {len(active_reciprocal_side_ids)}'
 )

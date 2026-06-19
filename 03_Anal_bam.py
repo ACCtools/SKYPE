@@ -22,6 +22,7 @@ RAW_TRANSLOCATION_RESULT_PKL = 'raw_translocation_result.pkl'
 RAW_TRANSLOCATION_REPORT_TSV = 'raw_translocation_read_counts.tsv'
 RAW_TRANSLOCATION_WINDOW = 5000
 RAW_TRANSLOCATION_DEPTH_FLANK = 500000
+RAW_TRANSLOCATION_DEPTH_BALANCED_RATIO = 1.1
 RAW_COUNT_NAMES = {
     'd1': 'nclose_a_read_count',
     'd2': 'point_a_norm_read_count',
@@ -123,6 +124,52 @@ def mean_depth_around_coord(depth_by_chrom, chrom, coord, chr_len,
 
 def format_depth(value):
     return '*' if value is None or not np.isfinite(value) else round(float(value), 6)
+
+def depth_pair_is_balanced(depth_pair, ratio=RAW_TRANSLOCATION_DEPTH_BALANCED_RATIO):
+    if not depth_pair:
+        return False
+    front = depth_pair.get('front')
+    back = depth_pair.get('back')
+    if front is None or back is None:
+        return False
+    if not (np.isfinite(front) and np.isfinite(back)):
+        return False
+    if front < 0 or back < 0:
+        return False
+    low, high = sorted([float(front), float(back)])
+    if low == 0:
+        return high == 0
+    return (high / low) <= ratio
+
+def depth_pair_mean(depth_pair):
+    if not depth_pair:
+        return None
+    front = depth_pair.get('front')
+    back = depth_pair.get('back')
+    if front is None or back is None:
+        return None
+    if not (np.isfinite(front) and np.isfinite(back)):
+        return None
+    return (float(front) + float(back)) / 2
+
+def estimate_nclose_depth(point_depth, nclose_count, point_count):
+    weight = int(nclose_count) + int(point_count)
+    if point_depth is None or weight <= 0:
+        return None, None, 0
+    vaf = int(nclose_count) / weight
+    return vaf, float(point_depth) * vaf, weight
+
+def weighted_expected_depth(*estimate_data):
+    weighted_sum = 0.0
+    weight_sum = 0
+    for _, expected_depth, weight in estimate_data:
+        if expected_depth is None or not np.isfinite(expected_depth) or weight <= 0:
+            continue
+        weighted_sum += expected_depth * weight
+        weight_sum += weight
+    if weight_sum == 0:
+        return None
+    return weighted_sum / weight_sum
 
 def clamp_break_coord(coord, chrom_len):
     return max(1, min(int(coord), int(chrom_len)))
@@ -363,16 +410,42 @@ for candidate in raw_translocation_candidates:
     d4 = raw_translocation_counts.get((pair_id, 4), 0)
     point_a_no_spanning = d2 == 0
     point_b_no_spanning = d3 == 0
+    point_depth = raw_point_depths.get(pair_id, {})
+    point_a_depth_balanced = depth_pair_is_balanced(point_depth.get('point_a', {}))
+    point_b_depth_balanced = depth_pair_is_balanced(point_depth.get('point_b', {}))
+    depth_balanced_translocation = point_a_depth_balanced and point_b_depth_balanced
+    point_a_depth_mean = depth_pair_mean(point_depth.get('point_a', {}))
+    point_b_depth_mean = depth_pair_mean(point_depth.get('point_b', {}))
+    point_a_estimate = estimate_nclose_depth(point_a_depth_mean, d1, d2)
+    point_b_estimate = estimate_nclose_depth(point_b_depth_mean, d4, d3)
+    weighted_nclose_depth = weighted_expected_depth(point_a_estimate, point_b_estimate)
 
     record = copy.deepcopy(candidate)
     record['read_counts'] = {'d1': d1, 'd2': d2, 'd3': d3, 'd4': d4}
     record['raw_point_no_spanning'] = {'point_a': point_a_no_spanning, 'point_b': point_b_no_spanning}
-    record['point_500k_depth'] = raw_point_depths.get(pair_id, {})
+    record['point_500k_depth'] = point_depth
+    record['raw_point_depth_balanced'] = {
+        'point_a': point_a_depth_balanced,
+        'point_b': point_b_depth_balanced,
+    }
+    record['depth_balanced_translocation'] = depth_balanced_translocation
+    record['depth_weighted_nclose_estimate'] = {
+        'point_a_mean_500k_depth': point_a_depth_mean,
+        'point_b_mean_500k_depth': point_b_depth_mean,
+        'point_a_nclose_vaf': point_a_estimate[0],
+        'point_b_nclose_vaf': point_b_estimate[0],
+        'nclose_a_expected_depth': point_a_estimate[1],
+        'nclose_b_expected_depth': point_b_estimate[1],
+        'weighted_expected_nclose_depth': weighted_nclose_depth,
+    }
     for side_idx, side in enumerate(record.get('side_records', [])):
         point_no_spanning = point_a_no_spanning if side_idx == 0 else point_b_no_spanning
+        point_depth_balanced = point_a_depth_balanced if side_idx == 0 else point_b_depth_balanced
         side['no_spanning_rawread'] = point_no_spanning
         side['no_spanning_utg'] = point_no_spanning
         side['raw_point_no_spanning'] = point_no_spanning
+        side['raw_depth_balanced_500k'] = point_depth_balanced
+        side['depth_balanced_translocation'] = depth_balanced_translocation
         side['accepted_forbid'] = False
         side.setdefault('crossing_cols', [])
     raw_translocation_records.append(record)
@@ -387,19 +460,25 @@ with open(f"{PREFIX}/{RAW_TRANSLOCATION_REPORT_TSV}", "wt") as f:
         'point_b_front_500k_mean_depth', 'point_b_back_500k_mean_depth',
         'nclose_a', 'nclose_b',
         RAW_COUNT_NAMES['d1'], RAW_COUNT_NAMES['d2'],
-        RAW_COUNT_NAMES['d3'], RAW_COUNT_NAMES['d4'],
+        RAW_COUNT_NAMES['d4'], RAW_COUNT_NAMES['d3'],
         'point_a_no_spanning_rawread', 'point_b_no_spanning_rawread',
+        'point_a_nclose_vaf', 'point_b_nclose_vaf',
+        'nclose_a_expected_depth', 'nclose_b_expected_depth',
+        'weighted_expected_nclose_depth',
         RAW_BASIS_NAMES['d1'], RAW_BASIS_NAMES['d2'],
-        RAW_BASIS_NAMES['d3'], RAW_BASIS_NAMES['d4'],
+        RAW_BASIS_NAMES['d4'], RAW_BASIS_NAMES['d3'],
         'pair_id',
     ], sep='\t', file=f)
     for record in raw_translocation_records:
+        if not record.get('depth_balanced_translocation', False):
+            continue
         counts = record['read_counts']
         chrom_a, coord_a, chrom_b, coord_b = candidate_display_points(record)
         basis = raw_count_basis_texts.get(int(record['pair_id']), {})
         point_depth = record.get('point_500k_depth', {})
         point_a_depth = point_depth.get('point_a', {})
         point_b_depth = point_depth.get('point_b', {})
+        depth_estimate = record.get('depth_weighted_nclose_estimate', {})
         print(
             chrom_a, coord_a, chrom_b, coord_b,
             format_depth(point_a_depth.get('front')),
@@ -409,11 +488,16 @@ with open(f"{PREFIX}/{RAW_TRANSLOCATION_REPORT_TSV}", "wt") as f:
             layout_segment_text(record['layout_a']),
             layout_segment_text(record['layout_b']),
             counts['d1'], counts['d2'],
-            counts['d3'], counts['d4'],
+            counts['d4'], counts['d3'],
             record.get('raw_point_no_spanning', {}).get('point_a', False),
             record.get('raw_point_no_spanning', {}).get('point_b', False),
+            format_depth(depth_estimate.get('point_a_nclose_vaf')),
+            format_depth(depth_estimate.get('point_b_nclose_vaf')),
+            format_depth(depth_estimate.get('nclose_a_expected_depth')),
+            format_depth(depth_estimate.get('nclose_b_expected_depth')),
+            format_depth(depth_estimate.get('weighted_expected_nclose_depth')),
             basis.get('d1', '*'), basis.get('d2', '*'),
-            basis.get('d3', '*'), basis.get('d4', '*'),
+            basis.get('d4', '*'), basis.get('d3', '*'),
             record['pair_id'],
             sep='\t', file=f
         )

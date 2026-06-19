@@ -35,6 +35,8 @@ logging.info("31_depth_analysis start")
 BREAKEND_REMARKABLE_CN_RATIO = 0.05
 TELOMERE_REMARKABLE_CN_RATIO = 0.05
 VCF_FILTER_DEPTH_N = 0.1
+RAW_TRANSLOCATION_RESULT_PKL = 'raw_translocation_result.pkl'
+RAW_TRANSLOCATION_REPORT_TSV = 'raw_translocation_read_counts.tsv'
 
 CTG_NAM = 0
 CTG_LEN = 1
@@ -536,7 +538,212 @@ def write_vcf_header(fh, contig_lengths):
         fh.write(f"##contig=<ID={chrom},length={length}>\n")
     fh.write("#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n")
 
-def _pairs_to_vcf(nclose_pairs, contig_data, contig_lengths, display_indel, out_vcf_path, significant_nclose, nclose_cn_std):
+def parse_optional_float(value):
+    if value is None or value == '*':
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if np.isfinite(parsed) else None
+
+def load_raw_translocation_report(prefix):
+    report_path = f'{prefix}/{RAW_TRANSLOCATION_REPORT_TSV}'
+    if not os.path.isfile(report_path):
+        return {}
+
+    rows_by_pair = {}
+    with open(report_path, 'r') as f:
+        for row in csv.DictReader(f, delimiter='\t'):
+            try:
+                pair_id = int(row['pair_id'])
+            except (KeyError, TypeError, ValueError):
+                continue
+            rows_by_pair[pair_id] = row
+    return rows_by_pair
+
+def finite_mean(values):
+    finite_values = [
+        float(value) for value in values
+        if value is not None and np.isfinite(value)
+    ]
+    if not finite_values:
+        return None
+    return sum(finite_values) / len(finite_values)
+
+def estimate_raw_virtual_inv_depth(record, report_row=None):
+    estimate = record.get('depth_weighted_nclose_estimate', {})
+    expected_depth = parse_optional_float(estimate.get('weighted_expected_nclose_depth'))
+    if expected_depth is not None:
+        return expected_depth
+
+    if report_row is not None:
+        expected_depth = parse_optional_float(report_row.get('weighted_expected_nclose_depth'))
+        if expected_depth is not None:
+            return expected_depth
+
+    counts = record.get('read_counts', {})
+    point_depth = record.get('point_500k_depth', {})
+    side_inputs = [
+        (point_depth.get('point_a', {}), counts.get('d1', 0), counts.get('d2', 0)),
+        (point_depth.get('point_b', {}), counts.get('d4', 0), counts.get('d3', 0)),
+    ]
+
+    weighted_sum = 0.0
+    weight_sum = 0
+    for depth_pair, nclose_count, point_count in side_inputs:
+        point_mean = finite_mean([depth_pair.get('front'), depth_pair.get('back')])
+        if point_mean is None:
+            continue
+        try:
+            weight = int(nclose_count) + int(point_count)
+            nclose_count = int(nclose_count)
+        except (TypeError, ValueError):
+            continue
+        if weight <= 0:
+            continue
+        weighted_sum += point_mean * (nclose_count / weight) * weight
+        weight_sum += weight
+
+    if weight_sum == 0:
+        return None
+    return weighted_sum / weight_sum
+
+def record_depth_is_balanced(record, report_row=None):
+    if 'depth_balanced_translocation' in record:
+        return bool(record.get('depth_balanced_translocation'))
+    return report_row is not None
+
+def raw_false_value(value):
+    return value is False or value == 0 or value == 'False' or value == 'false'
+
+def record_has_both_point_spans(record):
+    raw_no_span = record.get('raw_point_no_spanning')
+    if isinstance(raw_no_span, dict):
+        return raw_false_value(raw_no_span.get('point_a')) and raw_false_value(raw_no_span.get('point_b'))
+
+    side_records = record.get('side_records', [])
+    if len(side_records) < 2:
+        return False
+    side_flags = [
+        side.get('raw_point_no_spanning', side.get('no_spanning_rawread'))
+        for side in side_records[:2]
+    ]
+    return raw_false_value(side_flags[0]) and raw_false_value(side_flags[1])
+
+def directed_entry_coord(endpoint):
+    return int(endpoint['ref_st']) if endpoint['dir'] == '+' else int(endpoint['ref_nd'])
+
+def record_display_points(record, report_row=None):
+    if report_row is not None:
+        chrom_a = report_row.get('chrom_a')
+        chrom_b = report_row.get('chrom_b')
+        try:
+            point_a = int(report_row.get('point_a'))
+            point_b = int(report_row.get('point_b'))
+        except (TypeError, ValueError):
+            chrom_a = chrom_b = None
+        else:
+            if chrom_a and chrom_b:
+                return chrom_a, point_a, chrom_b, point_b
+
+    chrom_pair = record.get('chrom_pair', ('*', '*'))
+    layout_a = record.get('layout_a', {})
+    layout_b = record.get('layout_b', {})
+    endpoints_a = list(layout_a.get('endpoints', ()))
+    endpoints_b = list(layout_b.get('endpoints', ()))
+    side_records = record.get('side_records', [])
+
+    chrom_a = chrom_pair[0] if len(chrom_pair) > 0 else '*'
+    chrom_b = chrom_pair[1] if len(chrom_pair) > 1 else '*'
+    coord_a = None
+    coord_b = None
+
+    if len(endpoints_b) > 0:
+        coord_a = directed_entry_coord(endpoints_b[0])
+    elif len(side_records) > 0:
+        coord_a = int(side_records[0]['inner_st'])
+
+    if len(endpoints_a) > 1:
+        coord_b = directed_entry_coord(endpoints_a[1])
+    elif len(side_records) > 1:
+        coord_b = int(side_records[1]['inner_nd'])
+
+    return chrom_a, coord_a, chrom_b, coord_b
+
+def point_to_chrom_end_interval(chrom, point, side, contig_lengths):
+    chrom_len = int(contig_lengths[chrom])
+    point = max(0, min(int(point), chrom_len))
+    if side == 'left':
+        st, nd = 0, point
+    else:
+        st, nd = point, chrom_len
+    if nd <= st:
+        return None
+    return st, nd
+
+def layout_side(record, layout_name, side_idx, default='right'):
+    sides = record.get(layout_name, {}).get('sides', ())
+    if side_idx < len(sides):
+        return sides[side_idx]
+    return default
+
+def build_virtual_inv_events(prefix, meandepth, contig_lengths, min_depth_N=0.0):
+    result_path = f'{prefix}/{RAW_TRANSLOCATION_RESULT_PKL}'
+    if not os.path.isfile(result_path) or meandepth <= 0:
+        return []
+
+    report_by_pair = load_raw_translocation_report(prefix)
+    with open(result_path, 'rb') as f:
+        records = pkl.load(f)
+
+    events = []
+    for record in records:
+        try:
+            pair_id = int(record.get('pair_id'))
+        except (TypeError, ValueError):
+            continue
+
+        report_row = report_by_pair.get(pair_id)
+        if not record_depth_is_balanced(record, report_row):
+            continue
+        if not record_has_both_point_spans(record):
+            continue
+
+        expected_depth = estimate_raw_virtual_inv_depth(record, report_row)
+        if expected_depth is None:
+            continue
+        depth_N = expected_depth / meandepth * 2
+        if depth_N < min_depth_N:
+            continue
+
+        chrom_a, point_a, chrom_b, point_b = record_display_points(record, report_row)
+        if chrom_a not in contig_lengths or chrom_b not in contig_lengths:
+            continue
+        if point_a is None or point_b is None:
+            continue
+
+        if chrom_a == chrom_b:
+            st, nd = sorted([int(point_a), int(point_b)])
+            st = max(0, min(st, int(contig_lengths[chrom_a])))
+            nd = max(0, min(nd, int(contig_lengths[chrom_a])))
+            if nd > st:
+                events.append((chrom_a, st, nd, expected_depth, depth_N, f'RAW_TRANSLOCATION_PAIR_{pair_id}'))
+            continue
+
+        side_a = layout_side(record, 'layout_b', 0)
+        side_b = layout_side(record, 'layout_a', 1)
+        interval_a = point_to_chrom_end_interval(chrom_a, point_a, side_a, contig_lengths)
+        interval_b = point_to_chrom_end_interval(chrom_b, point_b, side_b, contig_lengths)
+        if interval_a is not None:
+            events.append((chrom_a, interval_a[0], interval_a[1], expected_depth, depth_N, f'RAW_TRANSLOCATION_PAIR_{pair_id}_A'))
+        if interval_b is not None:
+            events.append((chrom_b, interval_b[0], interval_b[1], expected_depth, depth_N, f'RAW_TRANSLOCATION_PAIR_{pair_id}_B'))
+
+    return events
+
+def _pairs_to_vcf(nclose_pairs, contig_data, contig_lengths, display_indel, virtual_inv_events,
+                  out_vcf_path, significant_nclose, nclose_cn_std):
     with open(out_vcf_path, 'w') as fo:
         # 1) 헤더 쓰기
         write_vcf_header(fo, contig_lengths)
@@ -635,6 +842,14 @@ def _pairs_to_vcf(nclose_pairs, contig_data, contig_lengths, display_indel, out_
                     f"{chrom}\t{lo}\t{sv_id}\tN\t{alt}\t60\tPASS\t"
                     f"SVTYPE={alt[1:-1]};END={hi};SVLEN={svlen};WEIGHT={round(w, 2)};CTG_NAME=INDEL_INDEX_{indel_idx}\n"
                 )
+
+        for inv_counter, (chrom, st, nd, _, depth_N, name) in enumerate(virtual_inv_events, start=1):
+            pos = max(1, int(st))
+            end = max(pos, int(nd))
+            fo.write(
+                f"{chrom}\t{pos}\tSKYPE.VINV.{inv_counter}\tN\t<INV>\t60\tPASS\t"
+                f"SVTYPE=INV;END={end};SVLEN={end - pos};WEIGHT={round(depth_N, 2)};CTG_NAME={name}\n"
+            )
 
 parser = argparse.ArgumentParser(description="SKYPE depth analysis")
 
@@ -1041,6 +1256,13 @@ def draw_circos_plot(fig_prefix=''):
 
         indel_val_list.append(v / meandepth * 2)
 
+    virtual_inv_events = build_virtual_inv_events(
+        PREFIX, meandepth, chr_len, min_depth_N=BREAKEND_REMARKABLE_CN / N
+    )
+    for chrom, st, nd, expected_depth, depth_N, _ in virtual_inv_events:
+        bnd_cn_data.append([(chrom, st), (chrom, nd), expected_depth, 'virtual_inv'])
+        inv_val_list.append(depth_N)
+
     a = sorted(list(telo_cn.items()), key = lambda t:t[1])
     telo_zorder_dict = {}
     for i, v in enumerate(a):
@@ -1059,6 +1281,7 @@ def draw_circos_plot(fig_prefix=''):
         'inversion': '-.',
         'indel': '--',
         'virtual_indel': (0, (5, 2)),
+        'virtual_inv': (0, (2, 2)),
     }
 
     for i, (bnd_loc1, bnd_loc2, cn, event_type) in enumerate(bnd_cn_data):
@@ -1167,6 +1390,7 @@ def draw_circos_plot(fig_prefix=''):
         Line2D([], [], color="black", label="Inversion", linestyle = '-.'),
         Line2D([], [], color="black", label="Indel", linestyle = '--'),
         Line2D([], [], color="black", label="Virtual indel", linestyle = (0, (5, 2))),
+        Line2D([], [], color="black", label="Virtual inversion", linestyle = (0, (2, 2))),
     ]
 
     cn_line_legend = circos.ax.legend(
@@ -1214,6 +1438,9 @@ def pairs_to_vcf(out_prefix=''):
             type2_nclose_node.add(nclose)
 
     display_indel = defaultdict(list)
+    virtual_inv_events = build_virtual_inv_events(
+        PREFIX, meandepth, chr_len, min_depth_N=VCF_FILTER_DEPTH_N
+    )
 
     rpll = len(raw_path_list)
     for i in range(rpll, len(weights)):
@@ -1253,10 +1480,18 @@ def pairs_to_vcf(out_prefix=''):
             exist_near_bnd(contig_data[ed][CHR_NAM], contig_data[ed][CHR_STR], contig_data[ed][CHR_END]):
                 significant_nclose.append(nclose)
                 
-    logging.info(f"{out_prefix[1:].capitalize()}{' ' if out_prefix else ''}Total called breakends (DUP, DEL, BND, INV) : {len(all_nclose) + len(display_indel)}")
+    indel_event_count = sum(len(indel_list) for indel_list in display_indel.values())
+    logging.info(
+        f"{out_prefix[1:].capitalize()}{' ' if out_prefix else ''}"
+        f"Total called breakends (DUP, DEL, BND, INV) : "
+        f"{len(all_nclose) + indel_event_count + len(virtual_inv_events)}"
+    )
 
     vcf_path = f"{PREFIX}/SV_call_result{out_prefix}.vcf"
-    _pairs_to_vcf(all_nclose, contig_data, chr_len, display_indel, vcf_path, significant_nclose, nclose_cn_std)
+    _pairs_to_vcf(
+        all_nclose, contig_data, chr_len, display_indel, virtual_inv_events,
+        vcf_path, significant_nclose, nclose_cn_std
+    )
 
 pairs_to_vcf()
 if use_julia_solver:
@@ -1340,6 +1575,11 @@ def make_bed_output(output_prefix=''):
 
                 else:
                     assert(False)
+
+        for chrom, st, nd, _, depth_N, _name in build_virtual_inv_events(
+            PREFIX, meandepth, chr_len, min_depth_N=BREAKEND_REMARKABLE_CN / N
+        ):
+            cf.writerow([chrom, st, nd, 'Virtual_inversion', round(depth_N, 2)])
 
 
 make_bed_output()
