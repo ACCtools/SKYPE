@@ -38,6 +38,10 @@ VCF_FILTER_DEPTH_N = 0.1
 RAW_TRANSLOCATION_RESULT_PKL = 'raw_translocation_result.pkl'
 RAW_TRANSLOCATION_REPORT_TSV = 'raw_translocation_read_counts.tsv'
 
+BND_TYPE = 0
+CTG_IN_TYPE = 1
+TEL_TYPE = 2
+
 CTG_NAM = 0
 CTG_LEN = 1
 CTG_STR = 2
@@ -63,6 +67,7 @@ ABS_MAX_COVERAGE_RATIO = 3
 MAX_PATH_CNT = 100
 
 DIR_FOR = 1
+DIR_BAK = 0
 TELOMERE_EXPANSION = 5 * K
 
 CONJOINED_CONTIG_MINIMUM_LENGTH = 200*K
@@ -73,6 +78,10 @@ TYPE2_SIM_COMPARE_RAITO = 1.5
 TYPE34_BREAK_CHUKJI_LIMIT = 1*M
 
 NCLOSE_SIM_COMPARE_RAITO = 1.2
+
+CTG_INTYPE_CHECK_MIN_LENGTH = 100 * K
+CTG_INTYPE_INSERT_MIN_SEGMENT_LENGTH = 10 * K
+CTG_INTYPE_INSERT_MIN_RATIO = 0.2
 
 
 def similar_check(v1, v2, ratio=TYPE2_SIM_COMPARE_RAITO):
@@ -459,6 +468,24 @@ def import_data2(file_path : str) -> list :
     paf_file.close()
     return contig_data
 
+def import_path_paf_rows(file_path : str) -> list:
+    rows = []
+    with open(file_path, "r") as paf_file:
+        for curr_contig in paf_file:
+            curr_contig = curr_contig.rstrip()
+            if not curr_contig:
+                continue
+            temp_list = curr_contig.split("\t")
+            int_induce_idx = [
+                CTG_LEN, CTG_STR, CTG_END,
+                CHR_LEN, CHR_STR, CHR_END,
+                CTG_MAPQ,
+            ]
+            for i in int_induce_idx:
+                temp_list[i] = int(temp_list[i])
+            rows.append(tuple(temp_list))
+    return rows
+
 def import_bed(bed_path : str) -> dict:
     bed_data_file = open(bed_path, "r")
     chr_len = collections.defaultdict(list)
@@ -533,10 +560,233 @@ def write_vcf_header(fh, contig_lengths):
     fh.write('##INFO=<ID=STRANDS,Number=1,Type=String,Description="Breakpoint strandedness">\n')
     fh.write('##INFO=<ID=MATEID,Number=1,Type=String,Description="ID of mate breakend">\n')
     fh.write('##INFO=<ID=MERGE_MATEID,Number=1,Type=String,Description="ID of merged breakend">\n')
-    fh.write('##FILTER=<ID=FAIL,Description="No significant depth difference between flanking regions">\n')
     for chrom, length in contig_lengths.items():
         fh.write(f"##contig=<ID={chrom},length={length}>\n")
     fh.write("#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n")
+
+def write_bnd_vcf_pair(
+    fh,
+    sv_id_base,
+    chr_a,
+    pos_a,
+    dir_a,
+    chr_b,
+    pos_b,
+    dir_b,
+    weight_N,
+    ctg_name,
+    quality=60,
+    filter_str='.',
+    merge_mate_ids=None,
+):
+    pos_a = max(1, int(pos_a))
+    pos_b = max(1, int(pos_b))
+    strands = make_strands(dir_a, dir_b)
+    form_a, form_b = choose_alt_forms(dir_a, dir_b)
+    sv_id_a = f"{sv_id_base}_1"
+    sv_id_b = f"{sv_id_base}_2"
+    ref = "N"
+    alt_a = bnd_alt(ref, chr_b, pos_b, form_a)
+    alt_b = bnd_alt(ref, chr_a, pos_a, form_b)
+
+    merge_mate_id_str = ''
+    if merge_mate_ids:
+        merge_mate_id_str = f";MERGE_MATEID={','.join(merge_mate_ids)}"
+
+    fh.write(
+        f"{chr_a}\t{pos_a}\t{sv_id_a}\t{ref}\t{alt_a}\t{quality}\t{filter_str}\t"
+        f"SVTYPE=BND;WEIGHT={round(weight_N, 2)};CTG_NAME={ctg_name};"
+        f"STRANDS={strands};MATEID={sv_id_b}{merge_mate_id_str}\n"
+    )
+    fh.write(
+        f"{chr_b}\t{pos_b}\t{sv_id_b}\t{ref}\t{alt_b}\t{quality}\t{filter_str}\t"
+        f"SVTYPE=BND;WEIGHT={round(weight_N, 2)};CTG_NAME={ctg_name};"
+        f"STRANDS={strands};MATEID={sv_id_a}{merge_mate_id_str}\n"
+    )
+
+def invert_strand(strand):
+    return '-' if strand == '+' else '+'
+
+def path_node_strand(node, path_dir):
+    strand = node[CTG_DIR] if node[CTG_DIR] in {'+', '-'} else '+'
+    return strand if path_dir == DIR_FOR else invert_strand(strand)
+
+def path_node_entry_endpoint(node, path_dir):
+    strand = path_node_strand(node, path_dir)
+    pos = node[CHR_STR] if strand == '+' else node[CHR_END]
+    return {
+        'chrom': node[CHR_NAM],
+        'pos': int(pos),
+        'strand': strand,
+    }
+
+def path_node_exit_endpoint(node, path_dir):
+    strand = path_node_strand(node, path_dir)
+    pos = node[CHR_END] if strand == '+' else node[CHR_STR]
+    return {
+        'chrom': node[CHR_NAM],
+        'pos': int(pos),
+        'strand': strand,
+    }
+
+def infer_path_strand_from_paf_rows(rows : list, idx : int) -> str:
+    chrom = rows[idx][CHR_NAM]
+    curr_mid = (rows[idx][CHR_STR] + rows[idx][CHR_END]) // 2
+
+    if idx + 1 < len(rows) and rows[idx + 1][CHR_NAM] == chrom:
+        next_mid = (rows[idx + 1][CHR_STR] + rows[idx + 1][CHR_END]) // 2
+        if next_mid != curr_mid:
+            return '+' if next_mid > curr_mid else '-'
+
+    if idx > 0 and rows[idx - 1][CHR_NAM] == chrom:
+        prev_mid = (rows[idx - 1][CHR_STR] + rows[idx - 1][CHR_END]) // 2
+        if curr_mid != prev_mid:
+            return '+' if curr_mid > prev_mid else '-'
+
+    return rows[idx][CTG_DIR] if rows[idx][CTG_DIR] in {'+', '-'} else '+'
+
+def paf_row_entry_endpoint(row, strand):
+    pos = row[CHR_STR] if strand == '+' else row[CHR_END]
+    return {
+        'chrom': row[CHR_NAM],
+        'pos': int(pos),
+        'strand': strand,
+    }
+
+def paf_row_exit_endpoint(row, strand):
+    pos = row[CHR_END] if strand == '+' else row[CHR_STR]
+    return {
+        'chrom': row[CHR_NAM],
+        'pos': int(pos),
+        'strand': strand,
+    }
+
+def get_ctg_intype_split_blocks(key_int : int, endpoint_chroms : set) -> list:
+    paf_loc = f"{output_folder}/{key_int}.paf"
+    if not os.path.isfile(paf_loc):
+        return []
+
+    rows = import_path_paf_rows(paf_loc)
+    if not rows:
+        return []
+
+    row_lengths = [abs(row[CHR_END] - row[CHR_STR]) for row in rows]
+    total_length = sum(row_lengths)
+    if total_length <= CTG_INTYPE_CHECK_MIN_LENGTH:
+        return []
+
+    foreign_chrom_lengths = Counter()
+    for row, length in zip(rows, row_lengths):
+        chrom = row[CHR_NAM]
+        if chrom not in endpoint_chroms:
+            foreign_chrom_lengths[chrom] += length
+
+    interrupt_chroms = {
+        chrom for chrom, length in foreign_chrom_lengths.items()
+        if length / total_length >= CTG_INTYPE_INSERT_MIN_RATIO
+    }
+    if not interrupt_chroms:
+        return []
+
+    blocks = []
+    for i, (row, length) in enumerate(zip(rows, row_lengths)):
+        chrom = row[CHR_NAM]
+        if chrom not in interrupt_chroms:
+            continue
+        if length < CTG_INTYPE_INSERT_MIN_SEGMENT_LENGTH:
+            continue
+
+        strand = infer_path_strand_from_paf_rows(rows, i)
+        entry = paf_row_entry_endpoint(row, strand)
+        exit_ = paf_row_exit_endpoint(row, strand)
+        if blocks and blocks[-1]['entry']['chrom'] == chrom:
+            blocks[-1]['exit'] = exit_
+            blocks[-1]['length'] += length
+        else:
+            blocks.append({
+                'entry': entry,
+                'exit': exit_,
+                'length': length,
+            })
+
+    return blocks
+
+def build_ctg_intype_split_bnds(weights, min_weight):
+    split_weight_by_key = defaultdict(float)
+    split_parent_weight = defaultdict(float)
+
+    for path_idx, (paf_loc, key_int_list) in enumerate(paf_ans_list):
+        if path_idx >= len(weights):
+            break
+        path_weight = float(weights[path_idx])
+        if path_weight <= min_weight:
+            continue
+
+        path = import_index_path(paf_loc)
+        if len(path[0]) < 4:
+            path[0] = tuple([0] + list(path[0]))
+        if len(path[-1]) < 4:
+            path[-1] = tuple([0] + list(path[-1]))
+
+        ctg_intype_key_by_edge = {}
+        for key_int in key_int_list:
+            key_type, key_value = int2key[key_int]
+            if key_type == CTG_IN_TYPE:
+                ctg_intype_key_by_edge[key_value] = key_int
+
+        for i in range(1, len(path) - 1):
+            prev_node_name = path[i - 1][1]
+            curr_node_name = path[i][1]
+            if not isinstance(prev_node_name, int) or not isinstance(curr_node_name, int):
+                continue
+
+            edge_key = (
+                (path[i - 1][0], prev_node_name),
+                (path[i][0], curr_node_name),
+            )
+            key_int = ctg_intype_key_by_edge.get(edge_key)
+            if key_int is None:
+                continue
+
+            parent_nclose = tuple(sorted([prev_node_name, curr_node_name]))
+            parent_nclose_idx = nclose2idx.get(parent_nclose)
+            if parent_nclose_idx is None:
+                continue
+
+            prev_node = contig_data[prev_node_name]
+            curr_node = contig_data[curr_node_name]
+            endpoint_chroms = {prev_node[CHR_NAM], curr_node[CHR_NAM]}
+            split_blocks = get_ctg_intype_split_blocks(key_int, endpoint_chroms)
+            if not split_blocks:
+                continue
+
+            left_endpoint = path_node_exit_endpoint(prev_node, path[i - 1][0])
+            right_endpoint = path_node_entry_endpoint(curr_node, path[i][0])
+            ordered_breaks = [(left_endpoint, split_blocks[0]['entry'])]
+            for block_idx in range(len(split_blocks) - 1):
+                ordered_breaks.append((
+                    split_blocks[block_idx]['exit'],
+                    split_blocks[block_idx + 1]['entry'],
+                ))
+            ordered_breaks.append((split_blocks[-1]['exit'], right_endpoint))
+
+            split_parent_weight[parent_nclose_idx] += path_weight
+            ctg_name = prev_node[CTG_NAM]
+            for split_idx, (left, right) in enumerate(ordered_breaks, start=1):
+                split_key = (
+                    parent_nclose_idx,
+                    split_idx,
+                    left['chrom'],
+                    int(left['pos']),
+                    left['strand'],
+                    right['chrom'],
+                    int(right['pos']),
+                    right['strand'],
+                    ctg_name,
+                )
+                split_weight_by_key[split_key] += path_weight
+
+    return split_weight_by_key, split_parent_weight
 
 def parse_optional_float(value):
     if value is None or value == '*':
@@ -743,19 +993,18 @@ def build_virtual_inv_events(prefix, meandepth, contig_lengths, min_depth_N=0.0)
     return events
 
 def _pairs_to_vcf(nclose_pairs, contig_data, contig_lengths, display_indel, virtual_inv_events,
-                  out_vcf_path, significant_nclose, nclose_cn_std):
+                  split_bnd_weights, out_vcf_path, nclose_cn_std):
     with open(out_vcf_path, 'w') as fo:
         # 1) 헤더 쓰기
         write_vcf_header(fo, contig_lengths)
 
         # 2) Translocation, Inversion 처리
         for nclose in nclose_pairs:
-            if nclose in significant_nclose:
-                quality = 60
-                filter_str = 'PASS'
-            else:
-                quality = 0
-                filter_str = 'FAIL'
+            # 깊이 유의성(significant_nclose) 기반 PASS/FAIL 구분 제거: balanced(copy-number-neutral)
+            # translocation은 flanking depth 단차가 없어 FAIL로 강등됐지만 실제로는 진짜 junction이므로,
+            # 모든 breakend에 필터를 적용하지 않는다(FILTER='.'). 깊이 값 자체는 INFO의 WEIGHT로 남는다.
+            quality = 60
+            filter_str = '.'
 
             a_idx, b_idx = nclose
             bnd_nclose_ind = nclose2idx[nclose]
@@ -781,34 +1030,55 @@ def _pairs_to_vcf(nclose_pairs, contig_data, contig_lengths, display_indel, virt
             pos_a = a[CHR_END] if dir_a == '+' else a[CHR_STR]
             pos_b = b[CHR_STR] if dir_b == '+' else b[CHR_END]
 
-            strands = make_strands(dir_a, dir_b)
-
-            sv_id_a = f"SKYPE.BND.{bnd_nclose_ind}_1"
-            sv_id_b = f"SKYPE.BND.{bnd_nclose_ind}_2"
-
-            form_a, form_b = choose_alt_forms(dir_a, dir_b)
-
-            ref = "N"
-            alt_a = bnd_alt("N", chr_b, pos_b, form_a)
-            alt_b = bnd_alt("N", chr_a, pos_a, form_b)
-
             # if nclose not in nclose_set:
             #     i1, i2 = conjoined_track_data[nclose]
             #     merge_mate_id_str = f';MERGE_MATEID=SKYPE.BND.{i1},SKYPE.BND.{i2}'
             #     ctg_name = f"{a[CTG_NAM]},{b[CTG_NAM]}"
             # else:
-            merge_mate_id_str = ''
             ctg_name = a[CTG_NAM]
 
-            fo.write(
-                f"{chr_a}\t{pos_a}\t{sv_id_a}\t{ref}\t{alt_a}\t{quality}\t{filter_str}\t"
-                f"SVTYPE=BND;WEIGHT={round(nclose_weight / N, 2)};CTG_NAME={ctg_name};"
-                f"STRANDS={strands};MATEID={sv_id_b}{merge_mate_id_str}\n"
+            write_bnd_vcf_pair(
+                fo,
+                f"SKYPE.BND.{bnd_nclose_ind}",
+                chr_a,
+                pos_a,
+                dir_a,
+                chr_b,
+                pos_b,
+                dir_b,
+                nclose_weight / N,
+                ctg_name,
+                quality=quality,
+                filter_str=filter_str,
             )
-            fo.write(
-                f"{chr_b}\t{pos_b}\t{sv_id_b}\t{ref}\t{alt_b}\t{quality}\t{filter_str}\t"
-                f"SVTYPE=BND;WEIGHT={round(nclose_weight / N, 2)};CTG_NAME={ctg_name};"
-                f"STRANDS={strands};MATEID={sv_id_a}{merge_mate_id_str}\n"
+
+        for split_key, split_weight in sorted(split_bnd_weights.items()):
+            (
+                parent_nclose_idx,
+                split_idx,
+                chr_a,
+                pos_a,
+                dir_a,
+                chr_b,
+                pos_b,
+                dir_b,
+                ctg_name,
+            ) = split_key
+            write_bnd_vcf_pair(
+                fo,
+                f"SKYPE.BND.{parent_nclose_idx}.{split_idx}",
+                chr_a,
+                pos_a,
+                dir_a,
+                chr_b,
+                pos_b,
+                dir_b,
+                split_weight / N,
+                ctg_name,
+                merge_mate_ids=[
+                    f"SKYPE.BND.{parent_nclose_idx}_1",
+                    f"SKYPE.BND.{parent_nclose_idx}_2",
+                ],
             )
 
         # 3) indel 처리
@@ -839,7 +1109,7 @@ def _pairs_to_vcf(nclose_pairs, contig_data, contig_lengths, display_indel, virt
                     assert(False)
 
                 fo.write(
-                    f"{chrom}\t{lo}\t{sv_id}\tN\t{alt}\t60\tPASS\t"
+                    f"{chrom}\t{lo}\t{sv_id}\tN\t{alt}\t60\t.\t"
                     f"SVTYPE={alt[1:-1]};END={hi};SVLEN={svlen};WEIGHT={round(w, 2)};CTG_NAME=INDEL_INDEX_{indel_idx}\n"
                 )
 
@@ -847,7 +1117,7 @@ def _pairs_to_vcf(nclose_pairs, contig_data, contig_lengths, display_indel, virt
             pos = max(1, int(st))
             end = max(pos, int(nd))
             fo.write(
-                f"{chrom}\t{pos}\tSKYPE.VINV.{inv_counter}\tN\t<INV>\t60\tPASS\t"
+                f"{chrom}\t{pos}\tSKYPE.VINV.{inv_counter}\tN\t<INV>\t60\t.\t"
                 f"SVTYPE=INV;END={end};SVLEN={end - pos};WEIGHT={round(depth_N, 2)};CTG_NAME={name}\n"
             )
 
@@ -898,6 +1168,7 @@ RATIO_OUTLIER_FOLDER = f"{PREFIX}/11_ref_ratio_outliers/"
 front_contig_path = RATIO_OUTLIER_FOLDER+"front_jump/"
 back_contig_path = RATIO_OUTLIER_FOLDER+"back_jump/"
 ecdna_contig_path = RATIO_OUTLIER_FOLDER + "ecdna/"
+output_folder = f'{PREFIX}/21_pat_depth'
 
 TELO_CONNECT_NODES_INFO_PATH = PREFIX+"/telomere_connected_list.txt"
 
@@ -1426,6 +1697,14 @@ def pairs_to_vcf(out_prefix=''):
     for i, ctr in enumerate(path_nclose_usage):
         for j, v in ctr.items():
             nclose_cn_std[j] += v*weights[i]
+    split_bnd_weights, split_parent_weight = build_ctg_intype_split_bnds(
+        weights, VCF_FILTER_DEPTH_N * N
+    )
+    adjusted_nclose_cn_std = defaultdict(float, nclose_cn_std)
+    for parent_nclose_idx, split_weight in split_parent_weight.items():
+        adjusted_nclose_cn_std[parent_nclose_idx] = max(
+            0.0, adjusted_nclose_cn_std[parent_nclose_idx] - split_weight
+        )
 
     type1_nclose_node = set()
     type2_nclose_node = set()
@@ -1470,27 +1749,21 @@ def pairs_to_vcf(out_prefix=''):
                 display_indel[chrom].append(("i", pos1, pos2, v / N, chrom, i - rpll))
     
     all_nclose = []
-    significant_nclose = []
     for nclose in nclose_set:
-        if nclose_cn_std[nclose2idx[nclose]] > VCF_FILTER_DEPTH_N * N:
-            st, ed = nclose
+        if adjusted_nclose_cn_std[nclose2idx[nclose]] > VCF_FILTER_DEPTH_N * N:
             all_nclose.append(nclose)
-
-            if exist_near_bnd(contig_data[st][CHR_NAM], contig_data[st][CHR_STR], contig_data[st][CHR_END]) or \
-            exist_near_bnd(contig_data[ed][CHR_NAM], contig_data[ed][CHR_STR], contig_data[ed][CHR_END]):
-                significant_nclose.append(nclose)
                 
     indel_event_count = sum(len(indel_list) for indel_list in display_indel.values())
     logging.info(
         f"{out_prefix[1:].capitalize()}{' ' if out_prefix else ''}"
         f"Total called breakends (DUP, DEL, BND, INV) : "
-        f"{len(all_nclose) + indel_event_count + len(virtual_inv_events)}"
+        f"{len(all_nclose) + len(split_bnd_weights) + indel_event_count + len(virtual_inv_events)}"
     )
 
     vcf_path = f"{PREFIX}/SV_call_result{out_prefix}.vcf"
     _pairs_to_vcf(
         all_nclose, contig_data, chr_len, display_indel, virtual_inv_events,
-        vcf_path, significant_nclose, nclose_cn_std
+        split_bnd_weights, vcf_path, adjusted_nclose_cn_std
     )
 
 pairs_to_vcf()

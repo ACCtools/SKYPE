@@ -558,6 +558,99 @@ for i, v in enumerate(weight_base):
 with open(f'{PREFIX}/A_idx_list.pkl', 'rb') as f:
     A_idx_list = pkl.load(f)
 
+def get_nclose_breakpoints(nclose_pair):
+    points = []
+    for side_idx, node_idx in enumerate(nclose_pair):
+        cd = ppc_data[node_idx]
+        nclose_loc = side_idx == 0
+        nclose_dir = cd[CTG_DIR] == '+'
+        coord_idx = CHR_STR if nclose_dir ^ nclose_loc else CHR_END
+        points.append((cd[CHR_NAM], int(cd[coord_idx])))
+    return points
+
+def chrom_acc_sum_peak_stats(predict_suc_B):
+    chrom_acc_sum_dict = defaultdict(float)
+    chrom_peak_stats = {}
+    for i, (chrom, st) in enumerate(chr_filt_st_list):
+        chrom_acc_sum_dict[chrom] += float(predict_suc_B[i] - B[i])
+        abs_acc_sum = abs(chrom_acc_sum_dict[chrom])
+        if abs_acc_sum > chrom_peak_stats.get(chrom, {}).get('max_abs', -1):
+            chrom_peak_stats[chrom] = {
+                'max_abs': abs_acc_sum,
+                'signed': chrom_acc_sum_dict[chrom],
+                'idx': i,
+                'coord': int(st),
+            }
+    return chrom_peak_stats
+
+def get_fit_failures(predict_suc_B, fail_rate=CHROM_ERROR_FAIL_RATE):
+    failures = []
+    for chrom, stat in chrom_acc_sum_peak_stats(predict_suc_B).items():
+        if chrom == 'chrY' and no_chrY:
+            continue
+        acc_sum_max_base = chrom_acc_sum_dict_max_base[chrom]
+        # Preserve the previous 24_cluster_weight behavior: chromosomes with
+        # a zero baseline envelope do not drive greedy rejection.
+        if acc_sum_max_base == 0:
+            continue
+        ratio = stat['max_abs'] / acc_sum_max_base
+        if ratio > fail_rate:
+            failures.append({
+                'chrom': chrom,
+                'ratio': ratio,
+                'coord': stat['coord'],
+                'signed': stat['signed'],
+                'max_abs': stat['max_abs'],
+            })
+    failures.sort(key=lambda x: x['ratio'], reverse=True)
+    return failures
+
+def nearest_nclose_to_peak(nclose_set, chrom, coord, nclose_points_dict):
+    best_pair = None
+    best_dist = None
+    for nclose_pair in nclose_set:
+        for bp_chrom, bp_coord in nclose_points_dict[nclose_pair]:
+            if bp_chrom != chrom:
+                continue
+            dist = abs(bp_coord - coord)
+            key = (dist, nclose_max_error_dict.get(nclose_pair, float('inf')), nclose_pair)
+            if best_dist is None or key < best_dist:
+                best_pair = nclose_pair
+                best_dist = key
+    if best_pair is None:
+        return None, None
+    return best_pair, best_dist[0]
+
+def solve_idx_list(final_idx_list, warm_fullsize):
+    final_idx_array_jl = jl.Vector[jl.Int]([i + 1 for i in final_idx_list])
+
+    A_final_jl = jl.view(A_jl, jl.Colon(), final_idx_array_jl)
+    A_fail_final_jl = jl.view(A_fail_jl, jl.Colon(), final_idx_array_jl)
+
+    solve_gram_mem_gb = nnls_gram_mem_gb()
+    final_weight_jl = jl.nnls_solve(
+        A_final_jl, B_jl, THREAD, False,
+        gram_mem_gb=solve_gram_mem_gb,
+        w_init=make_jl_weight(warm_fullsize[final_idx_list])
+    )
+    final_weight = np.asarray(final_weight_jl)
+
+    final_weights_fullsize = np.zeros(len(weight_base), dtype=weight_base.dtype)
+    for i, v in enumerate(final_idx_list):
+        final_weights_fullsize[int(v)] = final_weight[i]
+
+    predict_B_succ = np.asarray(A_final_jl * final_weight_jl)
+    predict_B_fail = np.asarray(A_fail_final_jl * final_weight_jl)
+
+    return {
+        'idx_list': final_idx_list,
+        'weight_jl': final_weight_jl,
+        'weight': final_weight,
+        'fullsize': final_weights_fullsize,
+        'predict_succ': predict_B_succ,
+        'predict_fail': predict_B_fail,
+    }
+
 # Pre-calculate max error rates for all possible candidate nclose pairs
 nclose_max_error_dict = {}
 pre_tar_nclose_list = []
@@ -568,10 +661,7 @@ for k, v in nclose_total_weight_dict.items():
     if len(k) == 2:
         st, ed = k
 
-        if ppc_data[st][CTG_NAM] in {'utg036624l', 'utg020789l', 'utg023428l'}:
-            t = 1
-
-        if v >= 0 * meandepth and ppc_data[st][CHR_NAM] != ppc_data[ed][CHR_NAM]:
+        if v >= 0.01 * meandepth and ppc_data[st][CHR_NAM] != ppc_data[ed][CHR_NAM]:
             if is_filter_candidate(st, ed, 1, 1):
                 pre_tar_nclose_list.append(k)
 
@@ -614,117 +704,136 @@ for nclose_pair, (weight_jl, predict_suc_B_jl) in zip(pre_tar_nclose_list, pre_w
     
     nclose_max_error_dict[nclose_pair] = max_error_rate
 
-# Iterative filtering with per-chromosome tier escalation:
-#   Tier 1: filter nclose if at least one side is invalid (count_valid <= 1)
-#   Tier 2: filter only if both sides are invalid (count_valid == 0)
-#   Tier 3: never filter
-# A chromosome advances 1->2->3 each time it fails (chrom_error_rate > threshold).
-chrom_tier = {}
+# Greedy filtering:
+#   1. keep the depth-derived Tier-1 candidate pool,
+#   2. order candidates by their single-removal error,
+#   3. add one nclose at a time and refit,
+#   4. if the trial fails, protect only the nclose nearest to the failing
+#      chromosome's accumulated-error peak instead of dropping/protecting the
+#      whole chromosome.
+base_A_idx_set = set(A_idx_list)
+nclose_notusing_idx_set_dict = {
+    nclose_pair: set(pre_nclose_notusing_idx_dict[nclose_pair]) & base_A_idx_set
+    for nclose_pair in pre_tar_nclose_list
+}
+nclose_points_dict = {
+    nclose_pair: get_nclose_breakpoints(nclose_pair)
+    for nclose_pair in pre_tar_nclose_list
+}
+
+def solve_removed_nclose(removed_nclose_set, warm_fullsize):
+    using_idx_set = set(base_A_idx_set)
+    for nclose_pair in removed_nclose_set:
+        using_idx_set &= nclose_notusing_idx_set_dict[nclose_pair]
+        if not using_idx_set:
+            break
+    if not using_idx_set:
+        return None
+    return solve_idx_list(sorted(using_idx_set), warm_fullsize)
+
+greedy_candidate_list = sorted(
+    {
+        nclose_pair
+        for nclose_pair in pre_tar_nclose_list
+        if nclose_max_error_dict.get(nclose_pair, float('inf')) <= BASE_ACCSUMABSMAX_RATIO
+    },
+    key=lambda nclose_pair: (
+        nclose_max_error_dict.get(nclose_pair, float('inf')),
+        nclose_pair,
+    )
+)
+
+logging.info(
+    f'Greedy nclose filtering start: candidates={len(greedy_candidate_list)} '
+    f'(precomputed pool={len(pre_tar_nclose_list)}, single-error <= {BASE_ACCSUMABSMAX_RATIO})'
+)
+
+accepted_nclose = set()
+rejected_nclose = set()
 filter_warm_fullsize = weight_base.copy()
+current_solution = solve_removed_nclose(accepted_nclose, filter_warm_fullsize)
+if current_solution is None:
+    raise RuntimeError("No NNLS columns available before greedy nclose filtering.")
+filter_warm_fullsize = current_solution['fullsize'].copy()
 
-while True:
-    div_nclose_set = set()
-    for k, v in nclose_total_weight_dict.items():
-        if len(k) == 2:
-            st, ed = k
-            if v >= 0 * meandepth and ppc_data[st][CHR_NAM] != ppc_data[ed][CHR_NAM]:
-                tier_st = chrom_tier.get(ppc_data[st][CHR_NAM], 1)
-                tier_ed = chrom_tier.get(ppc_data[ed][CHR_NAM], 1)
-                if is_filter_candidate(st, ed, tier_st, tier_ed):
-                    div_nclose_set.add(k)
+for nclose_pair in greedy_candidate_list:
+    if nclose_pair in rejected_nclose:
+        continue
 
-    nclose_notusing_idx_dict = defaultdict(list)
-    for nclose_pair in div_nclose_set:
-        for k, path_nclose_usage in path_nclose_set_dict.items():
-            if nclose_pair not in path_nclose_usage:
-                nclose_notusing_idx_dict[nclose_pair].append(k)
+    trial_nclose = set(accepted_nclose)
+    trial_nclose.add(nclose_pair)
+    trial_solution = solve_removed_nclose(trial_nclose, filter_warm_fullsize)
+    if trial_solution is None:
+        rejected_nclose.add(nclose_pair)
+        logging.debug(f'{nclose_pair} : rejected because no NNLS columns remain')
+        continue
 
-    not_essential_nclose = set()
-
-    # Use cached max error rates instead of recalculating
-    for nclose_pair in div_nclose_set:
-        max_error_rate = nclose_max_error_dict.get(nclose_pair, float('inf'))
-
-        if max_error_rate <= BASE_ACCSUMABSMAX_RATIO:
-            logging.debug(f"{nclose_pair} : Nclose removed")
-            not_essential_nclose.add(nclose_pair)
-
-    logging.info(f'Filtered nclose count by depth : {len(not_essential_nclose)}')
-    for nclose_pair in sorted(not_essential_nclose):
-        st, ed = nclose_pair
-        st_row = ppc_data[st]
-        ed_row = ppc_data[ed]
+    failures = get_fit_failures(trial_solution['predict_succ'])
+    if not failures:
+        accepted_nclose = trial_nclose
+        current_solution = trial_solution
+        filter_warm_fullsize = current_solution['fullsize'].copy()
         logging.debug(
-            f'  Filtered nclose: '
-            f'{st_row[CTG_NAM]} ({st_row[CHR_NAM]}:{st_row[CHR_STR]}-{st_row[CHR_END]}) '
-            f'<-> '
-            f'{ed_row[CTG_NAM]} ({ed_row[CHR_NAM]}:{ed_row[CHR_STR]}-{ed_row[CHR_END]})'
+            f'{nclose_pair} : greedy accepted '
+            f'(single_error={nclose_max_error_dict.get(nclose_pair, float("inf")):.4f})'
+        )
+        continue
+
+    worst = failures[0]
+    nearest_pair, nearest_dist = nearest_nclose_to_peak(
+        trial_nclose, worst['chrom'], worst['coord'], nclose_points_dict
+    )
+
+    # If an already accepted nclose is closest to the new failure peak, try a
+    # one-for-one swap. This keeps the filtered count from decreasing while
+    # allowing a local peak-associated nclose to be protected individually.
+    swapped = False
+    if nearest_pair is not None and nearest_pair != nclose_pair and nearest_pair in accepted_nclose:
+        swap_nclose = set(trial_nclose)
+        swap_nclose.remove(nearest_pair)
+        swap_solution = solve_removed_nclose(swap_nclose, filter_warm_fullsize)
+        if swap_solution is not None and not get_fit_failures(swap_solution['predict_succ']):
+            accepted_nclose = swap_nclose
+            rejected_nclose.add(nearest_pair)
+            current_solution = swap_solution
+            filter_warm_fullsize = current_solution['fullsize'].copy()
+            swapped = True
+            logging.debug(
+                f'{nclose_pair} : greedy accepted by protecting peak-nearest '
+                f'{nearest_pair} at {worst["chrom"]}:{worst["coord"]} '
+                f'(dist={nearest_dist}, ratio={worst["ratio"]:.3f})'
+            )
+
+    if not swapped:
+        rejected_nclose.add(nclose_pair)
+        logging.debug(
+            f'{nclose_pair} : greedy rejected '
+            f'(worst={worst["chrom"]}:{worst["coord"]}, '
+            f'ratio={worst["ratio"]:.3f}, nearest={nearest_pair}, dist={nearest_dist})'
         )
 
-    using_idx_set = set(A_idx_list)
-    for nclose_pair in not_essential_nclose:
-        using_idx_set &= set(nclose_notusing_idx_dict[nclose_pair])
+not_essential_nclose = accepted_nclose
+final_idx_list = current_solution['idx_list']
+final_weight_jl = current_solution['weight_jl']
+final_weight = current_solution['weight']
+final_weights_fullsize = current_solution['fullsize']
+predict_B_succ = current_solution['predict_succ']
+predict_B_fail = current_solution['predict_fail']
 
-    final_idx_list = sorted(list(using_idx_set))
-    final_idx_array_jl = jl.Vector[jl.Int]([i + 1 for i in final_idx_list])
-
-    A_final_jl = jl.view(A_jl, jl.Colon(), final_idx_array_jl)
-    A_fail_final_jl = jl.view(A_fail_jl, jl.Colon(), final_idx_array_jl)
-
-    solve_gram_mem_gb = nnls_gram_mem_gb()
-    final_weight_jl = jl.nnls_solve(
-        A_final_jl, B_jl, THREAD, False,
-        gram_mem_gb=solve_gram_mem_gb,
-        w_init=make_jl_weight(filter_warm_fullsize[final_idx_list])
+logging.info(
+    f'Filtered nclose count by greedy depth : {len(not_essential_nclose)} '
+    f'(rejected/protected={len(rejected_nclose)})'
+)
+for nclose_pair in sorted(not_essential_nclose):
+    st, ed = nclose_pair
+    st_row = ppc_data[st]
+    ed_row = ppc_data[ed]
+    logging.debug(
+        f'  Filtered nclose: '
+        f'{st_row[CTG_NAM]} ({st_row[CHR_NAM]}:{st_row[CHR_STR]}-{st_row[CHR_END]}) '
+        f'<-> '
+        f'{ed_row[CTG_NAM]} ({ed_row[CHR_NAM]}:{ed_row[CHR_STR]}-{ed_row[CHR_END]})'
     )
-    final_weight = np.asarray(final_weight_jl)
-
-    # Update final weights
-    final_weights_fullsize = np.zeros(len(weight_base))
-    for i, v in enumerate(final_idx_list):
-        final_weights_fullsize[int(v)] = final_weight[i]
-    filter_warm_fullsize = final_weights_fullsize.copy()
-
-    predict_B_succ = np.asarray(A_final_jl * final_weight_jl)
-    predict_B_fail = np.asarray(A_fail_final_jl * final_weight_jl)
-
-    # Calculate error rates to identify failing chromosomes for next iteration
-    chrom_acc_sum_dict = defaultdict(int)
-    chrom_acc_sum_dict_max = defaultdict(int)
-    for i, (chrom, st) in enumerate(chr_filt_st_list):
-        chrom_acc_sum_dict[chrom] += predict_B_succ[i] - B[i]
-        if abs(chrom_acc_sum_dict[chrom]) > chrom_acc_sum_dict_max[chrom]:
-            chrom_acc_sum_dict_max[chrom] = abs(chrom_acc_sum_dict[chrom])
-
-    new_fail_chrom_list = []
-    for chrom, acc_sum_max in chrom_acc_sum_dict_max.items():
-        if chrom == 'chrY' and no_chrY:
-            continue
-        acc_sum_max_base = chrom_acc_sum_dict_max_base[chrom]
-        # Guard against zero baseline (mirror of the pre-calc loop above):
-        # a chromosome with no baseline error envelope cannot have a finite error rate.
-        if acc_sum_max_base == 0:
-            continue
-        chrom_error_rate = acc_sum_max / acc_sum_max_base
-
-        if chrom_error_rate > CHROM_ERROR_FAIL_RATE:
-            new_fail_chrom_list.append(chrom)
-
-    advanced = []
-    for chrom in new_fail_chrom_list:
-        cur_tier = chrom_tier.get(chrom, 1)
-        if cur_tier < 3:
-            chrom_tier[chrom] = cur_tier + 1
-            advanced.append((chrom, cur_tier + 1))
-
-    if advanced:
-        logging.info(f'Chrom tier advanced: {", ".join(f"{c}->T{t}" for c, t in advanced)}')
-    else:
-        break
-
-final_tier_summary = sorted((c, t) for c, t in chrom_tier.items() if t > 1)
-if final_tier_summary:
-    logging.info(f'Final chrom tiers (>T1): {", ".join(f"{c}@T{t}" for c, t in final_tier_summary)}')
 
 b_norm = np.linalg.norm(B)
 
