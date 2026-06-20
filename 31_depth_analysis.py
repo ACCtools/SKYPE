@@ -938,7 +938,107 @@ def layout_side(record, layout_name, side_idx, default='right'):
         return sides[side_idx]
     return default
 
-def build_virtual_inv_events(prefix, meandepth, contig_lengths, min_depth_N=0.0):
+def read_component_ref_intervals(prefix, key_int, cache):
+    if key_int in cache:
+        return cache[key_int]
+
+    by_chrom = defaultdict(list)
+    paf_path = f'{prefix}/21_pat_depth/{key_int}.paf'
+    if not os.path.isfile(paf_path):
+        cache[key_int] = by_chrom
+        return by_chrom
+
+    with open(paf_path, 'r') as f:
+        for line in f:
+            if not line.strip():
+                continue
+            fields = line.rstrip('\n').split('\t')
+            if len(fields) <= CHR_END:
+                continue
+            try:
+                st = int(fields[CHR_STR])
+                nd = int(fields[CHR_END])
+            except ValueError:
+                continue
+            if nd < st:
+                continue
+            by_chrom[fields[CHR_NAM]].append((st, nd))
+
+    cache[key_int] = by_chrom
+    return by_chrom
+
+def merge_ref_intervals(intervals):
+    if not intervals:
+        return []
+    intervals = sorted(intervals)
+    merged = [list(intervals[0])]
+    for st, nd in intervals[1:]:
+        if st <= merged[-1][1]:
+            if nd > merged[-1][1]:
+                merged[-1][1] = nd
+        else:
+            merged.append([st, nd])
+    return [tuple(x) for x in merged]
+
+def interval_strictly_contains_any(merged_intervals, st, nd):
+    return any(intv_st < st and nd < intv_nd for intv_st, intv_nd in merged_intervals)
+
+def raw_true_value(value):
+    return value is True or value == 1 or value == 'True' or value == 'true'
+
+def record_has_any_point_no_span(record):
+    raw_no_span = record.get('raw_point_no_spanning')
+    if isinstance(raw_no_span, dict):
+        return raw_true_value(raw_no_span.get('point_a')) or raw_true_value(raw_no_span.get('point_b'))
+    side_records = record.get('side_records', [])
+    return any(
+        raw_true_value(side.get('raw_point_no_spanning', side.get('no_spanning_rawread')))
+        for side in side_records
+    )
+
+def side_inner_interval(side):
+    return (
+        int(side.get('inner_st', side.get('path_drop_st', 0))),
+        int(side.get('inner_nd', side.get('path_drop_nd', 0))),
+    )
+
+def record_has_same_chrom_contiguous_span_path(record, prefix, weights, meandepth, min_depth_N):
+    if weights is None:
+        return False
+    chrom_pair = record.get('chrom_pair', ())
+    side_records = record.get('side_records', [])
+    if len(side_records) < 2:
+        return False
+    chrom_a = chrom_pair[0] if len(chrom_pair) > 0 else side_records[0].get('chrom')
+    chrom_b = chrom_pair[1] if len(chrom_pair) > 1 else side_records[1].get('chrom')
+    if chrom_a != chrom_b:
+        return False
+    if not record_has_any_point_no_span(record):
+        return False
+
+    a_st, a_nd = side_inner_interval(side_records[0])
+    b_st, b_nd = side_inner_interval(side_records[1])
+    span_st = min(a_st, b_st)
+    span_nd = max(a_nd, b_nd)
+    if span_nd <= span_st:
+        return False
+
+    path_records = globals().get('paf_ans_list', [])
+    if not path_records:
+        return False
+    min_weight = float(min_depth_N) * float(meandepth) / 2.0
+    component_cache = {}
+    for col_idx, (_, key_int_list) in enumerate(path_records):
+        if col_idx >= len(weights) or float(weights[col_idx]) <= min_weight:
+            continue
+        intervals = []
+        for key_int in key_int_list:
+            intervals.extend(read_component_ref_intervals(prefix, key_int, component_cache).get(chrom_a, []))
+        if interval_strictly_contains_any(merge_ref_intervals(intervals), span_st, span_nd):
+            return True
+    return False
+
+def build_virtual_inv_events(prefix, meandepth, contig_lengths, min_depth_N=0.0, weights=None):
     result_path = f'{prefix}/{RAW_TRANSLOCATION_RESULT_PKL}'
     if not os.path.isfile(result_path) or meandepth <= 0:
         return []
@@ -957,7 +1057,10 @@ def build_virtual_inv_events(prefix, meandepth, contig_lengths, min_depth_N=0.0)
         report_row = report_by_pair.get(pair_id)
         if not record_depth_is_balanced(record, report_row):
             continue
-        if not record_has_both_point_spans(record):
+        if not (
+            record_has_both_point_spans(record) or
+            record_has_same_chrom_contiguous_span_path(record, prefix, weights, meandepth, min_depth_N)
+        ):
             continue
 
         expected_depth = estimate_raw_virtual_inv_depth(record, report_row)
@@ -1528,7 +1631,7 @@ def draw_circos_plot(fig_prefix=''):
         indel_val_list.append(v / meandepth * 2)
 
     virtual_inv_events = build_virtual_inv_events(
-        PREFIX, meandepth, chr_len, min_depth_N=BREAKEND_REMARKABLE_CN / N
+        PREFIX, meandepth, chr_len, min_depth_N=BREAKEND_REMARKABLE_CN / N, weights=weights
     )
     for chrom, st, nd, expected_depth, depth_N, _ in virtual_inv_events:
         bnd_cn_data.append([(chrom, st), (chrom, nd), expected_depth, 'virtual_inv'])
@@ -1718,7 +1821,7 @@ def pairs_to_vcf(out_prefix=''):
 
     display_indel = defaultdict(list)
     virtual_inv_events = build_virtual_inv_events(
-        PREFIX, meandepth, chr_len, min_depth_N=VCF_FILTER_DEPTH_N
+        PREFIX, meandepth, chr_len, min_depth_N=VCF_FILTER_DEPTH_N, weights=weights
     )
 
     rpll = len(raw_path_list)
@@ -1850,7 +1953,7 @@ def make_bed_output(output_prefix=''):
                     assert(False)
 
         for chrom, st, nd, _, depth_N, _name in build_virtual_inv_events(
-            PREFIX, meandepth, chr_len, min_depth_N=BREAKEND_REMARKABLE_CN / N
+            PREFIX, meandepth, chr_len, min_depth_N=BREAKEND_REMARKABLE_CN / N, weights=weights
         ):
             cf.writerow([chrom, st, nd, 'Virtual_inversion', round(depth_N, 2)])
 

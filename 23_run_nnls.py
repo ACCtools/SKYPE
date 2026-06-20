@@ -535,18 +535,53 @@ def merge_ref_intervals(intervals):
             merged.append([st, nd])
     return [tuple(x) for x in merged]
 
+def interval_strictly_contains_any(merged_intervals, st, nd):
+    return any(intv_st < st and nd < intv_nd for intv_st, intv_nd in merged_intervals)
+
+def side_inner_interval(side):
+    return (
+        int(side.get('inner_st', side['path_drop_st'])),
+        int(side.get('inner_nd', side['path_drop_nd'])),
+    )
+
+def same_chrom_partner_by_side_id(records):
+    partner_by_id = {}
+    for record in records:
+        side_records = record.get('side_records', [])
+        if len(side_records) != 2:
+            continue
+        chrom_pair = record.get('chrom_pair')
+        if chrom_pair and len(chrom_pair) >= 2:
+            same_chrom = chrom_pair[0] == chrom_pair[1]
+        else:
+            same_chrom = side_records[0].get('chrom') == side_records[1].get('chrom')
+        if not same_chrom:
+            continue
+        partner_by_id[side_records[0]['side_id']] = side_records[1]
+        partner_by_id[side_records[1]['side_id']] = side_records[0]
+    return partner_by_id
+
+def same_chrom_contiguous_span(merged_intervals, side, partner):
+    side_st, side_nd = side_inner_interval(side)
+    partner_st, partner_nd = side_inner_interval(partner)
+    span_st = min(side_st, partner_st)
+    span_nd = max(side_nd, partner_nd)
+    return interval_strictly_contains_any(merged_intervals, span_st, span_nd)
+
 def assign_reciprocal_crossing_path_cols(records, prefix, paf_sort_ans_list):
     forbidden_by_chrom = defaultdict(list)
     side_by_id = {}
     for record in records:
         for side in record['side_records']:
             side_by_id[side['side_id']] = side
+            side.setdefault('same_chrom_spanning_cols', [])
             if side_is_forbidden_by_raw_read(side):
                 forbidden_by_chrom[side['chrom']].append(side)
 
     if not forbidden_by_chrom:
         return side_by_id
 
+    partner_by_id = same_chrom_partner_by_side_id(records)
     component_cache = {}
     target_chroms = set(forbidden_by_chrom)
     for col_idx, (_, key_int_list) in enumerate(paf_sort_ans_list):
@@ -563,8 +598,32 @@ def assign_reciprocal_crossing_path_cols(records, prefix, paf_sort_ans_list):
             for side in side_list:
                 path_drop_st = side['path_drop_st']
                 path_drop_nd = side['path_drop_nd']
-                if any(st < path_drop_st and path_drop_nd < nd for st, nd in merged):
-                    side['crossing_cols'].append(col_idx)
+                if not interval_strictly_contains_any(merged, path_drop_st, path_drop_nd):
+                    continue
+                partner = partner_by_id.get(side['side_id'])
+                if partner is not None and same_chrom_contiguous_span(merged, side, partner):
+                    side['same_chrom_spanning_cols'].append(col_idx)
+                    continue
+                side['crossing_cols'].append(col_idx)
+
+    same_chrom_forbidden_sides = [
+        side for side in side_by_id.values()
+        if side['side_id'] in partner_by_id and side_is_forbidden_by_raw_read(side)
+    ]
+    same_chrom_drop_cols = {
+        col for side in same_chrom_forbidden_sides
+        for col in side.get('crossing_cols', [])
+    }
+    same_chrom_spanning_cols = {
+        col for side in same_chrom_forbidden_sides
+        for col in side.get('same_chrom_spanning_cols', [])
+    }
+    if same_chrom_drop_cols or same_chrom_spanning_cols:
+        logging.info(
+            'Reciprocal same-chrom no-span path classification : '
+            f'drop_cols={len(same_chrom_drop_cols)}, '
+            f'contiguous_span_cols={len(same_chrom_spanning_cols)}'
+        )
 
     return side_by_id
 

@@ -558,16 +558,6 @@ for i, v in enumerate(weight_base):
 with open(f'{PREFIX}/A_idx_list.pkl', 'rb') as f:
     A_idx_list = pkl.load(f)
 
-def get_nclose_breakpoints(nclose_pair):
-    points = []
-    for side_idx, node_idx in enumerate(nclose_pair):
-        cd = ppc_data[node_idx]
-        nclose_loc = side_idx == 0
-        nclose_dir = cd[CTG_DIR] == '+'
-        coord_idx = CHR_STR if nclose_dir ^ nclose_loc else CHR_END
-        points.append((cd[CHR_NAM], int(cd[coord_idx])))
-    return points
-
 def chrom_acc_sum_peak_stats(predict_suc_B):
     chrom_acc_sum_dict = defaultdict(float)
     chrom_peak_stats = {}
@@ -604,22 +594,6 @@ def get_fit_failures(predict_suc_B, fail_rate=CHROM_ERROR_FAIL_RATE):
             })
     failures.sort(key=lambda x: x['ratio'], reverse=True)
     return failures
-
-def nearest_nclose_to_peak(nclose_set, chrom, coord, nclose_points_dict):
-    best_pair = None
-    best_dist = None
-    for nclose_pair in nclose_set:
-        for bp_chrom, bp_coord in nclose_points_dict[nclose_pair]:
-            if bp_chrom != chrom:
-                continue
-            dist = abs(bp_coord - coord)
-            key = (dist, nclose_max_error_dict.get(nclose_pair, float('inf')), nclose_pair)
-            if best_dist is None or key < best_dist:
-                best_pair = nclose_pair
-                best_dist = key
-    if best_pair is None:
-        return None, None
-    return best_pair, best_dist[0]
 
 def solve_idx_list(final_idx_list, warm_fullsize):
     final_idx_array_jl = jl.Vector[jl.Int]([i + 1 for i in final_idx_list])
@@ -708,16 +682,10 @@ for nclose_pair, (weight_jl, predict_suc_B_jl) in zip(pre_tar_nclose_list, pre_w
 #   1. keep the depth-derived Tier-1 candidate pool,
 #   2. order candidates by their single-removal error,
 #   3. add one nclose at a time and refit,
-#   4. if the trial fails, protect only the nclose nearest to the failing
-#      chromosome's accumulated-error peak instead of dropping/protecting the
-#      whole chromosome.
+#   4. if the trial fails, reject the current candidate.
 base_A_idx_set = set(A_idx_list)
 nclose_notusing_idx_set_dict = {
     nclose_pair: set(pre_nclose_notusing_idx_dict[nclose_pair]) & base_A_idx_set
-    for nclose_pair in pre_tar_nclose_list
-}
-nclose_points_dict = {
-    nclose_pair: get_nclose_breakpoints(nclose_pair)
     for nclose_pair in pre_tar_nclose_list
 }
 
@@ -780,37 +748,12 @@ for nclose_pair in greedy_candidate_list:
         continue
 
     worst = failures[0]
-    nearest_pair, nearest_dist = nearest_nclose_to_peak(
-        trial_nclose, worst['chrom'], worst['coord'], nclose_points_dict
+    rejected_nclose.add(nclose_pair)
+    logging.debug(
+        f'{nclose_pair} : greedy rejected '
+        f'(worst={worst["chrom"]}:{worst["coord"]}, '
+        f'ratio={worst["ratio"]:.3f})'
     )
-
-    # If an already accepted nclose is closest to the new failure peak, try a
-    # one-for-one swap. This keeps the filtered count from decreasing while
-    # allowing a local peak-associated nclose to be protected individually.
-    swapped = False
-    if nearest_pair is not None and nearest_pair != nclose_pair and nearest_pair in accepted_nclose:
-        swap_nclose = set(trial_nclose)
-        swap_nclose.remove(nearest_pair)
-        swap_solution = solve_removed_nclose(swap_nclose, filter_warm_fullsize)
-        if swap_solution is not None and not get_fit_failures(swap_solution['predict_succ']):
-            accepted_nclose = swap_nclose
-            rejected_nclose.add(nearest_pair)
-            current_solution = swap_solution
-            filter_warm_fullsize = current_solution['fullsize'].copy()
-            swapped = True
-            logging.debug(
-                f'{nclose_pair} : greedy accepted by protecting peak-nearest '
-                f'{nearest_pair} at {worst["chrom"]}:{worst["coord"]} '
-                f'(dist={nearest_dist}, ratio={worst["ratio"]:.3f})'
-            )
-
-    if not swapped:
-        rejected_nclose.add(nclose_pair)
-        logging.debug(
-            f'{nclose_pair} : greedy rejected '
-            f'(worst={worst["chrom"]}:{worst["coord"]}, '
-            f'ratio={worst["ratio"]:.3f}, nearest={nearest_pair}, dist={nearest_dist})'
-        )
 
 not_essential_nclose = accepted_nclose
 final_idx_list = current_solution['idx_list']
@@ -822,7 +765,7 @@ predict_B_fail = current_solution['predict_fail']
 
 logging.info(
     f'Filtered nclose count by greedy depth : {len(not_essential_nclose)} '
-    f'(rejected/protected={len(rejected_nclose)})'
+    f'(rejected={len(rejected_nclose)})'
 )
 for nclose_pair in sorted(not_essential_nclose):
     st, ed = nclose_pair
