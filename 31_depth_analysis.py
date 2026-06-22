@@ -63,6 +63,10 @@ CTG_RPTCASE = 17
 CTG_MAINFLOWDIR = 18
 CTG_MAINFLOWCHR = 19
 
+NODE_NAME = 1
+CHR_CHANGE_IDX = 2
+DIR_CHANGE_IDX = 3
+
 ABS_MAX_COVERAGE_RATIO = 3
 MAX_PATH_CNT = 100
 
@@ -607,24 +611,9 @@ def write_bnd_vcf_pair(
 def invert_strand(strand):
     return '-' if strand == '+' else '+'
 
-def path_node_strand(node, path_dir):
-    strand = node[CTG_DIR] if node[CTG_DIR] in {'+', '-'} else '+'
-    return strand if path_dir == DIR_FOR else invert_strand(strand)
-
-def path_node_entry_endpoint(node, path_dir):
-    strand = path_node_strand(node, path_dir)
-    pos = node[CHR_STR] if strand == '+' else node[CHR_END]
+def make_breakend_endpoint(chrom, pos, strand):
     return {
-        'chrom': node[CHR_NAM],
-        'pos': int(pos),
-        'strand': strand,
-    }
-
-def path_node_exit_endpoint(node, path_dir):
-    strand = path_node_strand(node, path_dir)
-    pos = node[CHR_END] if strand == '+' else node[CHR_STR]
-    return {
-        'chrom': node[CHR_NAM],
+        'chrom': chrom,
         'pos': int(pos),
         'strand': strand,
     }
@@ -647,21 +636,66 @@ def infer_path_strand_from_paf_rows(rows : list, idx : int) -> str:
 
 def paf_row_entry_endpoint(row, strand):
     pos = row[CHR_STR] if strand == '+' else row[CHR_END]
-    return {
-        'chrom': row[CHR_NAM],
-        'pos': int(pos),
-        'strand': strand,
-    }
+    return make_breakend_endpoint(row[CHR_NAM], pos, strand)
 
 def paf_row_exit_endpoint(row, strand):
     pos = row[CHR_END] if strand == '+' else row[CHR_STR]
-    return {
-        'chrom': row[CHR_NAM],
-        'pos': int(pos),
-        'strand': strand,
-    }
+    return make_breakend_endpoint(row[CHR_NAM], pos, strand)
 
-def get_ctg_intype_split_blocks(key_int : int, endpoint_chroms : set) -> list:
+def append_ctg_intype_interrupt_segment(
+    segments : list,
+    row,
+    strand : str,
+    length : int,
+    row_idx : int,
+):
+    if length <= 0:
+        return
+    chrom = row[CHR_NAM]
+    if segments and segments[-1]['chrom'] == chrom:
+        segments[-1]['exit'] = paf_row_exit_endpoint(row, strand)
+        segments[-1]['length'] += length
+        segments[-1]['last_idx'] = row_idx
+    else:
+        segments.append({
+            'chrom': chrom,
+            'strand': strand,
+            'entry': paf_row_entry_endpoint(row, strand),
+            'exit': paf_row_exit_endpoint(row, strand),
+            'length': length,
+            'first_idx': row_idx,
+            'last_idx': row_idx,
+        })
+
+def nearest_different_chrom_row(rows : list, row_idx : int, step : int, chrom : str):
+    idx = row_idx + step
+    while 0 <= idx < len(rows):
+        if rows[idx][CHR_NAM] != chrom:
+            return idx
+        idx += step
+    return None
+
+def attach_ctg_intype_interrupt_flanks(segments : list, rows : list):
+    for segment in segments:
+        left_idx = nearest_different_chrom_row(
+            rows, segment['first_idx'], -1, segment['chrom']
+        )
+        if left_idx is not None:
+            left_strand = infer_path_strand_from_paf_rows(rows, left_idx)
+            segment['left_flank_exit'] = paf_row_exit_endpoint(rows[left_idx], left_strand)
+
+        right_idx = nearest_different_chrom_row(
+            rows, segment['last_idx'], 1, segment['chrom']
+        )
+        if right_idx is not None:
+            right_strand = infer_path_strand_from_paf_rows(rows, right_idx)
+            segment['right_flank_entry'] = paf_row_entry_endpoint(rows[right_idx], right_strand)
+
+def get_ctg_intype_interrupt_segments(key_int : int, endpoint_chroms : set) -> list:
+    """
+    Coordinate-bearing mirror of 30_virtual_sky.get_ctg_intype_interrupt_pieces().
+    Keep the same chromosome selection/filtering; only attach entry/exit coords.
+    """
     paf_loc = f"{output_folder}/{key_int}.paf"
     if not os.path.isfile(paf_loc):
         return []
@@ -688,7 +722,7 @@ def get_ctg_intype_split_blocks(key_int : int, endpoint_chroms : set) -> list:
     if not interrupt_chroms:
         return []
 
-    blocks = []
+    segments = []
     for i, (row, length) in enumerate(zip(rows, row_lengths)):
         chrom = row[CHR_NAM]
         if chrom not in interrupt_chroms:
@@ -697,19 +731,22 @@ def get_ctg_intype_split_blocks(key_int : int, endpoint_chroms : set) -> list:
             continue
 
         strand = infer_path_strand_from_paf_rows(rows, i)
-        entry = paf_row_entry_endpoint(row, strand)
-        exit_ = paf_row_exit_endpoint(row, strand)
-        if blocks and blocks[-1]['entry']['chrom'] == chrom:
-            blocks[-1]['exit'] = exit_
-            blocks[-1]['length'] += length
-        else:
-            blocks.append({
-                'entry': entry,
-                'exit': exit_,
-                'length': length,
-            })
+        append_ctg_intype_interrupt_segment(segments, row, strand, length, i)
 
-    return blocks
+    attach_ctg_intype_interrupt_flanks(segments, rows)
+    return segments
+
+def append_chrom_change_break(ordered_breaks : list, left : dict, right : dict):
+    if left['chrom'] != right['chrom']:
+        ordered_breaks.append((left, right))
+
+def get_karyotype_next_state(curr_node, prev_node_name : int, curr_node_name : int):
+    if curr_node_name > prev_node_name:
+        next_incr = curr_node[CTG_DIR]
+    else:
+        next_incr = '-' if curr_node[CTG_DIR] == '+' else '+'
+    next_ref = curr_node[CHR_STR] if next_incr == '+' else curr_node[CHR_END]
+    return [curr_node[CHR_NAM], next_incr], next_ref
 
 def build_ctg_intype_split_bnds(weights, min_weight):
     split_weight_by_key = defaultdict(float)
@@ -734,57 +771,88 @@ def build_ctg_intype_split_bnds(weights, min_weight):
             if key_type == CTG_IN_TYPE:
                 ctg_intype_key_by_edge[key_value] = key_int
 
+        curr_incr = '+' if path[0][NODE_NAME][-1] == 'f' else '-'
+        first_real_node = contig_data[path[1][NODE_NAME]]
+        curr_chr = [first_real_node[CHR_NAM], curr_incr]
+        curr_ref = first_real_node[CHR_STR] if curr_incr == '+' else first_real_node[CHR_END]
+
         for i in range(1, len(path) - 1):
             prev_node_name = path[i - 1][1]
             curr_node_name = path[i][1]
             if not isinstance(prev_node_name, int) or not isinstance(curr_node_name, int):
                 continue
 
+            last_node = contig_data[prev_node_name]
+            curr_node = contig_data[curr_node_name]
             edge_key = (
                 (path[i - 1][0], prev_node_name),
                 (path[i][0], curr_node_name),
             )
             key_int = ctg_intype_key_by_edge.get(edge_key)
-            if key_int is None:
+
+            interrupt_segments = []
+            if key_int is not None:
+                endpoint_chroms = {last_node[CHR_NAM], curr_node[CHR_NAM]}
+                interrupt_segments = get_ctg_intype_interrupt_segments(key_int, endpoint_chroms)
+
+            if not (
+                path[i][CHR_CHANGE_IDX] > path[i - 1][CHR_CHANGE_IDX]
+                or path[i][DIR_CHANGE_IDX] > path[i - 1][DIR_CHANGE_IDX]
+                or interrupt_segments
+            ):
                 continue
 
-            parent_nclose = tuple(sorted([prev_node_name, curr_node_name]))
-            parent_nclose_idx = nclose2idx.get(parent_nclose)
-            if parent_nclose_idx is None:
-                continue
+            if interrupt_segments:
+                parent_nclose = tuple(sorted([prev_node_name, curr_node_name]))
+                parent_nclose_idx = nclose2idx.get(parent_nclose)
+                if parent_nclose_idx is not None:
+                    left_pos = last_node[CHR_END] if curr_incr == '+' else last_node[CHR_STR]
+                    left_endpoint = interrupt_segments[0].get('left_flank_exit')
+                    if left_endpoint is None or left_endpoint['chrom'] != curr_chr[0]:
+                        left_endpoint = make_breakend_endpoint(curr_chr[0], left_pos, curr_chr[1])
 
-            prev_node = contig_data[prev_node_name]
-            curr_node = contig_data[curr_node_name]
-            endpoint_chroms = {prev_node[CHR_NAM], curr_node[CHR_NAM]}
-            split_blocks = get_ctg_intype_split_blocks(key_int, endpoint_chroms)
-            if not split_blocks:
-                continue
+                    next_chr, _next_ref = get_karyotype_next_state(
+                        curr_node, prev_node_name, curr_node_name
+                    )
+                    right_pos = curr_node[CHR_STR] if next_chr[1] == '+' else curr_node[CHR_END]
+                    right_endpoint = interrupt_segments[-1].get('right_flank_entry')
+                    if right_endpoint is None or right_endpoint['chrom'] != next_chr[0]:
+                        right_endpoint = make_breakend_endpoint(next_chr[0], right_pos, next_chr[1])
 
-            left_endpoint = path_node_exit_endpoint(prev_node, path[i - 1][0])
-            right_endpoint = path_node_entry_endpoint(curr_node, path[i][0])
-            ordered_breaks = [(left_endpoint, split_blocks[0]['entry'])]
-            for block_idx in range(len(split_blocks) - 1):
-                ordered_breaks.append((
-                    split_blocks[block_idx]['exit'],
-                    split_blocks[block_idx + 1]['entry'],
-                ))
-            ordered_breaks.append((split_blocks[-1]['exit'], right_endpoint))
+                    ordered_breaks = []
+                    append_chrom_change_break(
+                        ordered_breaks, left_endpoint, interrupt_segments[0]['entry']
+                    )
+                    for segment_idx in range(len(interrupt_segments) - 1):
+                        append_chrom_change_break(
+                            ordered_breaks,
+                            interrupt_segments[segment_idx]['exit'],
+                            interrupt_segments[segment_idx + 1]['entry'],
+                        )
+                    append_chrom_change_break(
+                        ordered_breaks, interrupt_segments[-1]['exit'], right_endpoint
+                    )
 
-            split_parent_weight[parent_nclose_idx] += path_weight
-            ctg_name = prev_node[CTG_NAM]
-            for split_idx, (left, right) in enumerate(ordered_breaks, start=1):
-                split_key = (
-                    parent_nclose_idx,
-                    split_idx,
-                    left['chrom'],
-                    int(left['pos']),
-                    left['strand'],
-                    right['chrom'],
-                    int(right['pos']),
-                    right['strand'],
-                    ctg_name,
-                )
-                split_weight_by_key[split_key] += path_weight
+                    if ordered_breaks:
+                        split_parent_weight[parent_nclose_idx] += path_weight
+                        ctg_name = last_node[CTG_NAM]
+                        for split_idx, (left, right) in enumerate(ordered_breaks, start=1):
+                            split_key = (
+                                parent_nclose_idx,
+                                split_idx,
+                                left['chrom'],
+                                int(left['pos']),
+                                left['strand'],
+                                right['chrom'],
+                                int(right['pos']),
+                                right['strand'],
+                                ctg_name,
+                            )
+                            split_weight_by_key[split_key] += path_weight
+
+            curr_chr, curr_ref = get_karyotype_next_state(
+                curr_node, prev_node_name, curr_node_name
+            )
 
     return split_weight_by_key, split_parent_weight
 
@@ -1490,6 +1558,15 @@ def draw_circos_plot(fig_prefix=''):
     for i, ctr in enumerate(path_nclose_usage):
         for j, v in ctr.items():
             nclose_cn[j] += v*weights[i]
+
+    split_bnd_weights, split_parent_weight = build_ctg_intype_split_bnds(
+        weights, BREAKEND_REMARKABLE_CN
+    )
+    adjusted_nclose_cn = defaultdict(float, nclose_cn)
+    for parent_nclose_idx, split_weight in split_parent_weight.items():
+        adjusted_nclose_cn[parent_nclose_idx] = max(
+            0.0, adjusted_nclose_cn[parent_nclose_idx] - split_weight
+        )
     
     # with open(f"{PREFIX}/nclose_cn.txt", "wt") as f:
     #     for k, v in nclose_cn.items():
@@ -1587,7 +1664,8 @@ def draw_circos_plot(fig_prefix=''):
     transloc_val_list = []
     bnd_cn_data = []
 
-    for k, v in nclose_cn.items():
+    for k in nclose_cn:
+        v = adjusted_nclose_cn[k]
         pos1, pos2 = nclose_str_pos[k]
         idx1, idx2 = idx2nclose[k]
         chr_nam1 = contig_data[idx1][CHR_NAM]
@@ -1605,6 +1683,29 @@ def draw_circos_plot(fig_prefix=''):
         
         if v > BREAKEND_REMARKABLE_CN:
             bnd_cn_data.append([(chr_nam1, pos1), (chr_nam2, pos2), v, event_type])
+
+    for split_key, v in sorted(split_bnd_weights.items()):
+        (
+            _parent_nclose_idx,
+            _split_idx,
+            chr_a,
+            pos_a,
+            dir_a,
+            chr_b,
+            pos_b,
+            dir_b,
+            _ctg_name,
+        ) = split_key
+        if v <= BREAKEND_REMARKABLE_CN:
+            continue
+
+        event_type = 'breakend'
+        if chr_a != chr_b:
+            transloc_val_list.append(v / meandepth * 2)
+        elif dir_a != dir_b:
+            inv_val_list.append(v / meandepth * 2)
+            event_type = 'inversion'
+        bnd_cn_data.append([(chr_a, pos_a), (chr_b, pos_b), v, event_type])
 
     indel_val_list = []
     non_type4_cnt = len(bnd_cn_data)
@@ -1892,17 +1993,49 @@ def make_bed_output(output_prefix=''):
     for i, ctr in enumerate(path_nclose_usage):
         for j, v in ctr.items():
             nclose_cn[j] += v * weights[i]
+
+    split_bnd_weights, split_parent_weight = build_ctg_intype_split_bnds(
+        weights, BREAKEND_REMARKABLE_CN
+    )
+    adjusted_nclose_cn = defaultdict(float, nclose_cn)
+    for parent_nclose_idx, split_weight in split_parent_weight.items():
+        adjusted_nclose_cn[parent_nclose_idx] = max(
+            0.0, adjusted_nclose_cn[parent_nclose_idx] - split_weight
+        )
+
+    def point_interval(pos):
+        pos = int(pos)
+        return max(0, pos - 1), pos
     
     with open(f'{PREFIX}/SKYPE_result{output_prefix}.bed', 'w') as f:
         cf = csv.writer(f, delimiter='\t')
         cf.writerow(['#chrom', 'cordst', 'cordnd', 'type', 'weight (N)'])
 
     
-        for nclose_ind, v in nclose_cn.items():
+        for nclose_ind in nclose_cn:
+            v = adjusted_nclose_cn[nclose_ind]
             if v > BREAKEND_REMARKABLE_CN:
                 for ind in idx2nclose[nclose_ind]:
                     cf.writerow([contig_data[ind][CHR_NAM], contig_data[ind][CHR_STR], contig_data[ind][CHR_END],
                                 'Breakend', round(v / N, 2)])
+
+        for split_key, v in sorted(split_bnd_weights.items()):
+            (
+                _parent_nclose_idx,
+                _split_idx,
+                chr_a,
+                pos_a,
+                _dir_a,
+                chr_b,
+                pos_b,
+                _dir_b,
+                _ctg_name,
+            ) = split_key
+            if v > BREAKEND_REMARKABLE_CN:
+                st, nd = point_interval(pos_a)
+                cf.writerow([chr_a, st, nd, 'Breakend', round(v / N, 2)])
+                st, nd = point_interval(pos_b)
+                cf.writerow([chr_b, st, nd, 'Breakend', round(v / N, 2)])
 
         for i in range(rpll, len(weights)):
             v = weights[i]

@@ -20,9 +20,13 @@ logging.info("03_anal_bam start")
 RAW_TRANSLOCATION_CANDIDATE_PKL = 'raw_translocation_candidates.pkl'
 RAW_TRANSLOCATION_RESULT_PKL = 'raw_translocation_result.pkl'
 RAW_TRANSLOCATION_REPORT_TSV = 'raw_translocation_read_counts.tsv'
+NCLOSE_COUNT_CANDIDATE_PKL = 'nclose_count_candidates.pkl'
+NCLOSE_COUNT_RESULT_PKL = 'nclose_count_result.pkl'
+NCLOSE_COUNT_REPORT_TSV = 'nclose_read_counts.tsv'
 RAW_TRANSLOCATION_WINDOW = 5000
 RAW_TRANSLOCATION_DEPTH_FLANK = 500000
 RAW_TRANSLOCATION_DEPTH_BALANCED_RATIO = 1.1
+NCLOSE_COUNT_DEFAULT_VAF_THRESHOLD = 0.1
 RAW_COUNT_NAMES = {
     'd1': 'nclose_a_read_count',
     'd2': 'point_a_norm_read_count',
@@ -34,6 +38,11 @@ RAW_BASIS_NAMES = {
     'd2': 'point_a_norm_basis',
     'd3': 'point_b_norm_basis',
     'd4': 'nclose_b_basis',
+}
+NCLOSE_COUNT_INDEX = {
+    'd1': 101,
+    'd2': 102,
+    'd3': 103,
 }
 
 parser = argparse.ArgumentParser(description="SKYPE raw-read translocation analysis")
@@ -52,6 +61,15 @@ parser.add_argument("depth_stat_path", nargs="?", default=None,
 
 parser.add_argument("--progress",
                     help="Show progress bar", action='store_true')
+parser.add_argument("--nclose_count_only",
+                    help="Only run single-nclose raw-read VAF counting.",
+                    action='store_true')
+parser.add_argument("--skip_nclose_count",
+                    help="Skip single-nclose raw-read VAF counting even if candidates exist.",
+                    action='store_true')
+parser.add_argument("--nclose_count_vaf_threshold",
+                    help="VAF threshold used for the pass/fail column in nclose_read_counts.tsv.",
+                    type=float, default=NCLOSE_COUNT_DEFAULT_VAF_THRESHOLD)
 
 args = parser.parse_args()
 
@@ -60,8 +78,19 @@ read_bam_loc = args.read_bam_loc
 reference_fai_path = args.reference_fai_path
 depth_stat_path = args.depth_stat_path
 
-with open(f"{PREFIX}/{RAW_TRANSLOCATION_CANDIDATE_PKL}", "rb") as f:
-    raw_translocation_candidates = pkl.load(f)
+raw_translocation_candidates = []
+if not args.nclose_count_only:
+    raw_candidate_path = f"{PREFIX}/{RAW_TRANSLOCATION_CANDIDATE_PKL}"
+    if os.path.isfile(raw_candidate_path):
+        with open(raw_candidate_path, "rb") as f:
+            raw_translocation_candidates = pkl.load(f)
+
+nclose_count_candidates = []
+if not args.skip_nclose_count:
+    nclose_count_candidate_path = f"{PREFIX}/{NCLOSE_COUNT_CANDIDATE_PKL}"
+    if os.path.isfile(nclose_count_candidate_path):
+        with open(nclose_count_candidate_path, "rb") as f:
+            nclose_count_candidates = pkl.load(f)
 
 def read_chr_len(fai_path):
     chr_len = {}
@@ -342,6 +371,24 @@ def build_count_basis_texts(span_rows):
         )
     return basis_by_pair
 
+def build_nclose_count_basis_texts(span_rows):
+    count_names = {v: k for k, v in NCLOSE_COUNT_INDEX.items()}
+    rows_by_count = {}
+    for row in span_rows:
+        pair_id = int(row[0])
+        count_idx = int(row[1])
+        if count_idx not in count_names:
+            continue
+        rows_by_count.setdefault((pair_id, count_idx), []).append(row)
+
+    basis_by_pair = {}
+    for (pair_id, count_idx), rows in rows_by_count.items():
+        rows.sort(key=lambda row: int(row[2]))
+        basis_by_pair.setdefault(pair_id, {})[count_names[count_idx]] = "->".join(
+            span_row_basis_text(row) for row in rows
+        )
+    return basis_by_pair
+
 def build_point_depths(span_rows, depth_by_chrom, chr_len):
     count_names = {2: 'point_a', 3: 'point_b'}
     rows_by_count = {}
@@ -368,6 +415,81 @@ def build_point_depths(span_rows, depth_by_chrom, chr_len):
         }
     return point_depths
 
+def nclose_query_ordered_endpoints(record):
+    endpoints = list(record.get('layout', {}).get('ordered_endpoints', ()))
+    if len(endpoints) != 2:
+        return endpoints
+    if endpoints[0].get('ctg_name') != endpoints[1].get('ctg_name'):
+        return endpoints
+    try:
+        return sorted(endpoints, key=lambda endpoint: (
+            min(int(endpoint['ctg_st']), int(endpoint['ctg_nd'])),
+            max(int(endpoint['ctg_st']), int(endpoint['ctg_nd'])),
+        ))
+    except KeyError:
+        return endpoints
+
+def nclose_candidate_query_gap(record):
+    endpoints = nclose_query_ordered_endpoints(record)
+    if len(endpoints) != 2:
+        return None
+    if endpoints[0].get('ctg_name') != endpoints[1].get('ctg_name'):
+        return None
+    try:
+        left_nd = max(int(endpoints[0]['ctg_st']), int(endpoints[0]['ctg_nd']))
+        right_st = min(int(endpoints[1]['ctg_st']), int(endpoints[1]['ctg_nd']))
+    except KeyError:
+        return None
+    return max(0, right_st - left_nd)
+
+def add_nclose_count_rows(span_rows, candidate, chr_len):
+    query_gap = nclose_candidate_query_gap(candidate)
+    if query_gap is None or query_gap > RAW_TRANSLOCATION_WINDOW:
+        return
+
+    endpoints = nclose_query_ordered_endpoints(candidate)
+    if len(endpoints) != 2:
+        return
+
+    pair_id = int(candidate['pair_id'])
+    add_breakend_span_rows(
+        span_rows, pair_id,
+        {'count_idx': NCLOSE_COUNT_INDEX['d2'], 'endpoints': endpoints},
+        chr_len,
+    )
+    add_reference_span_rows(
+        span_rows, pair_id, NCLOSE_COUNT_INDEX['d1'],
+        {
+            'chrom': endpoints[0]['chrom'],
+            'inner_st': int(endpoints[0]['coord']),
+            'inner_nd': int(endpoints[0]['coord']),
+        },
+        chr_len,
+    )
+    add_reference_span_rows(
+        span_rows, pair_id, NCLOSE_COUNT_INDEX['d3'],
+        {
+            'chrom': endpoints[1]['chrom'],
+            'inner_st': int(endpoints[1]['coord']),
+            'inner_nd': int(endpoints[1]['coord']),
+        },
+        chr_len,
+    )
+
+def nclose_candidate_display_points(record):
+    endpoints = nclose_query_ordered_endpoints(record)
+    chrom_a = endpoints[0]['chrom'] if len(endpoints) > 0 else '*'
+    chrom_b = endpoints[1]['chrom'] if len(endpoints) > 1 else '*'
+    coord_a = int(endpoints[0]['coord']) if len(endpoints) > 0 else '*'
+    coord_b = int(endpoints[1]['coord']) if len(endpoints) > 1 else '*'
+    return chrom_a, coord_a, chrom_b, coord_b
+
+def nclose_count_vaf(nclose_count, normal_count):
+    total = int(nclose_count) + int(normal_count)
+    if total <= 0:
+        return None
+    return int(nclose_count) / total
+
 chr_len = read_chr_len(reference_fai_path)
 depth_by_chrom = read_depth_by_chrom(depth_stat_path)
 raw_junction_span_rows = []
@@ -384,8 +506,15 @@ for candidate in raw_translocation_candidates:
 raw_count_basis_texts = build_count_basis_texts(raw_junction_span_rows)
 raw_point_depths = build_point_depths(raw_junction_span_rows, depth_by_chrom, chr_len)
 
+nclose_count_span_rows = []
+for candidate in nclose_count_candidates:
+    add_nclose_count_rows(nclose_count_span_rows, candidate, chr_len)
+nclose_count_basis_texts = build_nclose_count_basis_texts(nclose_count_span_rows)
+
+all_junction_span_rows = raw_junction_span_rows + nclose_count_span_rows
+
 jl.seval("global raw_junction_span_vec = Vector{Vector{Any}}()")
-for row in raw_junction_span_rows:
+for row in all_junction_span_rows:
     jl.push_b(jl.raw_junction_span_vec, jl.Vector[jl.Any](row))
 
 is_progress_bar = sys.stdout.isatty() or args.progress
@@ -402,107 +531,174 @@ raw_translocation_counts = {
 }
 
 raw_translocation_records = []
-for candidate in raw_translocation_candidates:
-    pair_id = int(candidate['pair_id'])
-    d1 = raw_translocation_counts.get((pair_id, 1), 0)
-    d2 = raw_translocation_counts.get((pair_id, 2), 0)
-    d3 = raw_translocation_counts.get((pair_id, 3), 0)
-    d4 = raw_translocation_counts.get((pair_id, 4), 0)
-    point_a_no_spanning = d2 == 0
-    point_b_no_spanning = d3 == 0
-    point_depth = raw_point_depths.get(pair_id, {})
-    point_a_depth_balanced = depth_pair_is_balanced(point_depth.get('point_a', {}))
-    point_b_depth_balanced = depth_pair_is_balanced(point_depth.get('point_b', {}))
-    depth_balanced_translocation = point_a_depth_balanced and point_b_depth_balanced
-    point_a_depth_mean = depth_pair_mean(point_depth.get('point_a', {}))
-    point_b_depth_mean = depth_pair_mean(point_depth.get('point_b', {}))
-    point_a_estimate = estimate_nclose_depth(point_a_depth_mean, d1, d2)
-    point_b_estimate = estimate_nclose_depth(point_b_depth_mean, d4, d3)
-    weighted_nclose_depth = weighted_expected_depth(point_a_estimate, point_b_estimate)
+if not args.nclose_count_only:
+    for candidate in raw_translocation_candidates:
+        pair_id = int(candidate['pair_id'])
+        d1 = raw_translocation_counts.get((pair_id, 1), 0)
+        d2 = raw_translocation_counts.get((pair_id, 2), 0)
+        d3 = raw_translocation_counts.get((pair_id, 3), 0)
+        d4 = raw_translocation_counts.get((pair_id, 4), 0)
+        point_a_no_spanning = d2 == 0
+        point_b_no_spanning = d3 == 0
+        point_depth = raw_point_depths.get(pair_id, {})
+        point_a_depth_balanced = depth_pair_is_balanced(point_depth.get('point_a', {}))
+        point_b_depth_balanced = depth_pair_is_balanced(point_depth.get('point_b', {}))
+        depth_balanced_translocation = point_a_depth_balanced and point_b_depth_balanced
+        point_a_depth_mean = depth_pair_mean(point_depth.get('point_a', {}))
+        point_b_depth_mean = depth_pair_mean(point_depth.get('point_b', {}))
+        point_a_estimate = estimate_nclose_depth(point_a_depth_mean, d1, d2)
+        point_b_estimate = estimate_nclose_depth(point_b_depth_mean, d4, d3)
+        weighted_nclose_depth = weighted_expected_depth(point_a_estimate, point_b_estimate)
 
-    record = copy.deepcopy(candidate)
-    record['read_counts'] = {'d1': d1, 'd2': d2, 'd3': d3, 'd4': d4}
-    record['raw_point_no_spanning'] = {'point_a': point_a_no_spanning, 'point_b': point_b_no_spanning}
-    record['point_500k_depth'] = point_depth
-    record['raw_point_depth_balanced'] = {
-        'point_a': point_a_depth_balanced,
-        'point_b': point_b_depth_balanced,
-    }
-    record['depth_balanced_translocation'] = depth_balanced_translocation
-    record['depth_weighted_nclose_estimate'] = {
-        'point_a_mean_500k_depth': point_a_depth_mean,
-        'point_b_mean_500k_depth': point_b_depth_mean,
-        'point_a_nclose_vaf': point_a_estimate[0],
-        'point_b_nclose_vaf': point_b_estimate[0],
-        'nclose_a_expected_depth': point_a_estimate[1],
-        'nclose_b_expected_depth': point_b_estimate[1],
-        'weighted_expected_nclose_depth': weighted_nclose_depth,
-    }
-    for side_idx, side in enumerate(record.get('side_records', [])):
-        point_no_spanning = point_a_no_spanning if side_idx == 0 else point_b_no_spanning
-        point_depth_balanced = point_a_depth_balanced if side_idx == 0 else point_b_depth_balanced
-        side['no_spanning_rawread'] = point_no_spanning
-        side['no_spanning_utg'] = point_no_spanning
-        side['raw_point_no_spanning'] = point_no_spanning
-        side['raw_depth_balanced_500k'] = point_depth_balanced
-        side['depth_balanced_translocation'] = depth_balanced_translocation
-        side['accepted_forbid'] = False
-        side.setdefault('crossing_cols', [])
-    raw_translocation_records.append(record)
+        record = copy.deepcopy(candidate)
+        record['read_counts'] = {'d1': d1, 'd2': d2, 'd3': d3, 'd4': d4}
+        record['raw_point_no_spanning'] = {'point_a': point_a_no_spanning, 'point_b': point_b_no_spanning}
+        record['point_500k_depth'] = point_depth
+        record['raw_point_depth_balanced'] = {
+            'point_a': point_a_depth_balanced,
+            'point_b': point_b_depth_balanced,
+        }
+        record['depth_balanced_translocation'] = depth_balanced_translocation
+        record['depth_weighted_nclose_estimate'] = {
+            'point_a_mean_500k_depth': point_a_depth_mean,
+            'point_b_mean_500k_depth': point_b_depth_mean,
+            'point_a_nclose_vaf': point_a_estimate[0],
+            'point_b_nclose_vaf': point_b_estimate[0],
+            'nclose_a_expected_depth': point_a_estimate[1],
+            'nclose_b_expected_depth': point_b_estimate[1],
+            'weighted_expected_nclose_depth': weighted_nclose_depth,
+        }
+        for side_idx, side in enumerate(record.get('side_records', [])):
+            point_no_spanning = point_a_no_spanning if side_idx == 0 else point_b_no_spanning
+            point_depth_balanced = point_a_depth_balanced if side_idx == 0 else point_b_depth_balanced
+            side['no_spanning_rawread'] = point_no_spanning
+            side['no_spanning_utg'] = point_no_spanning
+            side['raw_point_no_spanning'] = point_no_spanning
+            side['raw_depth_balanced_500k'] = point_depth_balanced
+            side['depth_balanced_translocation'] = depth_balanced_translocation
+            side['accepted_forbid'] = False
+            side.setdefault('crossing_cols', [])
+        raw_translocation_records.append(record)
 
-with open(f"{PREFIX}/{RAW_TRANSLOCATION_RESULT_PKL}", "wb") as f:
-    pkl.dump(raw_translocation_records, f)
+    with open(f"{PREFIX}/{RAW_TRANSLOCATION_RESULT_PKL}", "wb") as f:
+        pkl.dump(raw_translocation_records, f)
 
-with open(f"{PREFIX}/{RAW_TRANSLOCATION_REPORT_TSV}", "wt") as f:
-    print(*[
-        'chrom_a', 'point_a', 'chrom_b', 'point_b',
-        'point_a_front_500k_mean_depth', 'point_a_back_500k_mean_depth',
-        'point_b_front_500k_mean_depth', 'point_b_back_500k_mean_depth',
-        'nclose_a', 'nclose_b',
-        RAW_COUNT_NAMES['d1'], RAW_COUNT_NAMES['d2'],
-        RAW_COUNT_NAMES['d4'], RAW_COUNT_NAMES['d3'],
-        'point_a_no_spanning_rawread', 'point_b_no_spanning_rawread',
-        'point_a_nclose_vaf', 'point_b_nclose_vaf',
-        'nclose_a_expected_depth', 'nclose_b_expected_depth',
-        'weighted_expected_nclose_depth',
-        RAW_BASIS_NAMES['d1'], RAW_BASIS_NAMES['d2'],
-        RAW_BASIS_NAMES['d4'], RAW_BASIS_NAMES['d3'],
-        'pair_id',
-    ], sep='\t', file=f)
-    for record in raw_translocation_records:
-        if not record.get('depth_balanced_translocation', False):
-            continue
-        counts = record['read_counts']
-        chrom_a, coord_a, chrom_b, coord_b = candidate_display_points(record)
-        basis = raw_count_basis_texts.get(int(record['pair_id']), {})
-        point_depth = record.get('point_500k_depth', {})
-        point_a_depth = point_depth.get('point_a', {})
-        point_b_depth = point_depth.get('point_b', {})
-        depth_estimate = record.get('depth_weighted_nclose_estimate', {})
-        print(
-            chrom_a, coord_a, chrom_b, coord_b,
-            format_depth(point_a_depth.get('front')),
-            format_depth(point_a_depth.get('back')),
-            format_depth(point_b_depth.get('front')),
-            format_depth(point_b_depth.get('back')),
-            layout_segment_text(record['layout_a']),
-            layout_segment_text(record['layout_b']),
-            counts['d1'], counts['d2'],
-            counts['d4'], counts['d3'],
-            record.get('raw_point_no_spanning', {}).get('point_a', False),
-            record.get('raw_point_no_spanning', {}).get('point_b', False),
-            format_depth(depth_estimate.get('point_a_nclose_vaf')),
-            format_depth(depth_estimate.get('point_b_nclose_vaf')),
-            format_depth(depth_estimate.get('nclose_a_expected_depth')),
-            format_depth(depth_estimate.get('nclose_b_expected_depth')),
-            format_depth(depth_estimate.get('weighted_expected_nclose_depth')),
-            basis.get('d1', '*'), basis.get('d2', '*'),
-            basis.get('d4', '*'), basis.get('d3', '*'),
-            record['pair_id'],
-            sep='\t', file=f
+    with open(f"{PREFIX}/{RAW_TRANSLOCATION_REPORT_TSV}", "wt") as f:
+        print(*[
+            'chrom_a', 'point_a', 'chrom_b', 'point_b',
+            'point_a_front_500k_mean_depth', 'point_a_back_500k_mean_depth',
+            'point_b_front_500k_mean_depth', 'point_b_back_500k_mean_depth',
+            'nclose_a', 'nclose_b',
+            RAW_COUNT_NAMES['d1'], RAW_COUNT_NAMES['d2'],
+            RAW_COUNT_NAMES['d4'], RAW_COUNT_NAMES['d3'],
+            'point_a_no_spanning_rawread', 'point_b_no_spanning_rawread',
+            'point_a_nclose_vaf', 'point_b_nclose_vaf',
+            'nclose_a_expected_depth', 'nclose_b_expected_depth',
+            'weighted_expected_nclose_depth',
+            RAW_BASIS_NAMES['d1'], RAW_BASIS_NAMES['d2'],
+            RAW_BASIS_NAMES['d4'], RAW_BASIS_NAMES['d3'],
+            'pair_id',
+        ], sep='\t', file=f)
+        for record in raw_translocation_records:
+            if not record.get('depth_balanced_translocation', False):
+                continue
+            counts = record['read_counts']
+            chrom_a, coord_a, chrom_b, coord_b = candidate_display_points(record)
+            basis = raw_count_basis_texts.get(int(record['pair_id']), {})
+            point_depth = record.get('point_500k_depth', {})
+            point_a_depth = point_depth.get('point_a', {})
+            point_b_depth = point_depth.get('point_b', {})
+            depth_estimate = record.get('depth_weighted_nclose_estimate', {})
+            print(
+                chrom_a, coord_a, chrom_b, coord_b,
+                format_depth(point_a_depth.get('front')),
+                format_depth(point_a_depth.get('back')),
+                format_depth(point_b_depth.get('front')),
+                format_depth(point_b_depth.get('back')),
+                layout_segment_text(record['layout_a']),
+                layout_segment_text(record['layout_b']),
+                counts['d1'], counts['d2'],
+                counts['d4'], counts['d3'],
+                record.get('raw_point_no_spanning', {}).get('point_a', False),
+                record.get('raw_point_no_spanning', {}).get('point_b', False),
+                format_depth(depth_estimate.get('point_a_nclose_vaf')),
+                format_depth(depth_estimate.get('point_b_nclose_vaf')),
+                format_depth(depth_estimate.get('nclose_a_expected_depth')),
+                format_depth(depth_estimate.get('nclose_b_expected_depth')),
+                format_depth(depth_estimate.get('weighted_expected_nclose_depth')),
+                basis.get('d1', '*'), basis.get('d2', '*'),
+                basis.get('d4', '*'), basis.get('d3', '*'),
+                record['pair_id'],
+                sep='\t', file=f
+            )
+
+    logging.info(
+        f"Raw-read translocation point no-span sides : "
+        f"{sum(sum(1 for s in r.get('side_records', []) if s.get('no_spanning_rawread', False)) for r in raw_translocation_records)}"
+    )
+
+nclose_count_records = []
+if not args.skip_nclose_count:
+    for candidate in nclose_count_candidates:
+        pair_id = int(candidate['pair_id'])
+        d1 = raw_translocation_counts.get((pair_id, NCLOSE_COUNT_INDEX['d1']), 0)
+        d2 = raw_translocation_counts.get((pair_id, NCLOSE_COUNT_INDEX['d2']), 0)
+        d3 = raw_translocation_counts.get((pair_id, NCLOSE_COUNT_INDEX['d3']), 0)
+        chr_a_vaf = nclose_count_vaf(d2, d1)
+        chr_b_vaf = nclose_count_vaf(d2, d3)
+        query_gap = nclose_candidate_query_gap(candidate)
+        filter_eligible = query_gap is not None and query_gap <= RAW_TRANSLOCATION_WINDOW
+        keep_by_vaf = filter_eligible and (
+            (chr_a_vaf is not None and chr_a_vaf >= args.nclose_count_vaf_threshold) or
+            (chr_b_vaf is not None and chr_b_vaf >= args.nclose_count_vaf_threshold)
         )
+        keep_nclose = (not filter_eligible) or keep_by_vaf
 
-logging.info(
-    f"Raw-read translocation point no-span sides : "
-    f"{sum(sum(1 for s in r.get('side_records', []) if s.get('no_spanning_rawread', False)) for r in raw_translocation_records)}"
-)
+        record = copy.deepcopy(candidate)
+        record['read_counts'] = {'d1': d1, 'd2': d2, 'd3': d3}
+        record['nclose_query_gap'] = query_gap
+        record['filter_eligible'] = filter_eligible
+        record['vaf'] = {'chr_a': chr_a_vaf, 'chr_b': chr_b_vaf}
+        record['keep_by_vaf'] = keep_by_vaf
+        record['keep_nclose'] = keep_nclose
+        nclose_count_records.append(record)
+
+    with open(f"{PREFIX}/{NCLOSE_COUNT_RESULT_PKL}", "wb") as f:
+        pkl.dump(nclose_count_records, f)
+
+    with open(f"{PREFIX}/{NCLOSE_COUNT_REPORT_TSV}", "wt") as f:
+        print(*[
+            'chrom_a', 'point_a', 'chrom_b', 'point_b',
+            'nclose_query_gap', 'filter_eligible',
+            'nclose',
+            'chr_a_norm_read_count', 'nclose_read_count', 'chr_b_norm_read_count',
+            'chr_a_nclose_vaf', 'chr_b_nclose_vaf', 'keep_by_vaf', 'keep_nclose',
+            'chr_a_norm_basis', 'nclose_basis', 'chr_b_norm_basis',
+            'pair_id', 'nclose_key', 'contig_name',
+        ], sep='\t', file=f)
+        for record in nclose_count_records:
+            counts = record['read_counts']
+            basis = nclose_count_basis_texts.get(int(record['pair_id']), {})
+            chrom_a, coord_a, chrom_b, coord_b = nclose_candidate_display_points(record)
+            print(
+                chrom_a, coord_a, chrom_b, coord_b,
+                record.get('nclose_query_gap', '*'),
+                record.get('filter_eligible', False),
+                layout_segment_text(record['layout']),
+                counts['d1'], counts['d2'], counts['d3'],
+                format_depth(record.get('vaf', {}).get('chr_a')),
+                format_depth(record.get('vaf', {}).get('chr_b')),
+                record.get('keep_by_vaf', False),
+                record.get('keep_nclose', False),
+                basis.get('d1', '*'), basis.get('d2', '*'), basis.get('d3', '*'),
+                record['pair_id'],
+                ",".join(str(x) for x in record.get('nclose_key', ())),
+                record.get('ctg_name', '*'),
+                sep='\t', file=f
+            )
+
+    logging.info(
+        f"NClose raw-count VAF kept : "
+        f"{sum(1 for r in nclose_count_records if r.get('keep_nclose', False))}/"
+        f"{len(nclose_count_records)}"
+    )

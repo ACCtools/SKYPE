@@ -145,6 +145,10 @@ RAW_TRANSLOCATION_RESULT_PKL = 'raw_translocation_result.pkl'
 RAW_TRANSLOCATION_WINDOW = 5 * K
 RAW_TRANSLOCATION_MIN_SAME_CHROM_SPAN = 10 * M
 
+NCLOSE_COUNT_CANDIDATE_PKL = 'nclose_count_candidates.pkl'
+NCLOSE_COUNT_RESULT_PKL = 'nclose_count_result.pkl'
+NCLOSE_COUNT_DEFAULT_VAF_THRESHOLD = 0.1
+
 
 def import_data(file_path : str) -> list :
     contig_data = []
@@ -2341,11 +2345,13 @@ def extract_nclose_node(contig_data : list, bnd_contig : set, repeat_contig_name
                 is_simple_ctg_alt = contig_data[s][CTG_NAM].startswith("simple_ctg_alt_")
                 MAX_GAP = 1 if is_simple_ctg_alt else 0
 
+                # Keep the two terminal trims from crossing on ABAB-like simple_ctg_alt paths.
+                # Otherwise the 1-chunk gap tolerance can emit a reverse nclose pair.
                 # forward trim
                 gap = 0
                 last_match_st = st  # st == s, st_chr 매칭 by construction
                 st_cur = st + 1
-                while st_cur <= e:
+                while st_cur < e:
                     if [contig_data[st_cur][CTG_DIR], contig_data[st_cur][CHR_NAM]] == st_chr:
                         last_match_st = st_cur
                         gap = 0
@@ -2363,7 +2369,7 @@ def extract_nclose_node(contig_data : list, bnd_contig : set, repeat_contig_name
                 gap = 0
                 last_match_ed = ed  # ed == e, ed_chr 매칭 by construction
                 ed_cur = ed - 1
-                while ed_cur >= s:
+                while ed_cur > st:
                     if [contig_data[ed_cur][CTG_DIR], contig_data[ed_cur][CHR_NAM]] == ed_chr:
                         last_match_ed = ed_cur
                         gap = 0
@@ -4314,6 +4320,68 @@ def merge_raw_translocation_candidates(*candidate_lists):
             merged.append(candidate)
     return renumber_raw_translocation_candidates(merged)
 
+def build_nclose_count_candidates(contig_data, nclose_nodes):
+    candidates = []
+    seen = set()
+    pair_id = 0
+    for ctg_name, pair_list in nclose_nodes.items():
+        for pair in pair_list:
+            nclose_key = tuple(sorted(int(x) for x in pair))
+            if len(nclose_key) != 2:
+                continue
+            if nclose_key in seen:
+                continue
+            seen.add(nclose_key)
+            layout = canonical_raw_nclose_layout(contig_data, tuple(int(x) for x in pair))
+            candidates.append({
+                'pair_id': pair_id,
+                'nclose_key': nclose_key,
+                'ctg_name': ctg_name,
+                'layout': layout,
+            })
+            pair_id += 1
+    return candidates
+
+def collect_nclose_count_keep_pairs(prefix, vaf_threshold):
+    result_path = f'{prefix}/{NCLOSE_COUNT_RESULT_PKL}'
+    if not os.path.isfile(result_path):
+        logging.warning(f'NClose raw-count result not found: {result_path}')
+        return None, 0, 0
+
+    with open(result_path, 'rb') as f:
+        records = pkl.load(f)
+
+    keep_pairs = set()
+    for record in records:
+        if 'keep_nclose' in record:
+            if record['keep_nclose']:
+                keep_pairs.add(tuple(sorted(int(x) for x in record['nclose_key'])))
+            continue
+        if record.get('filter_eligible') is False:
+            keep_pairs.add(tuple(sorted(int(x) for x in record['nclose_key'])))
+            continue
+        vaf = record.get('vaf', {})
+        chr_a_vaf = vaf.get('chr_a')
+        chr_b_vaf = vaf.get('chr_b')
+        if (
+            (chr_a_vaf is not None and chr_a_vaf >= vaf_threshold) or
+            (chr_b_vaf is not None and chr_b_vaf >= vaf_threshold)
+        ):
+            keep_pairs.add(tuple(sorted(int(x) for x in record['nclose_key'])))
+
+    return keep_pairs, len(records), len(keep_pairs)
+
+def filter_nclose_nodes_by_keep_pairs(nclose_nodes, keep_pairs):
+    filtered = defaultdict(list)
+    removed = 0
+    for ctg_name, pair_list in nclose_nodes.items():
+        for pair in pair_list:
+            if tuple(sorted(int(x) for x in pair)) not in keep_pairs:
+                removed += 1
+                continue
+            filtered[ctg_name].append(pair)
+    return filtered, removed
+
 def raw_false_value(value):
     return value is False or value == 0 or value == 'False' or value == 'false'
 
@@ -5232,6 +5300,46 @@ def nclose_calc():
                 print("", file=f)
         return transloc_nclose_pair_count
 
+    if args.check_nclose_count:
+        if SKIP_BAM_ANAL:
+            logging.warning("NClose raw-count VAF filter requested but BAM analysis is skipped")
+        else:
+            nclose_count_candidates = build_nclose_count_candidates(contig_data, nclose_nodes)
+            with open(f"{PREFIX}/{NCLOSE_COUNT_CANDIDATE_PKL}", "wb") as f:
+                pkl.dump(nclose_count_candidates, f)
+            logging.info(
+                f"NClose raw-count VAF filter candidates : {len(nclose_count_candidates)} "
+                f"(threshold={args.nclose_count_vaf_threshold})"
+            )
+
+            if nclose_count_candidates:
+                thread_lim = min(8, THREAD)
+                PROGRESS = ['--progress'] if args.progress else []
+                nclose_count_result = subprocess.run(
+                    ['python', "-X", f"juliacall-threads={thread_lim}", "-X", "juliacall-handle-signals=yes",
+                     os.path.join(os.path.dirname(os.path.abspath(__file__)), '03_Anal_bam.py'),
+                     PREFIX, read_bam_loc, CHROMOSOME_INFO_FILE_PATH, main_stat_loc,
+                     '--nclose_count_only',
+                     '--nclose_count_vaf_threshold', str(args.nclose_count_vaf_threshold)] + PROGRESS
+                )
+                if nclose_count_result.returncode == 0:
+                    keep_pairs, record_count, keep_count = collect_nclose_count_keep_pairs(
+                        PREFIX, args.nclose_count_vaf_threshold
+                    )
+                    if keep_pairs is not None:
+                        nclose_nodes, nclose_count_removed = filter_nclose_nodes_by_keep_pairs(
+                            nclose_nodes, keep_pairs
+                        )
+                        logging.info(
+                            f"NClose raw-count VAF filter : kept {keep_count}/{record_count} "
+                            f"candidate nclose pairs, removed {nclose_count_removed}"
+                        )
+                else:
+                    logging.warning(
+                        f"NClose raw-count BAM analysis failed with exit code {nclose_count_result.returncode}; "
+                        "skip nclose raw-count VAF filter"
+                    )
+
     base_raw_translocation_candidates = build_raw_translocation_candidates(contig_data, nclose_nodes, chr_len)
     all_raw_candidate_nclose_nodes = convert_all_nclose_comp_to_nclose_nodes(contig_data, all_nclose_comp)
     raw_candidate_nclose_nodes = build_ecdna_nclose_nodes(raw_nclose_nodes, all_raw_candidate_nclose_nodes)
@@ -5268,7 +5376,8 @@ def nclose_calc():
         raw_bam_result = subprocess.run(
             ['python', "-X", f"juliacall-threads={thread_lim}", "-X", "juliacall-handle-signals=yes",
              os.path.join(os.path.dirname(os.path.abspath(__file__)), '03_Anal_bam.py'),
-             PREFIX, read_bam_loc, CHROMOSOME_INFO_FILE_PATH, main_stat_loc] + PROGRESS
+             PREFIX, read_bam_loc, CHROMOSOME_INFO_FILE_PATH, main_stat_loc,
+             '--skip_nclose_count'] + PROGRESS
         )
         if raw_bam_result.returncode == 0:
             raw_virtual_inv_nclose_pairs = collect_raw_virtual_inv_nclose_pairs(PREFIX)
@@ -5387,6 +5496,14 @@ parser.add_argument("--exclude_nclose_list_loc",
                     help=argparse.SUPPRESS, default=None)                 
 parser.add_argument("--skip_bam_analysis",
                     help="Skip bam analysis", action='store_true')
+parser.add_argument("--check_nclose_count",
+                    help="Count raw-read support for each nclose and keep only nclose with "
+                         "chrA or chrB VAF above --nclose_count_vaf_threshold.",
+                    action='store_true')
+parser.add_argument("--nclose_count_vaf_threshold",
+                    help="Minimum single-side raw-read VAF to keep an nclose when "
+                         "--check_nclose_count is enabled.",
+                    type=float, default=NCLOSE_COUNT_DEFAULT_VAF_THRESHOLD)
 parser.add_argument("--add_alt_ctg_simple",
                     help="For each primary ctg PAF contig, classify by first/last chunk "
                          "(chr diff -> type 1, dir diff -> type 2; else skip). "
