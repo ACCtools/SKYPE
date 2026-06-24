@@ -1,6 +1,6 @@
 using XAM
 using BioAlignments
-using ProgressMeter
+using ProgressBars
 using DataStructures
 
 SplitHit = Tuple{Int, Bool}
@@ -9,6 +9,7 @@ AlnInfo = Tuple{Bool, Int, Int, Int}
 RawCountKey = Tuple{Int, Int}
 RawCounter = DefaultDict{RawCountKey, Int, Int}
 RawAnchor = Tuple{Int, Int, Int, Int, Int, Int, Bool}
+ReadHits = Dict{String, DefaultDict{RawCountKey, Tuple{Tv, Tv}}}
 
 const QRY_OPS = (
     OP_MATCH,        # M
@@ -28,6 +29,7 @@ const REF_OPS = (
 )
 
 const RAW_TRANSLOCATION_WINDOW::Int = 5 * 1e3
+const RAW_FETCH_MERGE_GAP::Int = 5_000
 const PANDEPTH_EXCLUDE_FLAGS::UInt16 = UInt16(1796)
 const PANDEPTH_MIN_MAPQ::UInt8 = UInt8(0)
 
@@ -44,6 +46,73 @@ function get_chr2int(fai_loc::String)
     end
 
     return chr2int
+end
+
+function merge_fetch_intervals(intervals::Vector{Tuple{String, Int, Int}},
+                               merge_gap::Int=RAW_FETCH_MERGE_GAP)
+    if isempty(intervals)
+        return intervals
+    end
+
+    sorted_intervals = sort(unique(intervals), by=x -> (x[1], x[2], x[3]))
+    merged = Vector{Tuple{String, Int, Int}}()
+
+    curr_chr, curr_st, curr_nd = sorted_intervals[1]
+    for (chr, span_st, span_nd) in sorted_intervals[2:end]
+        if chr == curr_chr && span_st <= curr_nd + merge_gap
+            curr_nd = max(curr_nd, span_nd)
+        else
+            push!(merged, (curr_chr, curr_st, curr_nd))
+            curr_chr, curr_st, curr_nd = chr, span_st, span_nd
+        end
+    end
+    push!(merged, (curr_chr, curr_st, curr_nd))
+
+    return merged
+end
+
+function make_progress(desc::String; total=nothing)
+    progress = total === nothing ?
+               ProgressBar(printing_delay=0.1) :
+               ProgressBar(total=Int64(total), printing_delay=0.1)
+    set_description(progress, desc)
+    return progress
+end
+
+function update_progress!(progress, progress_lock=nothing)
+    if progress === nothing
+        return
+    end
+
+    if progress_lock === nothing
+        update(progress)
+        return
+    end
+
+    lock(progress_lock)
+    try
+        update(progress)
+    finally
+        unlock(progress_lock)
+    end
+end
+
+function finish_progress!(progress, progress_lock=nothing)
+    if progress === nothing
+        return
+    end
+
+    if progress_lock === nothing
+        update(progress, 0; force_print=true)
+        return
+    end
+
+    lock(progress_lock)
+    try
+        update(progress, 0; force_print=true)
+    finally
+        unlock(progress_lock)
+    end
 end
 
 function get_alignment_info(rec::XAM.BAM.Record)
@@ -130,7 +199,7 @@ function prepare_raw_translocation(raw_junction_spans::Vector{Vector{Any}})
         push!(raw_fetch_intervals, (chr, span_st, span_nd))
     end
 
-    return raw_anchor_data, unique(raw_fetch_intervals)
+    return raw_anchor_data, merge_fetch_intervals(raw_fetch_intervals)
 end
 
 function add_raw_anchor_hits!(read_hits, rec::XAM.BAM.Record, info::AlnInfo)
@@ -194,6 +263,26 @@ function count_raw_anchor_hits(read_hits)
     return raw_count
 end
 
+function empty_read_hits()
+    return ReadHits()
+end
+
+function merge_read_hits!(dst::ReadHits, src::ReadHits)
+    for (read_name, src_hits_by_key) in src
+        dst_hits_by_key = get!(dst, read_name) do
+            DefaultDict{RawCountKey, Tuple{Tv, Tv}}(() -> (Tv(), Tv()))
+        end
+
+        for (key, (src_hits1, src_hits2)) in pairs(src_hits_by_key)
+            dst_hits1, dst_hits2 = dst_hits_by_key[key]
+            append!(dst_hits1, src_hits1)
+            append!(dst_hits2, src_hits2)
+        end
+    end
+
+    return dst
+end
+
 function find_bam_index(bam_loc::String)
     candidates = String[bam_loc * ".bai"]
     if endswith(bam_loc, ".bam")
@@ -211,8 +300,9 @@ function scan_bam_all!(read_hits, bam_loc::String, is_progress_bar::Bool)
     reader = open(BAM.Reader, bam_loc)
     record = BAM.Record()
 
+    progress = nothing
     if is_progress_bar
-        p = ProgressUnknown(desc="Analysis bam alignments:", dt=0.1, showspeed=true)
+        progress = make_progress("Analysis bam alignments:")
     end
 
     while !eof(reader)
@@ -220,7 +310,7 @@ function scan_bam_all!(read_hits, bam_loc::String, is_progress_bar::Bool)
         read!(reader, record)
 
         if is_progress_bar
-            next!(p)
+            update_progress!(progress)
         end
 
         if pass_raw_record(record)
@@ -229,31 +319,93 @@ function scan_bam_all!(read_hits, bam_loc::String, is_progress_bar::Bool)
     end
 
     if is_progress_bar
-        println()
+        finish_progress!(progress)
     end
     close(reader)
 end
 
-function scan_bam_indexed!(read_hits, bam_loc::String, index_loc::String,
-                           is_progress_bar::Bool)
+function split_interval_ranges(n_intervals::Int, n_tasks::Int)
+    n_chunks = min(n_intervals, n_tasks)
+    ranges = Vector{UnitRange{Int}}()
+
+    for chunk_id in 1:n_chunks
+        i0 = fld((chunk_id - 1) * n_intervals, n_chunks) + 1
+        i1 = fld(chunk_id * n_intervals, n_chunks)
+        if i0 <= i1
+            push!(ranges, i0:i1)
+        end
+    end
+
+    return ranges
+end
+
+function scan_bam_indexed_range(bam_loc::String, index_loc::String,
+                                intervals::Vector{Tuple{String, Int, Int}},
+                                interval_range::UnitRange{Int},
+                                progress, progress_lock)
+    local_hits = empty_read_hits()
     reader = open(BAM.Reader, bam_loc; index=index_loc)
 
-    if is_progress_bar
-        p = Progress(length(raw_fetch_intervals), desc="Analysis bam candidate intervals:", dt=0.1)
-    end
-
-    for (chr, span_st, span_nd) in raw_fetch_intervals
-        for record in BAM.eachoverlap(reader, chr, span_st:span_nd)
-            if pass_raw_record(record)
-                add_raw_anchor_hits!(read_hits, record, get_alignment_info(record))
+    try
+        for i in interval_range
+            chr, span_st, span_nd = intervals[i]
+            for record in BAM.eachoverlap(reader, chr, span_st:span_nd)
+                if pass_raw_record(record)
+                    add_raw_anchor_hits!(local_hits, record, get_alignment_info(record))
+                end
             end
+            update_progress!(progress, progress_lock)
         end
-        if is_progress_bar
-            next!(p)
+    finally
+        close(reader)
+    end
+
+    return local_hits
+end
+
+function scan_bam_indexed!(read_hits, bam_loc::String, index_loc::String,
+                           is_progress_bar::Bool)
+    n_intervals = length(raw_fetch_intervals)
+    if n_intervals == 0
+        return
+    end
+
+    progress = nothing
+    progress_lock = nothing
+    if is_progress_bar
+        progress = make_progress(
+            "Analysis bam candidate intervals:";
+            total=n_intervals
+        )
+        progress_lock = ReentrantLock()
+    end
+
+    n_tasks = min(Threads.nthreads(), n_intervals)
+    if n_tasks <= 1
+        merge_read_hits!(
+            read_hits,
+            scan_bam_indexed_range(
+                bam_loc, index_loc, raw_fetch_intervals, 1:n_intervals,
+                progress, progress_lock
+            )
+        )
+    else
+        tasks = [
+            Threads.@spawn scan_bam_indexed_range(
+                bam_loc, index_loc, raw_fetch_intervals, interval_range,
+                progress, progress_lock
+            )
+            for interval_range in split_interval_ranges(n_intervals, n_tasks)
+        ]
+
+        for task in tasks
+            merge_read_hits!(read_hits, fetch(task))
         end
     end
 
-    close(reader)
+    if is_progress_bar
+        finish_progress!(progress, progress_lock)
+    end
 end
 
 function anal_bam(bam_loc::String, fai_loc::String, is_progress_bar::Bool,
@@ -267,7 +419,7 @@ function anal_bam(bam_loc::String, fai_loc::String, is_progress_bar::Bool,
         return Tuple{Int, Int, Int}[]
     end
 
-    read_hits = Dict{String, DefaultDict{RawCountKey, Tuple{Tv, Tv}}}()
+    read_hits = empty_read_hits()
     index_loc = find_bam_index(bam_loc)
     if index_loc === nothing
         scan_bam_all!(read_hits, bam_loc, is_progress_bar)

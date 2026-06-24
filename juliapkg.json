@@ -13,8 +13,8 @@
         "BioAlignments": {
             "uuid": "00701ae9-d1dc-5365-b64a-a3a3ebf5695e"
         },
-        "ProgressMeter": {
-            "uuid": "92933f4c-e287-5a05-a399-4b506db050ca"
+        "ProgressBars": {
+            "uuid": "49802e3a-d2f1-5c88-81d8-b72133a6f568"
         },
         "Octavian": {
             "uuid": "6fd5a793-0b7e-452c-907f-f8bfe9c57db4"

@@ -647,7 +647,12 @@ if not args.skip_nclose_count:
         chr_a_vaf = nclose_count_vaf(d2, d1)
         chr_b_vaf = nclose_count_vaf(d2, d3)
         query_gap = nclose_candidate_query_gap(candidate)
-        filter_eligible = query_gap is not None and query_gap <= RAW_TRANSLOCATION_WINDOW
+        overlaps_censat = bool(candidate.get('overlaps_censat', False))
+        filter_eligible = (
+            not overlaps_censat and
+            query_gap is not None and
+            query_gap <= RAW_TRANSLOCATION_WINDOW
+        )
         keep_by_vaf = filter_eligible and (
             (chr_a_vaf is not None and chr_a_vaf >= args.nclose_count_vaf_threshold) or
             (chr_b_vaf is not None and chr_b_vaf >= args.nclose_count_vaf_threshold)
@@ -657,6 +662,7 @@ if not args.skip_nclose_count:
         record = copy.deepcopy(candidate)
         record['read_counts'] = {'d1': d1, 'd2': d2, 'd3': d3}
         record['nclose_query_gap'] = query_gap
+        record['overlaps_censat'] = overlaps_censat
         record['filter_eligible'] = filter_eligible
         record['vaf'] = {'chr_a': chr_a_vaf, 'chr_b': chr_b_vaf}
         record['keep_by_vaf'] = keep_by_vaf
@@ -669,7 +675,7 @@ if not args.skip_nclose_count:
     with open(f"{PREFIX}/{NCLOSE_COUNT_REPORT_TSV}", "wt") as f:
         print(*[
             'chrom_a', 'point_a', 'chrom_b', 'point_b',
-            'nclose_query_gap', 'filter_eligible',
+            'nclose_query_gap', 'overlaps_censat', 'filter_eligible',
             'nclose',
             'chr_a_norm_read_count', 'nclose_read_count', 'chr_b_norm_read_count',
             'chr_a_nclose_vaf', 'chr_b_nclose_vaf', 'keep_by_vaf', 'keep_nclose',
@@ -683,6 +689,7 @@ if not args.skip_nclose_count:
             print(
                 chrom_a, coord_a, chrom_b, coord_b,
                 record.get('nclose_query_gap', '*'),
+                record.get('overlaps_censat', False),
                 record.get('filter_eligible', False),
                 layout_segment_text(record['layout']),
                 counts['d1'], counts['d2'], counts['d3'],
