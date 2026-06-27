@@ -332,7 +332,17 @@ parser.add_argument("-t", "--thread",
 parser.add_argument("--progress",
                     help="Show progress bar", action='store_true')
 
+parser.add_argument("--normal_prior_strength",
+                    help="Dimensionless strength for the default-chromosome prior. "
+                         "0 disables the prior. The term is normalized by the "
+                         "number of clean depth bins and prior rows.",
+                    type=float, default=0.01)
+
 args = parser.parse_args()
+
+normal_prior_strength = float(args.normal_prior_strength)
+if normal_prior_strength < 0:
+    raise ValueError("--normal_prior_strength must be non-negative")
 
 # t = "22_save_matrix.py public_data/chm13v2.0_censat_v2.1.m.bed /home/hyunwoo/ACCtools-pipeline/90_skype_run/COLO829/20_alignasm/COLO829.ctg.aln.paf.ppc.paf /home/hyunwoo/ACCtools-pipeline/90_skype_run/COLO829/01_depth/COLO829_normalized.win.stat.gz public_data/chm13v2.0_telomere.bed public_data/chm13v2.0.fa.fai public_data/chm13v2.0_cytobands_allchrs.bed 30_skype_pipe/COLO829_14_12_42 -t 4"
 # args = parser.parse_args(t.split()[1:])
@@ -636,15 +646,43 @@ m = np.shape(B)[0]
 n = len(paf_ans_list) + fclen // 4 + bclen // 4 + eclen // 2 + len(cen_fragment_list)
 ncnt = 0
 
+tar_def_path_ind_dict = {}
+for path_idx, (path, _) in enumerate(paf_ans_list):
+    path_rel = get_relative_path(path)
+    if path_rel in tar_def_path_set:
+        tar_def_path_ind_dict[path_rel] = path_idx
+
+init_cols = [
+    tar_def_path_ind_dict[path_rel]
+    for path_rel in tar_chr_data.values()
+    if path_rel in tar_def_path_ind_dict
+]
+
+missing_init_paths = [
+    path_rel for path_rel in tar_chr_data.values()
+    if path_rel not in tar_def_path_ind_dict
+]
+if missing_init_paths:
+    logging.warning(
+        f"Default chromosome paths missing from NNLS columns: {missing_init_paths}"
+    )
+
+prior_cols = init_cols
+prior_row_capacity = len(prior_cols) if normal_prior_strength > 0 and prior_cols else 0
+
 with open(f"{PREFIX}/report.txt", 'r') as f:
     f.readline()
     path_cnt = int(f.readline().strip())
 
 use_julia_solver = path_cnt <= HARD_PATH_COUNT_BASELINE
 
-shape = (n, m)
+shape = (n, m + prior_row_capacity)
 A_arr = np.empty(shape, dtype=np.float32, order='C')
 
+if prior_row_capacity:
+    A_arr[:, m:] = 0.0
+
+prior_col_start = m
 fm = filter_len
 
 filter_vec_list = []
@@ -652,7 +690,6 @@ tot_loc_list = []
 
 tmp_v = np.zeros(m, dtype=np.float32)
 
-tar_def_path_ind_dict = {}
 ncnt = 0
 # Matrix column index -> canonical event tags.
 # ordinary nclose: (left_contig_idx, right_contig_idx), sorted tuple of ints
@@ -678,11 +715,7 @@ for path, key_int_list in tqdm(paf_ans_list, desc='Recover depth from separated 
         else:
             s+=1
 
-    A_arr[ncnt, :] = tmp_v
-        
-    path_rel = get_relative_path(path)
-    if path_rel in tar_def_path_set:
-        tar_def_path_ind_dict[path_rel] = ncnt
+    A_arr[ncnt, :m] = tmp_v
     ncnt += 1
 
 with open(f'{PREFIX}/indel_exclude_idx_set.pkl', 'rb') as f:
@@ -712,18 +745,11 @@ for i in tqdm(range(1, fclen // 4 + 1), desc='Parse coverage from forward-direct
     else:
         tv = ov - bv
     
-    A_arr[ncnt, :] = tv
+    A_arr[ncnt, :m] = tv
         
     path_nclose_dict_set[ncnt].add((ov_loc.split('/')[-2], i, type2_ins_idx))
     ncnt += 1
     indel_idx += 1
-    
-init_cols = [tar_def_path_ind_dict[i] for i in tar_chr_data.values()]
-
-A_pri = A_arr[init_cols, :fm].T
-
-w_pri = nnls(A_pri, B[:filter_len])[0]
-
 # Process backward-directed outlier contigs
 for i in tqdm(range(1, bclen // 4 + 1), desc='Parse coverage from backward-directed outlier contig gz files',
               disable=not sys.stdout.isatty() and not args.progress):
@@ -747,7 +773,7 @@ for i in tqdm(range(1, bclen // 4 + 1), desc='Parse coverage from backward-direc
     else:
         tv = ov + bv
     
-    A_arr[ncnt, :] = tv
+    A_arr[ncnt, :m] = tv
         
     path_nclose_dict_set[ncnt].add((ov_loc.split('/')[-2], i, type2_ins_idx))
     ncnt += 1
@@ -758,7 +784,7 @@ for i in range(1, eclen // 2 + 1):
     ov = get_vec_from_stat_loc(ov_loc)
     type2_ins_idx = -1
 
-    A_arr[ncnt, :] = ov
+    A_arr[ncnt, :m] = ov
         
     path_nclose_dict_set[ncnt].add((ov_loc.split('/')[-2], i, type2_ins_idx))
     ncnt += 1
@@ -767,6 +793,7 @@ for i in range(1, eclen // 2 + 1):
 # 02번에서 detect 된 (chrom, dir, mid_censat) 기반으로 fragment 1개 = column 1개.
 # 단위 indicator vector(0/1)로 채우면 NNLS weight ≈ 추가 copy 수.
 all_st_list = chr_filt_st_list + chr_no_filt_st_list
+cent_fragment_cols = []
 for chrom, info in cen_fragment_list:
     mid = info["mid"]
     chr_length = info["chr_len"]
@@ -780,9 +807,10 @@ for chrom, info in cen_fragment_list:
         if c == chrom and st_lo <= st < st_hi:
             tv[idx] = 1.0
 
-    A_arr[ncnt, :] = tv
+    A_arr[ncnt, :m] = tv
 
     path_nclose_dict_set[ncnt].add(('cent_fragment', chrom, info["dir"]))
+    cent_fragment_cols.append(ncnt)
     ncnt += 1
 
 dep_list.extend([0] * (fclen // 4 + bclen // 4 + eclen // 2 + len(cen_fragment_list)))
@@ -792,26 +820,99 @@ assert(len(dep_list) == n)
 for (i1, i2) in itertools.pairwise(dep_list):
     assert(i1 >= i2)
 
+if init_cols:
+    # Estimate default-chromosome targets with all cent_fragment columns present
+    # as auxiliary explanatory variables, but only keep the default-chromosome
+    # coefficients as prior targets.
+    prior_fit_cols = init_cols + cent_fragment_cols
+    A_pri = A_arr[prior_fit_cols, :fm].T
+    fit_w_pri = nnls(A_pri, B[:filter_len])[0].astype(np.float32)
+    w_pri = fit_w_pri[:len(init_cols)]
+else:
+    prior_fit_cols = []
+    fit_w_pri = np.asarray([], dtype=np.float32)
+    w_pri = np.asarray([], dtype=np.float32)
+
+normal_prior_row_count = 0
+normal_prior_scale = 0.0
+B_prior = np.asarray([], dtype=B.dtype)
+
+if normal_prior_strength > 0 and prior_cols:
+    # The prior rows encode scale * w_j ~= scale * w_pri_j for default
+    # chromosome columns.  Multiplying by sqrt(fm / n_prior) keeps the total
+    # prior contribution comparable across samples.
+    normal_prior_row_count = len(prior_cols)
+    normal_prior_scale = float(np.sqrt(normal_prior_strength * fm / normal_prior_row_count))
+    for row_idx, col_idx in enumerate(prior_cols):
+        A_arr[col_idx, prior_col_start + row_idx] = normal_prior_scale
+
+    B_prior = (normal_prior_scale * w_pri).astype(B.dtype, copy=False)
+    logging.info(
+        "Normal chromosome prior enabled: "
+        f"strength={normal_prior_strength}, rows={normal_prior_row_count}, "
+        f"default_rows={len(init_cols)}, cent_fragment_rows={len(cent_fragment_cols)}, "
+        f"scale={normal_prior_scale:.6g}, target_weight_median={float(np.median(w_pri)):.6g}"
+    )
+else:
+    logging.info("Normal chromosome prior disabled.")
+
+A_width = fm + normal_prior_row_count
+
 with h5py.File(f'{PREFIX}/matrix.h5', 'w') as hf:
-    dset_A = hf.create_dataset('A', shape=A_arr[:, :fm].shape, dtype=A_arr.dtype)
-    dset_A.write_direct(A_arr, source_sel=np.s_[:, :fm])
+    dset_A = hf.create_dataset('A', shape=(n, A_width), dtype=A_arr.dtype)
+    dset_A.write_direct(A_arr, source_sel=np.s_[:, :fm], dest_sel=np.s_[:, :fm])
+    if normal_prior_row_count:
+        dset_A.write_direct(
+            A_arr,
+            source_sel=np.s_[:, prior_col_start:prior_col_start + normal_prior_row_count],
+            dest_sel=np.s_[:, fm:A_width],
+        )
 
-    dset_A_fail = hf.create_dataset('A_fail', shape=A_arr[:, fm:].shape, dtype=A_arr.dtype)
-    dset_A_fail.write_direct(A_arr, source_sel=np.s_[:, fm:])
+    dset_A_fail = hf.create_dataset('A_fail', shape=(n, m - fm), dtype=A_arr.dtype)
+    dset_A_fail.write_direct(A_arr, source_sel=np.s_[:, fm:m])
 
 
-    dset_B = hf.create_dataset('B', shape=B[:fm].shape, dtype=B.dtype)
-    dset_B.write_direct(B, source_sel=np.s_[:fm])
+    dset_B = hf.create_dataset('B', shape=(A_width,), dtype=B.dtype)
+    dset_B.write_direct(B, source_sel=np.s_[:fm], dest_sel=np.s_[:fm])
+    if normal_prior_row_count:
+        dset_B.write_direct(B_prior, dest_sel=np.s_[fm:A_width])
 
     dset_B_fail = hf.create_dataset('B_fail', shape=B[fm:].shape, dtype=B.dtype)
     dset_B_fail.write_direct(B, source_sel=np.s_[fm:])
 
     hf.create_dataset('B_depth_start', data=0)
+    hf.create_dataset('B_depth_end', data=fm)
+    hf.create_dataset('normal_prior_strength', data=normal_prior_strength)
+    hf.create_dataset('normal_prior_row_count', data=normal_prior_row_count)
+    hf.create_dataset('normal_prior_scale', data=normal_prior_scale)
 
 with open(f"{PREFIX}/23_input.pkl", "wb") as f:
-    pkl.dump((chr_filt_st_list, path_nclose_dict_set, amplitude, bed_data), f)
+    pkl.dump((
+        chr_filt_st_list,
+        path_nclose_dict_set,
+        amplitude,
+        bed_data,
+        {
+            "B_depth_start": 0,
+            "B_depth_end": fm,
+        },
+    ), f)
 
 with open(f"{PREFIX}/tar_chr_data.pkl", "wb") as f:
     pkl.dump(tar_chr_data, f)
+
+with open(f"{PREFIX}/normal_prior_data.pkl", "wb") as f:
+    pkl.dump({
+        "strength": normal_prior_strength,
+        "scale": normal_prior_scale,
+        "row_count": normal_prior_row_count,
+        "prior_cols": prior_cols,
+        "prior_fit_cols": prior_fit_cols,
+        "init_cols": init_cols,
+        "cent_fragment_cols": cent_fragment_cols,
+        "targets": w_pri,
+        "fit_targets": fit_w_pri,
+        "tar_chr_data": tar_chr_data,
+    }, f)
 
 np.save(f'{PREFIX}/B.npy', B)

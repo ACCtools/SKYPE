@@ -501,7 +501,7 @@ chr_len = find_chr_len(CHROMOSOME_INFO_FILE_PATH)
 
 # Julia remove small nclose
 with open(f'{PREFIX}/23_input.pkl', 'rb') as f:
-    chr_filt_st_list, path_nclose_set_dict, amplitude, bed_data = pkl.load(f)
+    chr_filt_st_list, path_nclose_set_dict, amplitude, bed_data, matrix_depth_meta = pkl.load(f)
 
 ydf = df.query('chr == "chrY"')
 
@@ -525,6 +525,17 @@ jl.seval("using HDF5, LinearAlgebra")
 A_jl, B_jl, b_start_ind = jl.load_nnls_array(f'{PREFIX}/matrix.h5')
 A_fail_jl = jl.load_fail_array(f'{PREFIX}/matrix.h5')
 B = np.asarray(B_jl)
+
+b_start_ind = int(matrix_depth_meta.get("B_depth_start", b_start_ind))
+b_depth_end = int(matrix_depth_meta.get("B_depth_end", b_start_ind + len(chr_filt_st_list)))
+
+depth_success_slice = slice(b_start_ind, b_depth_end)
+B_depth = B[depth_success_slice]
+if len(B_depth) != len(chr_filt_st_list):
+    raise ValueError(
+        f"Depth row count mismatch: matrix has {len(B_depth)} clean depth rows, "
+        f"23_input has {len(chr_filt_st_list)}"
+    )
 
 def make_jl_weight(weight):
     weight = np.maximum(np.asarray(weight), 0)
@@ -778,10 +789,11 @@ for nclose_pair in sorted(not_essential_nclose):
         f'{ed_row[CTG_NAM]} ({ed_row[CHR_NAM]}:{ed_row[CHR_STR]}-{ed_row[CHR_END]})'
     )
 
-b_norm = np.linalg.norm(B)
+b_norm = np.linalg.norm(B_depth)
 
-error = np.linalg.norm(predict_B_succ - B)
-predict_B = np.concatenate((predict_B_succ, predict_B_fail))[b_start_ind:]
+predict_B_succ_depth = predict_B_succ[depth_success_slice]
+error = np.linalg.norm(predict_B_succ_depth - B_depth)
+predict_B = np.concatenate((predict_B_succ_depth, predict_B_fail))
 
 logging.info(f'Filter Error : {error:.4f}')
 logging.info(f'Filter relative error : {error/b_norm:.4f}')
@@ -970,10 +982,11 @@ for i, v in enumerate(final_weight):
 predict_B_succ = np.asarray(A_final_jl * final_weight_jl)
 predict_B_fail = np.asarray(A_fail_final_jl * final_weight_jl)
 
-b_norm = np.linalg.norm(B)
+b_norm = np.linalg.norm(B_depth)
 
-error = np.linalg.norm(predict_B_succ - B)
-predict_B = np.concatenate((predict_B_succ, predict_B_fail))[b_start_ind:]
+predict_B_succ_depth = predict_B_succ[depth_success_slice]
+error = np.linalg.norm(predict_B_succ_depth - B_depth)
+predict_B = np.concatenate((predict_B_succ_depth, predict_B_fail))
 
 logging.info(f'Cluster error : {error:.4f}')
 logging.info(f'Cluster relative error : {error/b_norm:.4f}')

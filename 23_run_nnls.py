@@ -112,7 +112,9 @@ def get_chr_cord_data(contig_data, nclose_nodes, type4_nclose_nodes, type4_expec
         for j, nclose_idx_pair in enumerate(nclose_idx_pair_list):
             path_tag = (ctg_name, j)
             nclose_key = tuple(nclose_idx_pair)
-            assert len(nclose_key) == 2 and nclose_key == tuple(sorted(nclose_key))
+            if len(nclose_key) != 2:
+                raise ValueError(f"Invalid nclose key for {path_tag}: {nclose_key}")
+            nclose_key = tuple(sorted(nclose_key))
             cords = [get_contig_pair(i, contig_data[idx]) for i, idx in enumerate(nclose_idx_pair)]
             expected_high_side = [
                 get_expected_high_side(i, contig_data[idx])
@@ -1005,7 +1007,7 @@ N = meandepth / 2
 cdf = pd.read_csv(CENSAT_PATH, sep='\t', names=['chr', 'st', 'nd'])
 
 with open(f'{PREFIX}/23_input.pkl', 'rb') as f:
-    chr_filt_st_list, path_nclose_set_dict, amplitude, bed_data = pkl.load(f)
+    chr_filt_st_list, path_nclose_set_dict, amplitude, bed_data, matrix_depth_meta = pkl.load(f)
 # path_nclose_set_dict is keyed by matrix column index. Values are canonical event tags:
 # ordinary nclose: (left_contig_idx, right_contig_idx), sorted tuple of ints
 # type4/ecdna: (event_type, event_idx, type2_merge_idx)
@@ -1038,7 +1040,16 @@ with h5py.File(f"{PREFIX}/matrix.h5", "r") as f:
     A_fail_store = np.empty(dAf.shape, dtype=dAf.dtype)
     dAf.read_direct(A_fail_store)
 
-    b_start_ind = int(f["B_depth_start"][()])
+    b_start_ind = int(matrix_depth_meta.get("B_depth_start", 0))
+    b_depth_end = int(matrix_depth_meta.get("B_depth_end", b_start_ind + len(chr_filt_st_list)))
+
+depth_success_slice = slice(b_start_ind, b_depth_end)
+B_depth = B[depth_success_slice]
+if len(B_depth) != len(chr_filt_st_list):
+    raise ValueError(
+        f"Depth row count mismatch: matrix has {len(B_depth)} clean depth rows, "
+        f"23_input has {len(chr_filt_st_list)}"
+    )
 
 A = solver_matrix_from_store(A_store)
 
@@ -1510,10 +1521,11 @@ else:
 final_weights_fullsize = np.zeros_like(weights_fullsize)
 final_weights_fullsize[A_idx_list] = filter_weights
 
-b_norm = np.linalg.norm(B)
+b_norm = np.linalg.norm(B_depth)
 
-error = np.linalg.norm(predict_suc_B - B)
-predict_B = np.concatenate((predict_suc_B, predict_fal_B))[b_start_ind:]
+predict_suc_depth = predict_suc_B[depth_success_slice]
+error = np.linalg.norm(predict_suc_depth - B_depth)
+predict_B = np.concatenate((predict_suc_depth, predict_fal_B))
 
 logging.info(f'Error : {error:.4f}')
 logging.info(f'Relative error : {error/b_norm:.4f}')
