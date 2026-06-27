@@ -1252,7 +1252,7 @@ while True:
 # nclose 필터링 직후를 fail 기준점(고정 baseline)으로 잡고, weight 작은 cent_fragment
 # 컬럼부터 누적 제거 시도. PASS 시 컬럼 누적 제거(=offset 누적)되며, fail 비교 대상
 # baseline 은 항상 nclose 필터링 직후로 고정 — 누적 drift 도 base 대비 한도 안이면 OK.
-CF_GREEDY_MIN_WEIGHT_N = 0.1
+CF_GREEDY_MIN_WEIGHT_N = 0
 CF_GREEDY_MIN_WEIGHT = CF_GREEDY_MIN_WEIGHT_N * N
 
 cent_fragment_col2chrom = {}

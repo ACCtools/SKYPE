@@ -146,6 +146,10 @@ NCLOSE_COUNT_CANDIDATE_PKL = 'nclose_count_candidates.pkl'
 NCLOSE_COUNT_RESULT_PKL = 'nclose_count_result.pkl'
 NCLOSE_COUNT_DEFAULT_VAF_THRESHOLD = 0.1
 
+ALT_SIMPLE_MIN_SEGMENT_LEN = 10 * K
+ALT_SIMPLE_MAJOR_CHR_RATIO = 0.90
+ALT_SIMPLE_EXISTING_NCLOSE_DIST = 10 * K
+
 JULIA_BAM_THREAD_LIM = 32
 
 def import_data(file_path : str) -> list :
@@ -559,6 +563,150 @@ def distance_checker_tuple(node_a : tuple, node_b : tuple) -> int :
         return 0   
     else:
         return min(abs(int(node_b[0]) - int(node_a[1])), abs(int(node_b[1]) - int(node_a[0])))
+
+def alt_simple_ref_len(node) -> int:
+    return abs(int(node[CHR_END]) - int(node[CHR_STR]))
+
+def alt_simple_chr_sort_key(chrom: str):
+    try:
+        return chr2int(chrom)
+    except (ValueError, TypeError):
+        return INF
+
+def alt_simple_terminal_repeat(node, repeat_label: tuple, chr_len: dict) -> bool:
+    if repeat_label[1] not in ("r", "rin"):
+        return False
+    curr_chr_len = chr_len.get(node[CHR_NAM])
+    if curr_chr_len is None:
+        return False
+    return node[CHR_STR] <= TELOMERE_EXPANSION or node[CHR_END] >= curr_chr_len - TELOMERE_EXPANSION
+
+def trim_alt_simple_terminal_indices(chunks: list, telo_labels: list, repeat_labels: list, chr_len: dict) -> list:
+    def is_terminal_chunk(idx: int) -> bool:
+        return telo_labels[idx][0] != '0' or alt_simple_terminal_repeat(chunks[idx], repeat_labels[idx], chr_len)
+
+    left = 0
+    right = len(chunks) - 1
+    while left <= right and is_terminal_chunk(left):
+        left += 1
+    while right >= left and is_terminal_chunk(right):
+        right -= 1
+    return list(range(left, right + 1))
+
+def select_alt_simple_major_chroms(indexed_chunks: list) -> set:
+    chrom_len = Counter()
+    total_len = 0
+    for _, node in indexed_chunks:
+        node_len = alt_simple_ref_len(node)
+        if node_len <= ALT_SIMPLE_MIN_SEGMENT_LEN:
+            continue
+        chrom_len[node[CHR_NAM]] += node_len
+        total_len += node_len
+
+    if total_len == 0:
+        return set()
+
+    selected = set()
+    acc_len = 0
+    for chrom, chrom_span in sorted(chrom_len.items(), key=lambda x: (-x[1], alt_simple_chr_sort_key(x[0]), x[0])):
+        selected.add(chrom)
+        acc_len += chrom_span
+        if acc_len / total_len >= ALT_SIMPLE_MAJOR_CHR_RATIO:
+            break
+    return selected
+
+def find_alt_simple_transition_candidates(indexed_chunks: list, selected_chroms: set) -> tuple:
+    same_dir_candidates = []
+    diff_dir_transitions = []
+    prev = None
+    for chunk_idx, node in indexed_chunks:
+        if node[CHR_NAM] not in selected_chroms:
+            continue
+        if alt_simple_ref_len(node) <= ALT_SIMPLE_MIN_SEGMENT_LEN:
+            continue
+
+        curr = (chunk_idx, node)
+        if prev is None:
+            prev = curr
+            continue
+
+        prev_node = prev[1]
+        if prev_node[CHR_NAM] == node[CHR_NAM]:
+            prev = curr
+            continue
+
+        if prev_node[CTG_DIR] == node[CTG_DIR]:
+            same_dir_candidates.append((prev, curr))
+        else:
+            diff_dir_transitions.append((prev, curr))
+        prev = curr
+    return same_dir_candidates, diff_dir_transitions
+
+def alt_simple_node_locus(node) -> tuple:
+    return (node[CHR_NAM], int(node[CHR_STR]), int(node[CHR_END]))
+
+def alt_simple_pair_loci(candidate: tuple) -> tuple:
+    return (alt_simple_node_locus(candidate[0][1]), alt_simple_node_locus(candidate[1][1]))
+
+def alt_simple_locus_close(locus_a: tuple, locus_b: tuple, max_dist: int) -> bool:
+    if locus_a[0] != locus_b[0]:
+        return False
+    return distance_checker_tuple((locus_a[1], locus_a[2]), (locus_b[1], locus_b[2])) <= max_dist
+
+def alt_simple_pair_close(pair_a: tuple, pair_b: tuple, max_dist: int) -> bool:
+    return (
+        alt_simple_locus_close(pair_a[0], pair_b[0], max_dist)
+        and alt_simple_locus_close(pair_a[1], pair_b[1], max_dist)
+    )
+
+def alt_simple_candidate_near_existing(candidate: tuple, existing_pairs: list, max_dist: int) -> bool:
+    cand_pair = alt_simple_pair_loci(candidate)
+    cand_pair_rev = (cand_pair[1], cand_pair[0])
+    for existing_pair in existing_pairs:
+        if alt_simple_pair_close(cand_pair, existing_pair, max_dist):
+            return True
+        if alt_simple_pair_close(cand_pair_rev, existing_pair, max_dist):
+            return True
+    return False
+
+def collect_existing_alt_simple_nclose_loci(contig_data: list) -> list:
+    existing_pairs = []
+    st = 0
+    while st < len(contig_data):
+        ed = int(contig_data[st][CTG_ENDND])
+        curr_contig = contig_data[st:ed + 1]
+        st = ed + 1
+        if not curr_contig:
+            continue
+        if curr_contig[0][CTG_NAM].startswith("simple_ctg_alt_"):
+            continue
+        try:
+            curr_type = int(curr_contig[0][CTG_TYP])
+        except (TypeError, ValueError):
+            continue
+        if curr_type not in (1, 2):
+            continue
+
+        indexed_chunks = list(enumerate(curr_contig))
+        long_chunks = [
+            (idx, node)
+            for idx, node in indexed_chunks
+            if alt_simple_ref_len(node) > ALT_SIMPLE_MIN_SEGMENT_LEN
+        ]
+        if len(long_chunks) >= 2 and long_chunks[0][1][CHR_NAM] != long_chunks[-1][1][CHR_NAM]:
+            existing_pairs.append((
+                alt_simple_node_locus(long_chunks[0][1]),
+                alt_simple_node_locus(long_chunks[-1][1]),
+            ))
+
+        selected_chroms = select_alt_simple_major_chroms(indexed_chunks)
+        if len(selected_chroms) < 2:
+            continue
+        same_dir_candidates, _ = find_alt_simple_transition_candidates(indexed_chunks, selected_chroms)
+        for candidate in same_dir_candidates:
+            existing_pairs.append(alt_simple_pair_loci(candidate))
+
+    return existing_pairs
     
 def overlap_calculator(node_a : tuple, node_b : tuple) -> int :
     return min(abs(node_a[CHR_END] - node_b[CHR_STR]), abs(node_b[CHR_END] - node_a[CHR_STR]))
@@ -3852,13 +4000,14 @@ def contig_preprocessing_00(PAF_FILE_PATH_ : list):
             logging.info(f"Number of raw telomere stub contigs added : {raw_telo_stub_count}")
 
     # Simple ctg-as-alt (--add_alt_ctg_simple):
-    # primary contig PAF의 각 contig에 대해 양끝 chunk(qry 첫/마지막)의 chr/dir만으로
-    # type 판정 (1: chr 다름, 2: dir 다름, 그 외 skip). 양끝 nclose가 잡히는 contig은
-    # 그 안의 ALL chunk를 real_final_contig에 그대로 append → extract_nclose_node가
-    # 전체 contig 구조를 보고 nclose pair 생성 (mainflow split 등 자연스럽게 발동).
+    # primary contig PAF에서 아직 채택되지 않은 contig를 보되, telomere-like terminal chunk와
+    # 10kb 이하 fragment를 빼고 90% major chromosome set에서 chr-change 후보를 뽑는다.
+    # 같은 방향 chr-change만 기존 nclose와 비교해 10kb 이내면 중복으로 보고 제외하고,
+    # 방향이 바뀌는 chr-change는 필터링하지 않고 그대로 유지한다.
     if args.add_alt_ctg_simple:
         primary_kept_set = set(final_using_contig)
         existing_names = {c[CTG_NAM] for c in real_final_contig}
+        existing_nclose_loci = collect_existing_alt_simple_nclose_loci(real_final_contig)
 
         chunks_per_contig = defaultdict(list)
         # primary ctg PAF의 line idx를 함께 트래킹 → CTG_GLOBALIDX="0.{line_idx}"로 11번이 lookup 가능
@@ -3889,24 +4038,12 @@ def contig_preprocessing_00(PAF_FILE_PATH_ : list):
                 chunks_per_contig[ctg_name].append(chunk)
 
         simple_alt_count = 0
+        simple_alt_skip_existing_count = 0
+        simple_alt_keep_diff_dir_count = 0
         for ctg_name, chunks in sorted(chunks_per_contig.items()):
             if len(chunks) < 2:
                 continue
             chunks.sort(key=lambda c: (c[CTG_STR], c[CTG_END]))
-            start = chunks[0]
-            end = chunks[-1]
-
-            if start[CHR_NAM] != end[CHR_NAM]:
-                sv_type = 1
-            elif start[CTG_DIR] != end[CTG_DIR]:
-                sv_type = 2
-            else:
-                continue  # type 3, 4, or 5 — skip per --add_alt_ctg_simple spec
-
-            syn_name = f"simple_ctg_alt_{ctg_name}"
-            if syn_name in existing_names:
-                continue
-            existing_names.add(syn_name)
 
             # 기존 contig들과 동일한 telo / repeat / censat 라벨을 계산해서 채움
             # (label_node / label_repeat_node 는 chunk[CHR_NAM/CHR_STR/CHR_END] 만 봄)
@@ -3914,31 +4051,70 @@ def contig_preprocessing_00(PAF_FILE_PATH_ : list):
             repeat_labels = label_repeat_node(chunks, repeat_data, chr_len)
             censat_labels = label_repeat_node(chunks, repeat_censat_data, chr_len)
 
-            s_idx = len(real_final_contig)
-            e_idx = s_idx + len(chunks) - 1
-            for chunk_i, raw in enumerate(chunks):
-                line_idx = raw[10]                       # tracked when parsing primary PAF
-                syn_chunk = list(raw[:10]) + [
-                    sv_type,                             # 10 CTG_TYP
-                    s_idx,                               # 11 CTG_STRND
-                    e_idx,                               # 12 CTG_ENDND
-                    telo_labels[chunk_i][0],             # 13 CTG_TELCHR
-                    telo_labels[chunk_i][1],             # 14 CTG_TELDIR
-                    '0',                                 # 15 CTG_TELCON (telcon_set 미참여)
-                    repeat_labels[chunk_i][0],           # 16 CTG_RPTCHR
-                    repeat_labels[chunk_i][1],           # 17 CTG_RPTCASE
-                    censat_labels[chunk_i][1],           # 18 CTG_CENSAT
-                    '0',                                 # 19 CTG_MAINFLOWDIR (find_mainflow가 덮어씀)
-                    '0',                                 # 20 CTG_MAINFLOWCHR (find_mainflow가 덮어씀)
-                    f'0.{line_idx}',                     # 21 CTG_GLOBALIDX (paf_file[0][line_idx]로 11번이 lookup)
-                ]
-                syn_chunk[CTG_NAM] = syn_name
-                real_final_contig.append(syn_chunk)
+            trimmed_indices = trim_alt_simple_terminal_indices(chunks, telo_labels, repeat_labels, chr_len)
+            if len(trimmed_indices) < 2:
+                continue
 
-            simple_alt_count += 1
+            indexed_chunks = [(chunk_i, chunks[chunk_i]) for chunk_i in trimmed_indices]
+            selected_chroms = select_alt_simple_major_chroms(indexed_chunks)
+            if len(selected_chroms) < 2:
+                continue
+
+            same_dir_candidates, diff_dir_transitions = find_alt_simple_transition_candidates(indexed_chunks, selected_chroms)
+            candidates_to_add = []
+            for candidate in same_dir_candidates:
+                if alt_simple_candidate_near_existing(candidate, existing_nclose_loci, ALT_SIMPLE_EXISTING_NCLOSE_DIST):
+                    simple_alt_skip_existing_count += 1
+                    continue
+                candidates_to_add.append(candidate)
+            candidates_to_add.extend(diff_dir_transitions)
+            simple_alt_keep_diff_dir_count += len(diff_dir_transitions)
+
+            if not candidates_to_add:
+                continue
+
+            candidate_serial = 1
+            syn_name_base = f"simple_ctg_alt_{ctg_name}"
+            for candidate in candidates_to_add:
+                syn_name = syn_name_base if candidate_serial == 1 else f"{syn_name_base}_nclose{candidate_serial}"
+                while syn_name in existing_names:
+                    candidate_serial += 1
+                    syn_name = f"{syn_name_base}_nclose{candidate_serial}"
+                existing_names.add(syn_name)
+                candidate_serial += 1
+
+                sv_type = 1 if candidate[0][1][CHR_NAM] != candidate[1][1][CHR_NAM] else 2
+                s_idx = len(real_final_contig)
+                e_idx = s_idx + 1
+                for chunk_i, raw in candidate:
+                    line_idx = raw[10]                       # tracked when parsing primary PAF
+                    syn_chunk = list(raw[:10]) + [
+                        sv_type,                             # 10 CTG_TYP
+                        s_idx,                               # 11 CTG_STRND
+                        e_idx,                               # 12 CTG_ENDND
+                        telo_labels[chunk_i][0],             # 13 CTG_TELCHR
+                        telo_labels[chunk_i][1],             # 14 CTG_TELDIR
+                        '0',                                 # 15 CTG_TELCON (telcon_set 미참여)
+                        repeat_labels[chunk_i][0],           # 16 CTG_RPTCHR
+                        repeat_labels[chunk_i][1],           # 17 CTG_RPTCASE
+                        censat_labels[chunk_i][1],           # 18 CTG_CENSAT
+                        '0',                                 # 19 CTG_MAINFLOWDIR (find_mainflow가 덮어씀)
+                        '0',                                 # 20 CTG_MAINFLOWCHR (find_mainflow가 덮어씀)
+                        f'0.{line_idx}',                     # 21 CTG_GLOBALIDX (paf_file[0][line_idx]로 11번이 lookup)
+                    ]
+                    syn_chunk[CTG_NAM] = syn_name
+                    real_final_contig.append(syn_chunk)
+
+                if candidate[0][1][CTG_DIR] == candidate[1][1][CTG_DIR]:
+                    existing_nclose_loci.append(alt_simple_pair_loci(candidate))
+                simple_alt_count += 1
 
         if simple_alt_count > 0:
-            logging.info(f"Number of simple ctg alt contigs added : {simple_alt_count}")
+            logging.info(f"Number of simple ctg alt nclose candidates added : {simple_alt_count}")
+        if simple_alt_skip_existing_count > 0:
+            logging.info(f"Number of simple ctg alt candidates skipped as existing nclose : {simple_alt_skip_existing_count}")
+        if simple_alt_keep_diff_dir_count > 0:
+            logging.info(f"Number of simple ctg alt direction-changing transitions kept unfiltered : {simple_alt_keep_diff_dir_count}")
 
     adjacency = initial_graph_build(real_final_contig, telo_bound_dict)
 
@@ -5933,12 +6109,11 @@ parser.add_argument("--nclose_count_vaf_threshold",
                          "--check_nclose_count is enabled.",
                     type=float, default=NCLOSE_COUNT_DEFAULT_VAF_THRESHOLD)
 parser.add_argument("--add_alt_ctg_simple",
-                    help="For each primary ctg PAF contig, classify by first/last chunk "
-                         "(chr diff -> type 1, dir diff -> type 2; else skip). "
-                         "If type 1 or 2, append ALL chunks of that contig to real_final_contig. "
-                         "extract_nclose_node applies its trim/fake_bnd/censat/compression logic, "
-                         "but mainflow split is disabled for these contigs -> exactly one nclose "
-                         "pair per simple_ctg_alt contig.",
+                    help="For each primary ctg PAF contig not already kept, trim telomere-like "
+                         "terminal chunks, ignore <=10kb fragments, select chromosomes covering "
+                         "90%% of the remaining span, skip same-direction chromosome-change "
+                         "break candidates only when they are within 10kb of an existing nclose "
+                         "candidate, and keep direction-changing chromosome changes unfiltered.",
                     action='store_true')
 
 parser.add_argument("--add_indel_graph",

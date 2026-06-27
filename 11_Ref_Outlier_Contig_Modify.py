@@ -36,6 +36,7 @@ CTG_MAINFLOWCHR = 20
 CTG_GLOBALIDX = 21
 
 CHUKJI_LIMIT = 100*K
+INDEL_MERGE_TOLERANCE = 10*K
 
 def import_origin_data(file_path : list) -> list :
     contig_data = []
@@ -75,17 +76,32 @@ def find_chr_len(file_path : str) -> dict:
     return chr_len
 
 
+def get_breakend_coord(contig, side_idx):
+    nclose_loc = side_idx == 0
+    nclose_dir = contig[CTG_DIR] == '+'
+    return contig[CHR_STR if nclose_dir ^ nclose_loc else CHR_END]
+
+
 def calculate_single_contig_ref_ratio(contig_data : list):
     total_ref_len = 0
-    ref_st_ed = 0
-    if contig_data[0][CTG_DIR] == '+':
-        estimated_ref_len = contig_data[-1][CHR_END] - contig_data[0][CHR_STR]
-        ref_st_ed = (contig_data[0][CHR_STR], contig_data[-1][CHR_END])
-    else:
-        estimated_ref_len = contig_data[0][CHR_END] - contig_data[-1][CHR_STR]
-        ref_st_ed = (contig_data[-1][CHR_STR], contig_data[0][CHR_END])
     for node in contig_data:
         total_ref_len += node[CHR_END] - node[CHR_STR]
+
+    if len(contig_data) == 1:
+        estimated_ref_len = contig_data[0][CHR_END] - contig_data[0][CHR_STR]
+        ref_st_ed = (contig_data[0][CHR_STR], contig_data[0][CHR_END])
+        return estimated_ref_len/total_ref_len, ref_st_ed
+
+    breakend_st = get_breakend_coord(contig_data[0], 0)
+    breakend_ed = get_breakend_coord(contig_data[-1], 1)
+
+    if contig_data[0][CTG_DIR] == '+':
+        estimated_ref_len = breakend_ed - breakend_st
+        ref_st_ed = (breakend_st, breakend_ed)
+    else:
+        estimated_ref_len = breakend_st - breakend_ed
+        ref_st_ed = (breakend_ed, breakend_st)
+
     return estimated_ref_len/total_ref_len, ref_st_ed
 
 def distance_checker(node_a : tuple, node_b : tuple) -> int :
@@ -100,6 +116,24 @@ def inclusive_checker(tuple_a : tuple, tuple_b : tuple) -> bool :
         return True
     else:
         return False
+
+def make_indel_candidate(event_type, chrom, ref_a, ref_b, source):
+    st, nd = sorted((int(ref_a), int(ref_b)))
+    return {
+        'event_type': event_type,
+        'chrom': chrom,
+        'st': st,
+        'nd': nd,
+        'source': source,
+    }
+
+def same_indel_candidate(a, b, tolerance=INDEL_MERGE_TOLERANCE):
+    return (
+        a['event_type'] == b['event_type'] and
+        a['chrom'] == b['chrom'] and
+        abs(a['st'] - b['st']) <= tolerance and
+        abs(a['nd'] - b['nd']) <= tolerance
+    )
     
 def cs_to_cigar(cs_tag: str) -> str:
    """
@@ -204,6 +238,18 @@ contig_data_size = len(contig_data)
 
 with open(f'{args.prefix}/conjoined_type4_ins_del.pkl', 'rb') as f:
     type4_ins, type4_del = pkl.load(file=f)
+
+emitted_indel_candidates = []
+merged_indel_candidates = []
+
+def should_emit_indel_candidate(candidate):
+    for prev in emitted_indel_candidates:
+        if same_indel_candidate(candidate, prev):
+            merged_indel_candidates.append((candidate, prev))
+            return False
+    emitted_indel_candidates.append(candidate)
+    return True
+
 s = 0
 cntfj = 0
 cntbj = 0
@@ -216,6 +262,10 @@ while s<contig_data_size:
         rat, ref_st_ed = calculate_single_contig_ref_ratio(contig_data[s:e+1])
         if abs(ref_st_ed[1]-ref_st_ed[0]) > CHUKJI_LIMIT or contig_data[s][CTG_LEN] > 2 * CHUKJI_LIMIT:
             if rat > 0:
+                candidate = make_indel_candidate('front_jump', chr_name, ref_st_ed[0], ref_st_ed[1], f'type4:{s}-{e}')
+                if not should_emit_indel_candidate(candidate):
+                    s = e+1
+                    continue
                 cntfj += 1
                 with open(f"{TYPE_4_VECTOR_PATH}/front_jump/{cntfj}.paf", "wt") as f:
                     for i in range(s, e+1):
@@ -238,6 +288,10 @@ while s<contig_data_size:
                         print(j, end="\t", file=f)
                     print("", file=f)
             else:
+                candidate = make_indel_candidate('back_jump', chr_name, ref_st_ed[0], ref_st_ed[1], f'type4:{s}-{e}')
+                if not should_emit_indel_candidate(candidate):
+                    s = e+1
+                    continue
                 cntbj += 1
                 with open(f"{TYPE_4_VECTOR_PATH}/back_jump/{cntbj}.paf", "wt") as f:
                     for i in range(s, e+1):
@@ -273,6 +327,10 @@ for s1, e1, s2, e2 in type4_ins:
     ref_st = min(contig_data[s1][CHR_STR], contig_data[s1][CHR_END])
     ref_nd = max(contig_data[e2][CHR_STR], contig_data[e2][CHR_END])
 
+    candidate = make_indel_candidate('back_jump', chr_name, ref_st, ref_nd, f'type2_merge:{type2_indel_cnt}')
+    if not should_emit_indel_candidate(candidate):
+        continue
+
     cntbj+=1
     with open(f"{TYPE_4_VECTOR_PATH}/back_jump/{cntbj}_type2_merge_{type2_indel_cnt}.paf", "wt") as f:
         for i in (s1, e2):
@@ -304,6 +362,10 @@ for s1, e1, s2, e2 in type4_del:
     ref_st = min(contig_data[s1][CHR_STR], contig_data[s1][CHR_END])
     ref_nd = max(contig_data[e2][CHR_STR], contig_data[e2][CHR_END])
 
+    candidate = make_indel_candidate('front_jump', chr_name, ref_st, ref_nd, f'type2_merge:{type2_indel_cnt}')
+    if not should_emit_indel_candidate(candidate):
+        continue
+
     cntfj+=1
     with open(f"{TYPE_4_VECTOR_PATH}/front_jump/{cntfj}_type2_merge_{type2_indel_cnt}.paf", "wt") as f:
         for i in (s1, e2):
@@ -329,4 +391,13 @@ for s1, e1, s2, e2 in type4_del:
 
 logging.info(f"Forward-directed outlier contig count : {cntfj}")
 logging.info(f"Backward-directed outlier contig count : {cntbj}")
+logging.info(f"Merged duplicate indel candidate count : {len(merged_indel_candidates)}")
+for candidate, prev in merged_indel_candidates[:20]:
+    logging.debug(
+        "Merged duplicate indel candidate "
+        f"{candidate['source']} {candidate['event_type']}:{candidate['chrom']}:{candidate['st']}-{candidate['nd']} "
+        "into "
+        f"{prev['source']} {prev['event_type']}:{prev['chrom']}:{prev['st']}-{prev['nd']} "
+        f"(tolerance={INDEL_MERGE_TOLERANCE})"
+    )
 logging.info(f"Total count : {cntfj + cntbj}")

@@ -523,7 +523,7 @@ def bnd_alt(t, mate_chr, mate_pos, form):
 
 def choose_alt_forms(dir_a, dir_b):
     """
-    Map (dir_a, dir_b) to the complementary VCF 4.3 breakend ALT pair.
+    Map SKYPE path directions (dir_a, dir_b) to a VCF 4.3 breakend ALT pair.
     Convention: a = arm1 (junction at its contig-3' end), b = arm2 (junction at its contig-5' end).
     - dir_a decides whether a's retained sequence is left ('+': t-prefix) or right ('-': t-suffix).
     - dir_b decides whether the joined arm2 piece extends right of p forward ('+': '[') or
@@ -543,11 +543,14 @@ def choose_alt_forms(dir_a, dir_b):
 
 def make_strands(dir_a, dir_b):
     """
-    Compose STRANDS string as '<A><B>' where each is '+' or '-'.
-    Fallback to '.' if a direction is unknown.
+    Compose VCF breakend STRANDS from SKYPE path directions.
+
+    SKYPE nclose notation records traversal as A_dir => B_dir.  VCF STRANDS
+    records the two breakpoint sides that are newly adjacent.  The A exit side
+    is A_dir, while the B entry side is the opposite of B_dir.
     """
     a = dir_a if dir_a in ('+', '-') else '.'
-    b = dir_b if dir_b in ('+', '-') else '.'
+    b = invert_strand(dir_b) if dir_b in ('+', '-') else '.'
     return f"{a}{b}"
 
 def write_vcf_header(fh, contig_lengths):
@@ -1195,7 +1198,7 @@ def _pairs_to_vcf(nclose_pairs, contig_data, contig_lengths, display_indel, virt
             dir_b = b[CTG_DIR]
 
             chr_a, chr_b = a[CHR_NAM], b[CHR_NAM]
-            # Junction base depends on each anchor's alignment strand (CTG_DIR):
+            # Junction base depends on each anchor's SKYPE path direction (CTG_DIR):
             #   arm1 exits at its contig-3' end  -> CHR_END if '+', else CHR_STR
             #   arm2 enters at its contig-5' end -> CHR_STR if '+', else CHR_END
             pos_a = a[CHR_END] if dir_a == '+' else a[CHR_STR]
