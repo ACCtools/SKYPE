@@ -564,6 +564,7 @@ def write_vcf_header(fh, contig_lengths):
     fh.write('##INFO=<ID=SVLEN,Number=1,Type=Integer,Description="Length of the SV">\n')
     fh.write('##INFO=<ID=WEIGHT,Number=1,Type=Float,Description="Depth for breakend">\n')
     fh.write('##INFO=<ID=CTG_NAME,Number=1,Type=String,Description="Name of contig for supporting variant">\n')
+    fh.write('##INFO=<ID=SVCLASS,Number=1,Type=String,Description="SKYPE event class">\n')
     fh.write('##INFO=<ID=STRANDS,Number=1,Type=String,Description="Breakpoint strandedness">\n')
     fh.write('##INFO=<ID=MATEID,Number=1,Type=String,Description="ID of mate breakend">\n')
     fh.write('##INFO=<ID=MERGE_MATEID,Number=1,Type=String,Description="ID of merged breakend">\n')
@@ -1166,7 +1167,7 @@ def build_virtual_inv_events(prefix, meandepth, contig_lengths, min_depth_N=0.0,
 
     return events
 
-def _pairs_to_vcf(nclose_pairs, contig_data, contig_lengths, display_indel, virtual_inv_events,
+def _pairs_to_vcf(nclose_pairs, contig_data, contig_lengths, display_indel, amplicon_events, virtual_inv_events,
                   split_bnd_weights, out_vcf_path, nclose_cn_std):
     with open(out_vcf_path, 'w') as fo:
         # 1) 헤더 쓰기
@@ -1286,6 +1287,15 @@ def _pairs_to_vcf(nclose_pairs, contig_data, contig_lengths, display_indel, virt
                     f"{chrom}\t{lo}\t{sv_id}\tN\t{alt}\t60\t.\t"
                     f"SVTYPE={alt[1:-1]};END={hi};SVLEN={svlen};WEIGHT={round(w, 2)};CTG_NAME=INDEL_INDEX_{indel_idx}\n"
                 )
+
+        for amplicon_counter, (chrom, st, nd, _, depth_N, amplicon_idx) in enumerate(amplicon_events, start=1):
+            pos = max(1, int(min(st, nd)))
+            end = max(pos, int(max(st, nd)))
+            fo.write(
+                f"{chrom}\t{pos}\tSKYPE.AMP.{amplicon_counter}\tN\t<DUP>\t60\t.\t"
+                f"SVTYPE=DUP;END={end};SVLEN={end - pos};WEIGHT={round(depth_N, 2)};"
+                f"CTG_NAME=AMPLICON_INDEX_{amplicon_idx};SVCLASS=AMPLICON\n"
+            )
 
         for inv_counter, (chrom, st, nd, _, depth_N, name) in enumerate(virtual_inv_events, start=1):
             pos = max(1, int(st))
@@ -1535,6 +1545,56 @@ for i, raw_path in enumerate(raw_path_list):
     path_nclose_usage.append(using_nclose)
     path_telo_usage.append(using_telo)          
 
+fclen = len(glob.glob(front_contig_path + "*"))
+bclen = len(glob.glob(back_contig_path + "*"))
+eclen = len(glob.glob(ecdna_contig_path + "*"))
+
+n = len(paf_ans_list) + fclen // 4 + bclen // 4 + eclen // 2 + len(cen_fragment_meta)
+
+with open(f'{PREFIX}/ecdna_circuit_data.pkl', 'rb') as f:
+    ecdna_circuit, _ = pkl.load(file=f)
+
+def build_amplicon_events(weights, min_weight=BREAKEND_REMARKABLE_CN):
+    events = []
+    ecdna_offset = rpll + fclen // 4 + bclen // 4
+    for i in range(rpll, len(weights)):
+        paf_loc = tot_loc_list[i]
+        if paf_loc.split('/')[-3] == '12_cent_fragment':
+            continue
+        if paf_loc.split('/')[-2] != 'ecdna':
+            continue
+
+        raw_weight = weights[i]
+        if raw_weight <= min_weight:
+            continue
+
+        ecdna_ind = i - ecdna_offset
+        if ecdna_ind < 0 or ecdna_ind >= len(ecdna_circuit):
+            logging.warning(f"Skip amplicon with invalid ecdna index: {ecdna_ind}")
+            continue
+
+        circuit = ecdna_circuit[ecdna_ind]
+        if len(circuit) == 0:
+            continue
+
+        ctg_st_list = []
+        ctg_nd_list = []
+        for ctg_ind in circuit:
+            ctg_st_list.append(contig_data[ctg_ind][CHR_STR])
+            ctg_nd_list.append(contig_data[ctg_ind][CHR_END])
+
+        ctg_ind = circuit[0]
+        events.append((
+            contig_data[ctg_ind][CHR_NAM],
+            min(ctg_st_list),
+            max(ctg_nd_list),
+            raw_weight,
+            raw_weight / N * 2,
+            ecdna_ind,
+        ))
+
+    return events
+
 
 def draw_circos_plot(fig_prefix=''):
     weights = np.load(f'{PREFIX}/weight{fig_prefix}.npy')
@@ -1680,9 +1740,6 @@ def draw_circos_plot(fig_prefix=''):
         elif chr_nam1 == chr_nam2 and contig_data[idx1][CTG_DIR] != contig_data[idx2][CTG_DIR] and v > BREAKEND_REMARKABLE_CN:
             inv_val_list.append(v / meandepth * 2)
             event_type = 'inversion'
-
-        if contig_data[idx1][CTG_NAM].startswith('v'):
-            event_type = 'virtual_indel'
         
         if v > BREAKEND_REMARKABLE_CN:
             bnd_cn_data.append([(chr_nam1, pos1), (chr_nam2, pos2), v, event_type])
@@ -1720,7 +1777,7 @@ def draw_circos_plot(fig_prefix=''):
         indel_ind = paf_loc.split('/')[-2]
         v = weights[i]
 
-        if v > BREAKEND_REMARKABLE_CN:
+        if v > BREAKEND_REMARKABLE_CN and indel_ind in {'front_jump', 'back_jump'}:
             with open(tot_loc_list[i], "r") as f:
                 l = f.readline()
                 l = l.rstrip()
@@ -1731,8 +1788,10 @@ def draw_circos_plot(fig_prefix=''):
                 pos2 = int(l[CHR_END])
 
             bnd_cn_data.append([(chr_nam1, pos1), (chr_nam2, pos2), v, 'indel'])
+            indel_val_list.append(v / meandepth * 2)
 
-        indel_val_list.append(v / meandepth * 2)
+    for chrom, st, nd, raw_weight, _, _ in build_amplicon_events(weights):
+        bnd_cn_data.append([(chrom, st), (chrom, nd), raw_weight, 'amplicon'])
 
     virtual_inv_events = build_virtual_inv_events(
         PREFIX, meandepth, chr_len, min_depth_N=BREAKEND_REMARKABLE_CN / N, weights=weights
@@ -1758,7 +1817,7 @@ def draw_circos_plot(fig_prefix=''):
         'breakend': '-',
         'inversion': '-.',
         'indel': '--',
-        'virtual_indel': (0, (5, 2)),
+        'amplicon': (0, (5, 2)),
         'virtual_inv': (0, (2, 2)),
     }
 
@@ -1867,7 +1926,7 @@ def draw_circos_plot(fig_prefix=''):
         Line2D([], [], color="black", label="Breakend", linestyle = '-'),
         Line2D([], [], color="black", label="Inversion", linestyle = '-.'),
         Line2D([], [], color="black", label="Indel", linestyle = '--'),
-        Line2D([], [], color="black", label="Virtual indel", linestyle = (0, (5, 2))),
+        Line2D([], [], color="black", label="Amplicon", linestyle = (0, (5, 2))),
         Line2D([], [], color="black", label="Virtual inversion", linestyle = (0, (2, 2))),
     ]
 
@@ -1924,6 +1983,7 @@ def pairs_to_vcf(out_prefix=''):
             type2_nclose_node.add(nclose)
 
     display_indel = defaultdict(list)
+    amplicon_events = build_amplicon_events(weights)
     virtual_inv_events = build_virtual_inv_events(
         PREFIX, meandepth, chr_len, min_depth_N=VCF_FILTER_DEPTH_N, weights=weights
     )
@@ -1961,15 +2021,16 @@ def pairs_to_vcf(out_prefix=''):
             all_nclose.append(nclose)
                 
     indel_event_count = sum(len(indel_list) for indel_list in display_indel.values())
+    amplicon_event_count = len(amplicon_events)
     logging.info(
         f"{out_prefix[1:].capitalize()}{' ' if out_prefix else ''}"
-        f"Total called breakends (DUP, DEL, BND, INV) : "
-        f"{len(all_nclose) + len(split_bnd_weights) + indel_event_count + len(virtual_inv_events)}"
+        f"Total called breakends (DUP, DEL, BND, INV, AMP) : "
+        f"{len(all_nclose) + len(split_bnd_weights) + indel_event_count + amplicon_event_count + len(virtual_inv_events)}"
     )
 
     vcf_path = f"{PREFIX}/SV_call_result{out_prefix}.vcf"
     _pairs_to_vcf(
-        all_nclose, contig_data, chr_len, display_indel, virtual_inv_events,
+        all_nclose, contig_data, chr_len, display_indel, amplicon_events, virtual_inv_events,
         split_bnd_weights, vcf_path, adjusted_nclose_cn_std
     )
 
@@ -1979,15 +2040,6 @@ if use_julia_solver:
     pairs_to_vcf('_cluster')
 
 # Bed output for further analysis
-
-fclen = len(glob.glob(front_contig_path + "*"))
-bclen = len(glob.glob(back_contig_path + "*"))
-eclen = len(glob.glob(ecdna_contig_path + "*"))
-
-n = len(paf_ans_list) + fclen // 4 + bclen // 4 + eclen // 2 + len(cen_fragment_meta)
-
-with open(f'{PREFIX}/ecdna_circuit_data.pkl', 'rb') as f:
-    ecdna_circuit, _ = pkl.load(file=f)
 
 def make_bed_output(output_prefix=''):
     weights = np.load(f'{PREFIX}/weight{output_prefix}.npy')
@@ -2059,22 +2111,7 @@ def make_bed_output(output_prefix=''):
                                         round(v / N, 2)])
 
                 elif event_type == 'ecdna':
-                    ecdna_ind = i - (rpll + fclen // 4 + bclen // 4)
-
-                    ctg_st_list = []
-                    ctg_nd_list = []
-
-                    for ctg_ind in ecdna_circuit[ecdna_ind]:
-                        ctg_st_list.append(contig_data[ctg_ind][CHR_STR])
-                        ctg_nd_list.append(contig_data[ctg_ind][CHR_END])
-
-                    ctg_ind = ecdna_circuit[ecdna_ind][0]
-
-                    ctg_st = min(ctg_st_list)
-                    ctg_nd = max(ctg_nd_list)
-
-                    cf.writerow([contig_data[ctg_ind][CHR_NAM], ctg_st, ctg_nd,
-                                     'Amplicon', round(v / N * 2, 2)])
+                    continue
 
                 elif paf_loc.split('/')[-3] == '12_cent_fragment':
                     chrom = paf_loc.split('/')[-2]
@@ -2087,6 +2124,9 @@ def make_bed_output(output_prefix=''):
 
                 else:
                     assert(False)
+
+        for chrom, st, nd, _, depth_N, _ in build_amplicon_events(weights):
+            cf.writerow([chrom, st, nd, 'Amplicon', round(depth_N, 2)])
 
         for chrom, st, nd, _, depth_N, _name in build_virtual_inv_events(
             PREFIX, meandepth, chr_len, min_depth_N=BREAKEND_REMARKABLE_CN / N, weights=weights
