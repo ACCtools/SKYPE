@@ -260,7 +260,7 @@ while s<contig_data_size:
         chr_name = contig_data[s][CHR_NAM]
         chr_len = chr_data[chr_name]
         rat, ref_st_ed = calculate_single_contig_ref_ratio(contig_data[s:e+1])
-        if abs(ref_st_ed[1]-ref_st_ed[0]) > CHUKJI_LIMIT or contig_data[s][CTG_LEN] > 2 * CHUKJI_LIMIT:
+        if abs(ref_st_ed[1]-ref_st_ed[0]) > CHUKJI_LIMIT:
             if rat > 0:
                 candidate = make_indel_candidate('front_jump', chr_name, ref_st_ed[0], ref_st_ed[1], f'type4:{s}-{e}')
                 if not should_emit_indel_candidate(candidate):
