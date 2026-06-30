@@ -48,7 +48,16 @@ CTG_GLOBALIDX = 21
 
 FILTER_P_VALUE = 0.01
 
-CHROM_ERROR_FAIL_RATE = 2.0
+# Filtering toggles. Set each value to False to disable that filtering stage.
+PIPELINE_23_FILTER = True
+
+ENABLE_RECIPROCAL_TRANSLOCATION_FILTER = PIPELINE_23_FILTER
+ENABLE_OPPOSITE_DIRECTION_DEPTH_FILTER = PIPELINE_23_FILTER
+ENABLE_HYPOTHESIS_TEST_FILTER = PIPELINE_23_FILTER
+ENABLE_CENT_FRAGMENT_FILTER = PIPELINE_23_FILTER
+ENABLE_BP_STEP_DEPTH_FILTER = PIPELINE_23_FILTER
+
+CHROM_ERROR_FAIL_RATE = 1.5
 
 RECIPROCAL_PAIR_DISTANCE = 10 * K
 RECIPROCAL_FORBID_MAX_INTERVAL = 10 * K
@@ -819,6 +828,19 @@ def get_censet_count(censat_intervals, c1, i1, c2, i2):
 
     return cnt
 
+def collect_censat_nclose_chroms(path_tag2cord, path_tag2nclose_key, censat_intervals,
+                                 active_nclose_keys=None):
+    chroms = set()
+    for path_tag, cords in path_tag2cord.items():
+        nclose_key = path_tag2nclose_key[path_tag]
+        if active_nclose_keys is not None and nclose_key not in active_nclose_keys:
+            continue
+        for chrom, cord in cords:
+            if overlaps_censat(censat_intervals, chrom, cord, cord + 1):
+                chroms.add(chrom)
+
+    return chroms
+
 def filter_nclose_by_test(contig_data, nclose_nodes, df, censat_intervals,
                           pre_drop_nclose_set=None, nclose_test_data=None):
     if nclose_test_data is None:
@@ -1084,135 +1106,158 @@ base_nclose_depth = calculate_nclose_depth(path_nclose_count, weights_fullsize)
 chrom_acc_sum_dict_max_base = get_chrom_acc_sum_max(chr_filt_st_list, predict_suc_B_base, B)
 
 censat_intervals = build_censat_interval_dict(cdf)
-reciprocal_records = load_raw_translocation_records(PREFIX)
-reciprocal_side_by_id = assign_reciprocal_crossing_path_cols(
-    reciprocal_records, PREFIX, paf_sort_ans_list
-)
-
-active_reciprocal_side_ids = {
-    side['side_id']
-    for record in reciprocal_records
-    if record_has_raw_point_no_span(record)
-    for side in record.get('side_records', [])
-    if side_is_forbidden_by_raw_read(side)
-}
+reciprocal_records = []
+reciprocal_side_by_id = {}
+active_reciprocal_side_ids = set()
 reciprocal_path_drop_cols = set()
-reciprocal_retry_iter = 0
-while active_reciprocal_side_ids:
-    reciprocal_retry_iter += 1
-    next_drop_cols = set()
-    for side_id in active_reciprocal_side_ids:
-        next_drop_cols.update(reciprocal_side_by_id[side_id]['crossing_cols'])
-
-    A_idx_test = [
-        col_idx for col_idx in range(len(weights_fullsize))
-        if col_idx not in next_drop_cols
-    ]
-    if not A_idx_test:
-        active_reciprocal_side_ids = set()
-        reciprocal_path_drop_cols = set()
-        break
-
-    with h5py.File(f"{PREFIX}/matrix.h5", "r") as f:
-        dA = f["A"]
-        read_selected_feature_rows_direct(dA, A_store, A_idx_test)
-
-    A_test = solver_matrix_from_store(A_store, len(A_idx_test))
-    reciprocal_weights = fit_nnls_warm(
-        A_test, B, warm_start=weights_fullsize[A_idx_test]
-    )
-    reciprocal_predict_suc_B = A_test.dot(reciprocal_weights)
-
-    chrom_acc_sum_dict_max = get_chrom_acc_sum_max(
-        chr_filt_st_list, reciprocal_predict_suc_B, predict_suc_B_base
-    )
-    reciprocal_fail_chrom_list = get_fail_chrom_list(
-        chrom_acc_sum_dict_max, chrom_acc_sum_dict_max_base, no_chrY
-    )
-    if not reciprocal_fail_chrom_list:
-        reciprocal_path_drop_cols = next_drop_cols
-        break
-
-    fail_chrom_set = set(reciprocal_fail_chrom_list)
-    remove_side_ids = {
-        side_id for side_id in active_reciprocal_side_ids
-        if reciprocal_side_by_id[side_id]['chrom'] in fail_chrom_set
-    }
-    if not remove_side_ids:
-        logging.warning(
-            'Reciprocal translocation retry failed on chromosomes without matching '
-            f'candidate intervals: {",".join(sorted(fail_chrom_set))}'
-        )
-        active_reciprocal_side_ids = set()
-        reciprocal_path_drop_cols = set()
-        break
-
-    active_reciprocal_side_ids -= remove_side_ids
-    reciprocal_path_drop_cols = set()
-
-for side_id in active_reciprocal_side_ids:
-    reciprocal_side_by_id[side_id]['accepted_forbid'] = True
-
 reciprocal_transloc_nclose_set = set()
-for record in reciprocal_records:
-    if (
-        record_has_raw_point_no_span(record) and
-        any(side['accepted_forbid'] for side in record['side_records'])
-    ):
-        record['pair_protected_from_1M_drop'] = True
-        reciprocal_transloc_nclose_set.add(record['nclose_key_a'])
-        reciprocal_transloc_nclose_set.add(record['nclose_key_b'])
 
-logging.info(
-    f'Reciprocal translocation no-span candidates : {len(active_reciprocal_side_ids)}'
-)
+if ENABLE_RECIPROCAL_TRANSLOCATION_FILTER:
+    reciprocal_records = load_raw_translocation_records(PREFIX)
+    reciprocal_side_by_id = assign_reciprocal_crossing_path_cols(
+        reciprocal_records, PREFIX, paf_sort_ans_list
+    )
 
-opposite_dir_depth_drop_set, opposite_dir_depth_pair_count = find_opposite_direction_depth_drop(
-    base_path_tag2cord, base_path_tag2nclose_key, base_path_tag2expected_high_side,
-    base_nclose_depth, max_depth_diff=0.1 * N
-)
-opposite_dir_depth_drop_set -= reciprocal_transloc_nclose_set
-logging.info(
-    f'Opposite-direction depth prefilter nclose count : {len(opposite_dir_depth_drop_set)} '
-    f'(protected reciprocal nclose count: {len(reciprocal_transloc_nclose_set)})'
-)
+    active_reciprocal_side_ids = {
+        side['side_id']
+        for record in reciprocal_records
+        if record_has_raw_point_no_span(record)
+        for side in record.get('side_records', [])
+        if side_is_forbidden_by_raw_read(side)
+    }
+
+    reciprocal_retry_iter = 0
+    while active_reciprocal_side_ids:
+        reciprocal_retry_iter += 1
+        next_drop_cols = set()
+        for side_id in active_reciprocal_side_ids:
+            next_drop_cols.update(reciprocal_side_by_id[side_id]['crossing_cols'])
+
+        A_idx_test = [
+            col_idx for col_idx in range(len(weights_fullsize))
+            if col_idx not in next_drop_cols
+        ]
+        if not A_idx_test:
+            active_reciprocal_side_ids = set()
+            reciprocal_path_drop_cols = set()
+            break
+
+        with h5py.File(f"{PREFIX}/matrix.h5", "r") as f:
+            dA = f["A"]
+            read_selected_feature_rows_direct(dA, A_store, A_idx_test)
+
+        A_test = solver_matrix_from_store(A_store, len(A_idx_test))
+        reciprocal_weights = fit_nnls_warm(
+            A_test, B, warm_start=weights_fullsize[A_idx_test]
+        )
+        reciprocal_predict_suc_B = A_test.dot(reciprocal_weights)
+
+        chrom_acc_sum_dict_max = get_chrom_acc_sum_max(
+            chr_filt_st_list, reciprocal_predict_suc_B, predict_suc_B_base
+        )
+        reciprocal_fail_chrom_list = get_fail_chrom_list(
+            chrom_acc_sum_dict_max, chrom_acc_sum_dict_max_base, no_chrY
+        )
+        if not reciprocal_fail_chrom_list:
+            reciprocal_path_drop_cols = next_drop_cols
+            break
+
+        fail_chrom_set = set(reciprocal_fail_chrom_list)
+        remove_side_ids = {
+            side_id for side_id in active_reciprocal_side_ids
+            if reciprocal_side_by_id[side_id]['chrom'] in fail_chrom_set
+        }
+        if not remove_side_ids:
+            logging.warning(
+                'Reciprocal translocation retry failed on chromosomes without matching '
+                f'candidate intervals: {",".join(sorted(fail_chrom_set))}'
+            )
+            active_reciprocal_side_ids = set()
+            reciprocal_path_drop_cols = set()
+            break
+
+        active_reciprocal_side_ids -= remove_side_ids
+        reciprocal_path_drop_cols = set()
+
+    for side_id in active_reciprocal_side_ids:
+        reciprocal_side_by_id[side_id]['accepted_forbid'] = True
+
+    for record in reciprocal_records:
+        if (
+            record_has_raw_point_no_span(record) and
+            any(side['accepted_forbid'] for side in record['side_records'])
+        ):
+            record['pair_protected_from_1M_drop'] = True
+            reciprocal_transloc_nclose_set.add(record['nclose_key_a'])
+            reciprocal_transloc_nclose_set.add(record['nclose_key_b'])
+
+    logging.info(
+        f'Reciprocal translocation no-span candidates : {len(active_reciprocal_side_ids)}'
+    )
+else:
+    logging.info('Reciprocal translocation filter disabled')
+
+if ENABLE_OPPOSITE_DIRECTION_DEPTH_FILTER:
+    opposite_dir_depth_drop_set, opposite_dir_depth_pair_count = find_opposite_direction_depth_drop(
+        base_path_tag2cord, base_path_tag2nclose_key, base_path_tag2expected_high_side,
+        base_nclose_depth, max_depth_diff=0.1 * N
+    )
+    opposite_dir_depth_drop_set -= reciprocal_transloc_nclose_set
+    logging.info(
+        f'Opposite-direction depth prefilter nclose count : {len(opposite_dir_depth_drop_set)} '
+        f'(protected reciprocal nclose count: {len(reciprocal_transloc_nclose_set)})'
+    )
+else:
+    opposite_dir_depth_drop_set = set()
+    opposite_dir_depth_pair_count = 0
+    logging.info('Opposite-direction depth prefilter disabled')
 
 # Loop start
 prev_fail_chrom_list = None
 fail_chrom_list = []
 nclose_filter_warm_fullsize = weights_fullsize.copy()
 
-in_cnt, path_tag2cord, path_tag2nclose_key, nclose_key_side_out, path_tag2expected_high_side = \
-    filter_nclose_by_test(
-        contig_data, nclose_nodes, df, censat_intervals,
-        pre_drop_nclose_set=opposite_dir_depth_drop_set,
-        nclose_test_data=nclose_test_data
-    )
+path_tag2cord = base_path_tag2cord
+path_tag2nclose_key = base_path_tag2nclose_key
+path_tag2expected_high_side = base_path_tag2expected_high_side
+nclose_key_side_out = defaultdict(lambda: [False, False])
+in_cnt = defaultdict(lambda: [0, 0])
+if ENABLE_HYPOTHESIS_TEST_FILTER:
+    in_cnt, path_tag2cord, path_tag2nclose_key, nclose_key_side_out, path_tag2expected_high_side = \
+        filter_nclose_by_test(
+            contig_data, nclose_nodes, df, censat_intervals,
+            pre_drop_nclose_set=opposite_dir_depth_drop_set,
+            nclose_test_data=nclose_test_data
+        )
+else:
+    logging.info('Hyp. test filtering disabled')
 
 while True:
     not_using_nclose_set = set(opposite_dir_depth_drop_set)
     hyp_test_nclose_set = set()
 
-    for path_tag, nclose_cnt in in_cnt.items():
-        (c1, i1), (c2, i2) = path_tag2cord[path_tag]
-        nclose_key = path_tag2nclose_key[path_tag]
-        
-        if nclose_key in reciprocal_transloc_nclose_set:
-            continue
+    if ENABLE_HYPOTHESIS_TEST_FILTER:
+        for path_tag, nclose_cnt in in_cnt.items():
+            (c1, i1), (c2, i2) = path_tag2cord[path_tag]
+            nclose_key = path_tag2nclose_key[path_tag]
+            
+            if nclose_key in reciprocal_transloc_nclose_set:
+                continue
 
-        censat_count = get_censet_count(censat_intervals, c1, i1, c2, i2)
-        if (not (censat_count == 2 or nclose_cnt[0] - censat_count >= 1) and
-            c1 not in fail_chrom_list and c2 not in fail_chrom_list):
-            hyp_test_nclose_set.add(nclose_key)
+            censat_count = get_censet_count(censat_intervals, c1, i1, c2, i2)
+            if (not (censat_count == 2 or nclose_cnt[0] - censat_count >= 1) and
+                c1 not in fail_chrom_list and c2 not in fail_chrom_list):
+                hyp_test_nclose_set.add(nclose_key)
 
     not_using_nclose_set |= hyp_test_nclose_set
 
-    fail_chrom_text = ','.join(fail_chrom_list) if fail_chrom_list else 'none'
-    logging.info(f'Hyp. test filtering nclose count : {len(hyp_test_nclose_set)} (fail chroms: {fail_chrom_text})')
-    logging.debug(
-        f'Hyp. test filtering nclose breakdown : '
-        f'{dict(Counter("ordinary" if len(tag) == 2 else tag[0] for tag in hyp_test_nclose_set))}'
-    )
+    if ENABLE_HYPOTHESIS_TEST_FILTER:
+        fail_chrom_text = ','.join(fail_chrom_list) if fail_chrom_list else 'none'
+        logging.info(f'Hyp. test filtering nclose count : {len(hyp_test_nclose_set)} (fail chroms: {fail_chrom_text})')
+        logging.debug(
+            f'Hyp. test filtering nclose breakdown : '
+            f'{dict(Counter("ordinary" if len(tag) == 2 else tag[0] for tag in hyp_test_nclose_set))}'
+        )
 
     A_idx_list = []
     for k, path_nclose_list in path_nclose_set_dict.items():
@@ -1253,6 +1298,9 @@ while True:
     # 새로 발견된 fail chrom을 누적
     fail_chrom_list = sorted(set(fail_chrom_list + new_fail_chrom_list))
 
+    if not ENABLE_HYPOTHESIS_TEST_FILTER:
+        break
+
     # Break: 새로 추가된 fail chrom이 없으면 종료
     if not new_fail_chrom_list or (prev_fail_chrom_list is not None and fail_chrom_list == prev_fail_chrom_list):
         break
@@ -1267,11 +1315,40 @@ CF_GREEDY_MIN_WEIGHT_N = 0
 CF_GREEDY_MIN_WEIGHT = CF_GREEDY_MIN_WEIGHT_N * N
 
 cent_fragment_col2chrom = {}
-for k, tags in path_nclose_set_dict.items():
-    for tag in tags:
-        if isinstance(tag, tuple) and len(tag) > 0 and tag[0] == 'cent_fragment':
-            cent_fragment_col2chrom[k] = tag[1]
-            break
+if ENABLE_CENT_FRAGMENT_FILTER:
+    nclose_filter_weight_fullsize = scatter_subset_weights(
+        filter_weights, A_idx_list, len(weights_fullsize), dtype=weights_fullsize.dtype
+    )
+    nclose_filter_nclose_depth = calculate_nclose_depth(
+        path_nclose_count, nclose_filter_weight_fullsize
+    )
+    active_nclose_keys = {
+        nclose_key
+        for nclose_key, depth in nclose_filter_nclose_depth.items()
+        if depth >= 1e-6
+    }
+    censat_nclose_chroms = collect_censat_nclose_chroms(
+        path_tag2cord, path_tag2nclose_key, censat_intervals,
+        active_nclose_keys=active_nclose_keys
+    )
+    skipped_no_censat_nclose = []
+    for k, tags in path_nclose_set_dict.items():
+        for tag in tags:
+            if isinstance(tag, tuple) and len(tag) > 0 and tag[0] == 'cent_fragment':
+                chrom = tag[1]
+                if chrom not in censat_nclose_chroms:
+                    skipped_no_censat_nclose.append((k, chrom))
+                    break
+                cent_fragment_col2chrom[k] = chrom
+                break
+    if skipped_no_censat_nclose:
+        skipped_chroms = sorted({chrom for _, chrom in skipped_no_censat_nclose}, key=chr2int)
+        logging.info(
+            f'CF greedy prefilter: skipped {len(skipped_no_censat_nclose)} cent_fragment cols '
+            f'without positive-depth active censat nclose ({", ".join(skipped_chroms)})'
+        )
+else:
+    logging.info('CF greedy filter disabled')
 
 def _compute_acc_max(predict_a, predict_b):
     acc = defaultdict(float)
@@ -1292,10 +1369,11 @@ predict_suc_B_curr = predict_suc_B.copy()
 predict_fal_B_curr = predict_fal_B.copy()
 filter_weights_curr = filter_weights.copy()
 
-logging.info(
-    f'CF greedy start: pool={len(cent_fragment_col2chrom)} cent_fragment cols '
-    f'(candidate weight >= {CF_GREEDY_MIN_WEIGHT_N}N)'
-)
+if ENABLE_CENT_FRAGMENT_FILTER:
+    logging.info(
+        f'CF greedy start: pool={len(cent_fragment_col2chrom)} cent_fragment cols '
+        f'(candidate weight >= {CF_GREEDY_MIN_WEIGHT_N}N)'
+    )
 
 removed_cf = []
 while True:
@@ -1367,7 +1445,8 @@ while True:
         break
 
 if removed_cf:
-    logging.info(f'CF greedy result chromosomes: {", ".join(chrom for _, chrom in removed_cf)}')
+    removed_cf_chroms = sorted((chrom for _, chrom in removed_cf), key=chr2int)
+    logging.info(f'CF greedy removed cent_fragment chromosomes: {", ".join(removed_cf_chroms)}')
 
 A_idx_list = A_idx_list_curr
 filter_weights = filter_weights_curr

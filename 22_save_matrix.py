@@ -52,6 +52,8 @@ CTG_GLOBALIDX = 21
 
 ABS_MAX_COVERAGE_RATIO = 3
 MAX_PATH_CNT = 100
+NORMAL_PRIOR_STRENGTH = 0.01
+NORMAL_PRIOR_NCLOSE_NODE_COUNT_LIMIT = 500
 
 DIR_FOR = 1
 TELOMERE_EXPANSION = 5 * K
@@ -303,6 +305,10 @@ def np_safe_divide(a, b):
 def get_relative_path(p):
     return tuple(p.split('/')[-3:])
 
+def count_nclose_nodes(nclose_file_path):
+    with open(nclose_file_path, "r") as f:
+        return sum(1 for line in f if line.strip()) * 2
+
 parser = argparse.ArgumentParser(description="SKYPE depth analysis")
 
 parser.add_argument("censat_bed_path",
@@ -332,17 +338,11 @@ parser.add_argument("-t", "--thread",
 parser.add_argument("--progress",
                     help="Show progress bar", action='store_true')
 
-parser.add_argument("--normal_prior_strength",
-                    help="Dimensionless strength for the default-chromosome prior. "
-                         "0 disables the prior. The term is normalized by the "
-                         "number of clean depth bins and prior rows.",
-                    type=float, default=0.01)
-
 args = parser.parse_args()
 
-normal_prior_strength = float(args.normal_prior_strength)
+normal_prior_strength = float(NORMAL_PRIOR_STRENGTH)
 if normal_prior_strength < 0:
-    raise ValueError("--normal_prior_strength must be non-negative")
+    raise ValueError("NORMAL_PRIOR_STRENGTH must be non-negative")
 
 # t = "22_save_matrix.py public_data/chm13v2.0_censat_v2.1.m.bed /home/hyunwoo/ACCtools-pipeline/90_skype_run/COLO829/20_alignasm/COLO829.ctg.aln.paf.ppc.paf /home/hyunwoo/ACCtools-pipeline/90_skype_run/COLO829/01_depth/COLO829_normalized.win.stat.gz public_data/chm13v2.0_telomere.bed public_data/chm13v2.0.fa.fai public_data/chm13v2.0_cytobands_allchrs.bed 30_skype_pipe/COLO829_14_12_42 -t 4"
 # args = parser.parse_args(t.split()[1:])
@@ -364,6 +364,15 @@ type2_ins_contig_path = RATIO_OUTLIER_FOLDER + "type2_ins/"
 
 TELO_CONNECT_NODES_INFO_PATH = PREFIX + "/telomere_connected_list.txt"
 NCLOSE_FILE_PATH = f"{PREFIX}/nclose_nodes_index.txt"
+
+nclose_node_count = count_nclose_nodes(NCLOSE_FILE_PATH)
+if nclose_node_count > NORMAL_PRIOR_NCLOSE_NODE_COUNT_LIMIT:
+    logging.info(
+        "Normal chromosome prior disabled: "
+        f"NClose node count {nclose_node_count} exceeds "
+        f"{NORMAL_PRIOR_NCLOSE_NODE_COUNT_LIMIT}"
+    )
+    normal_prior_strength = 0.0
 
 df = pd.read_csv(main_stat_loc, compression='gzip', comment='#', sep='\t',
                  names=['chr', 'st', 'nd', 'length', 'covsite', 'totaldepth', 'cov', 'meandepth'])

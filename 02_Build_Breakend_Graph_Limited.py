@@ -93,6 +93,10 @@ ALL_REPEAT_NCLOSE_COMPRESS_LIMIT = 500*K
 SUBTELO_TIP_LIMIT = 500*K
 OFFSET_DIR_GROUP_LIMIT = 100*K
 
+
+PIPELINE_02_FILTER = True
+ENABLE_CENSAT_NONCENSAT_OFFSET_DIR_FILTER = PIPELINE_02_FILTER
+
 PATH_COMPRESS_LIMIT = 50*K
 IGNORE_PATH_LIMIT = 50*K
 NON_REPEAT_NOISE_RATIO=0.1
@@ -5753,30 +5757,37 @@ def nclose_calc():
         f'overlapping a simple_ctg_alt non-censat locus'
     )
 
-    missing_cen_fragment_dir_groups = collect_missing_cen_fragment_dir_censat_noncensat(
-        contig_data,
-        nclose_nodes,
-        cen_fragment_meta_for_filter,
-    )
-    raw_censat_type2_candidates = extract_raw_censat_type2_candidates(
-        args.alt,
-        repeat_censat_data,
-    )
-    combined_added = add_nearest_combined_censat_noncensat_ncloses(
-        contig_data,
-        nclose_nodes,
-        missing_cen_fragment_dir_groups,
-        raw_censat_type2_candidates,
-        repeat_censat_data,
-        chr_len,
-        cen_fragment_meta_for_filter,
-        PREPROCESSED_PAF_FILE_PATH,
-    )
-    logging.info(
-        f'Added {combined_added} nearest combined censat-noncensat nclose pairs '
-        f'from {len(raw_censat_type2_candidates)} raw censat-internal type2 candidates '
-        f'across {len(missing_cen_fragment_dir_groups)} target-missing groups'
-    )
+    if ENABLE_CENSAT_NONCENSAT_OFFSET_DIR_FILTER:
+        missing_cen_fragment_dir_groups = collect_missing_cen_fragment_dir_censat_noncensat(
+            contig_data,
+            nclose_nodes,
+            cen_fragment_meta_for_filter,
+        )
+        raw_censat_type2_candidates = extract_raw_censat_type2_candidates(
+            args.alt,
+            repeat_censat_data,
+        )
+        combined_added = add_nearest_combined_censat_noncensat_ncloses(
+            contig_data,
+            nclose_nodes,
+            missing_cen_fragment_dir_groups,
+            raw_censat_type2_candidates,
+            repeat_censat_data,
+            chr_len,
+            cen_fragment_meta_for_filter,
+            PREPROCESSED_PAF_FILE_PATH,
+        )
+        logging.info(
+            f'Added {combined_added} nearest combined censat-noncensat nclose pairs '
+            f'from {len(raw_censat_type2_candidates)} raw censat-internal type2 candidates '
+            f'across {len(missing_cen_fragment_dir_groups)} target-missing groups'
+        )
+    else:
+        combined_added = 0
+        logging.info(
+            'Censat-noncensat offset direction mismatch filter disabled; '
+            'skip nearest combined censat-noncensat nclose construction'
+        )
     if combined_added > 0:
         contig_data_size = len(contig_data)
         chr_corr, chr_rev_corr = chr_correlation_maker(contig_data)
@@ -5854,12 +5865,15 @@ def nclose_calc():
     # Final offset direction mismatch filter:
     # Run once after synthetic combined nclose construction so the added
     # censat-noncensat pairs participate in the same direction arbitration.
-    nclose_nodes, offset_removed = filter_offset_direction_mismatched_censat_noncensat(
-        contig_data,
-        nclose_nodes,
-        cen_fragment_meta_for_filter,
-    )
-    logging.info(f'Removed {offset_removed} offset-direction-mismatched censat-noncensat nclose pairs')
+    if ENABLE_CENSAT_NONCENSAT_OFFSET_DIR_FILTER:
+        nclose_nodes, offset_removed = filter_offset_direction_mismatched_censat_noncensat(
+            contig_data,
+            nclose_nodes,
+            cen_fragment_meta_for_filter,
+        )
+        logging.info(f'Removed {offset_removed} offset-direction-mismatched censat-noncensat nclose pairs')
+    else:
+        logging.info('Skipped offset-direction-mismatched censat-noncensat nclose filtering')
 
     def write_compressed_nclose_nodes_list(current_nclose_nodes):
         nclose_type = defaultdict(list)
