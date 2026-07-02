@@ -1068,6 +1068,42 @@ def record_has_both_point_spans(record):
     ]
     return raw_false_value(side_flags[0]) and raw_false_value(side_flags[1])
 
+def raw_virtual_inv_vafs(record, report_row=None):
+    estimate = record.get('depth_weighted_nclose_estimate', {})
+    point_a_vaf = parse_optional_float(estimate.get('point_a_nclose_vaf'))
+    point_b_vaf = parse_optional_float(estimate.get('point_b_nclose_vaf'))
+    if point_a_vaf is not None and point_b_vaf is not None:
+        return point_a_vaf, point_b_vaf
+
+    if report_row is not None:
+        if point_a_vaf is None:
+            point_a_vaf = parse_optional_float(report_row.get('point_a_nclose_vaf'))
+        if point_b_vaf is None:
+            point_b_vaf = parse_optional_float(report_row.get('point_b_nclose_vaf'))
+        if point_a_vaf is not None and point_b_vaf is not None:
+            return point_a_vaf, point_b_vaf
+
+    counts = record.get('read_counts', {})
+    try:
+        d1 = int(counts.get('d1', 0))
+        d2 = int(counts.get('d2', 0))
+        d3 = int(counts.get('d3', 0))
+        d4 = int(counts.get('d4', 0))
+    except (TypeError, ValueError):
+        return point_a_vaf, point_b_vaf
+
+    if point_a_vaf is None and d1 + d2 > 0:
+        point_a_vaf = d1 / (d1 + d2)
+    if point_b_vaf is None and d4 + d3 > 0:
+        point_b_vaf = d4 / (d4 + d3)
+    return point_a_vaf, point_b_vaf
+
+def record_passes_virtual_inv_vaf(record, report_row=None, min_vaf=RAW_VIRTUAL_INV_MIN_VAF):
+    point_a_vaf, point_b_vaf = raw_virtual_inv_vafs(record, report_row)
+    if point_a_vaf is None or point_b_vaf is None:
+        return False
+    return point_a_vaf > min_vaf and point_b_vaf > min_vaf
+
 def directed_entry_coord(endpoint):
     return int(endpoint['ref_st']) if endpoint['dir'] == '+' else int(endpoint['ref_nd'])
 
@@ -1243,6 +1279,8 @@ def build_virtual_inv_events(prefix, meandepth, chrom_lengths, min_depth_N=0.0, 
 
         report_row = report_by_pair.get(pair_id)
         if not record_depth_is_balanced(record, report_row):
+            continue
+        if not record_passes_virtual_inv_vaf(record, report_row):
             continue
         if not (
             record_has_both_point_spans(record) or

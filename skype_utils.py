@@ -29,6 +29,7 @@ PIPELINE_MODE_PKL = "pipeline_mode.pkl"
 PIPELINE_MODE_NCLOSE_LIMIT = 1000
 TYPE4_INDEL_GRAPH_EDGE_PKL = "type4_indel_graph_edges.pkl"
 INDEL_MERGE_TOLERANCE = 10 * K
+RAW_VIRTUAL_INV_MIN_VAF = 0.2
 
 
 def make_pipeline_mode_config(
