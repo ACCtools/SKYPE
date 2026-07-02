@@ -48,15 +48,6 @@ CTG_GLOBALIDX = 21
 
 FILTER_P_VALUE = 0.01
 
-# Filtering toggles. Set each value to False to disable that filtering stage.
-PIPELINE_23_FILTER = True
-
-ENABLE_RECIPROCAL_TRANSLOCATION_FILTER = PIPELINE_23_FILTER
-ENABLE_OPPOSITE_DIRECTION_DEPTH_FILTER = PIPELINE_23_FILTER
-ENABLE_HYPOTHESIS_TEST_FILTER = PIPELINE_23_FILTER
-ENABLE_CENT_FRAGMENT_FILTER = PIPELINE_23_FILTER
-ENABLE_BP_STEP_DEPTH_FILTER = PIPELINE_23_FILTER
-
 CHROM_ERROR_FAIL_RATE = 1.5
 
 RECIPROCAL_PAIR_DISTANCE = 10 * K
@@ -998,14 +989,19 @@ main_stat_loc = args.main_stat_path
 THREAD = args.thread
 CENSAT_PATH = args.censat_bed_path
 PAF_UTG_LOC = args.paf_utg_path
+pipeline_mode_config = load_pipeline_mode(PREFIX)
+logging.info(describe_pipeline_mode(pipeline_mode_config))
+
+PIPELINE_23_FILTER = pipeline_mode_is_karyotype(pipeline_mode_config)
+ENABLE_RECIPROCAL_TRANSLOCATION_FILTER = PIPELINE_23_FILTER
+ENABLE_OPPOSITE_DIRECTION_DEPTH_FILTER = PIPELINE_23_FILTER
+ENABLE_HYPOTHESIS_TEST_FILTER = True # Always on
+ENABLE_CENT_FRAGMENT_FILTER = PIPELINE_23_FILTER
+ENABLE_BP_STEP_DEPTH_FILTER = PIPELINE_23_FILTER
 
 RATIO_OUTLIER_FOLDER = f"{PREFIX}/11_ref_ratio_outliers/"
 
-with open(f"{PREFIX}/report.txt", 'r') as f:
-    f.readline()
-    path_cnt = int(f.readline().strip())
-
-use_julia_solver = path_cnt <= HARD_PATH_COUNT_BASELINE
+use_julia_solver = pipeline_mode_is_karyotype(pipeline_mode_config)
 
 core_num = psutil.cpu_count(logical=False)
 if core_num is None:
@@ -1561,14 +1557,18 @@ def find_nclose_to_drop(signal_B, nclose_depth):
             nclose_to_drop.add(nclose_key)
     return nclose_to_drop
 
-nclose_to_drop_predict = find_nclose_to_drop(predict_suc_B, cf_nclose_depth)
-nclose_to_drop_observed = find_nclose_to_drop(B, cf_nclose_depth)
-nclose_to_drop = nclose_to_drop_predict | nclose_to_drop_observed
+if ENABLE_BP_STEP_DEPTH_FILTER:
+    nclose_to_drop_predict = find_nclose_to_drop(predict_suc_B, cf_nclose_depth)
+    nclose_to_drop_observed = find_nclose_to_drop(B, cf_nclose_depth)
+    nclose_to_drop = nclose_to_drop_predict | nclose_to_drop_observed
 
-logging.info(
-    f'BP step/depth filter : nclose to remove = {len(nclose_to_drop)} '
-    f'(Source: predict={len(nclose_to_drop_predict)}, depth={len(nclose_to_drop_observed)})'
-)
+    logging.info(
+        f'BP step/depth filter : nclose to remove = {len(nclose_to_drop)} '
+        f'(Source: predict={len(nclose_to_drop_predict)}, depth={len(nclose_to_drop_observed)})'
+    )
+else:
+    logging.info('BP step/depth filter disabled')
+    nclose_to_drop = set()
 
 drop_cols = set()
 for col_idx, ctr in enumerate(path_nclose_count):

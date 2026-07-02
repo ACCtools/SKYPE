@@ -82,7 +82,7 @@ DIR_CHANGE_LIMIT_ABS_MAX = 1
 CENSAT_VISIT_LIMIT = 2
 
 CHR_CHANGE_LIMIT_HARD_START = 2
-HARD_NCLOSE_COUNT = 1000
+HARD_NCLOSE_COUNT = PIPELINE_MODE_NCLOSE_LIMIT
 FAIL_NCLOSE_COUNT = 10000
 
 BND_OVERUSE_CNT = 2
@@ -6135,12 +6135,26 @@ parser.add_argument("--add_indel_graph",
                     help="Add selected type4 indel rescue edges to the breakend graph without increasing graph dimensions.",
                     action='store_true')
 
+mode_group = parser.add_mutually_exclusive_group()
+mode_group.add_argument("--karyotype_mode",
+                        dest="pipeline_mode",
+                        help="Use aggressive filtering for karyotype analysis (default).",
+                        action="store_const",
+                        const=PIPELINE_MODE_KARYOTYPE,
+                        default=PIPELINE_MODE_KARYOTYPE)
+mode_group.add_argument("--variant_mode",
+                        dest="pipeline_mode",
+                        help="Use depth-preserving mode for variant/VCF analysis.",
+                        action="store_const",
+                        const=PIPELINE_MODE_VARIANT)
+
 args = parser.parse_args()
 
 # t = "02_Build_Breakend_Graph_Limited.py /home/hyunwoo/ACCtools-pipeline/90_skype_run/H1437/20_alignasm/H1437.ctg.aln.paf public_data/chm13v2.0.fa.fai public_data/chm13v2.0_telomere.bed public_data/chm13v2.0_repeat.m.bed public_data/chm13v2.0_censat_v2.1.m.bed /home/hyunwoo/ACCtools-pipeline/90_skype_run/H1437/01_depth/H1437_normalized.win.stat.gz 30_skype_pipe/H1437_23_00_00 /home/hyunwoo/ACCtools-pipeline/90_skype_run/H1437/01_depth/H1437.bam --alt /home/hyunwoo/ACCtools-pipeline/90_skype_run/H1437/20_alignasm/H1437.utg.aln.paf --orignal_paf_loc /home/hyunwoo/ACCtools-pipeline/90_skype_run/H1437/20_alignasm/H1437.ctg.paf /home/hyunwoo/ACCtools-pipeline/90_skype_run/H1437/20_alignasm/H1437.utg.paf --test --skip_bam_analysis -t 128"
 # args = parser.parse_args(t.split()[1:])
 
 PREFIX = args.prefix
+REQUESTED_PIPELINE_MODE = args.pipeline_mode
 
 os.makedirs(PREFIX, exist_ok=True)
 
@@ -6842,6 +6856,14 @@ with open(f"{PREFIX}/ecdna_circuit_data.pkl", "wb") as f:
 logging.info(f'Final success settings: {(CHR_CHANGE_LIMIT_PREFIX, DIR_CHANGE_LIMIT_PREFIX)}')
 
 cancer_prefix = os.path.basename(PREPROCESSED_PAF_FILE_PATH).split('.')[0]
+
+pipeline_mode_config = save_pipeline_mode(
+    PREFIX,
+    requested_mode=REQUESTED_PIPELINE_MODE,
+    nclose_node_count=nclose_node_count,
+    nclose_limit=HARD_NCLOSE_COUNT,
+)
+logging.info(describe_pipeline_mode(pipeline_mode_config))
 
 with open(f'{PREFIX}/path_data.pkl', 'wb') as f:
     pkl.dump(path_list_dict, f)

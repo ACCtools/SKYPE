@@ -285,7 +285,8 @@ def virtual_event_label(event_type : str) -> str:
     return {'d': 'del', 'i': 'ins', 'v': 'inv'}[event_type]
 
 # SKY Figure
-def plot_virtual_chromosome(ax, segments_data, maxh, cell_col, def_cell_col, label=None, karyotype_str=None):
+def plot_virtual_chromosome(ax, segments_data, maxh, cell_col, def_cell_col,
+                            label=None, karyotype_str=None, event_labels=None):
     """
     주어진 segments 리스트로 가상 염색체를 그립니다.
     """
@@ -320,6 +321,9 @@ def plot_virtual_chromosome(ax, segments_data, maxh, cell_col, def_cell_col, lab
         'fontsize': 10,
         'color': 'black'
     }
+    event_labels = event_labels or []
+    event_label_y_positions = [event_y for event_y, _event_label in event_labels]
+
     for i, (real_chr, seg_length) in enumerate(segments):
         color = CHR_COLORS.get(real_chr[0], "gray")
         rect = patches.Rectangle(
@@ -332,7 +336,10 @@ def plot_virtual_chromosome(ax, segments_data, maxh, cell_col, def_cell_col, lab
         rect.set_clip_path(clip_patch)
         ax.add_patch(rect)
 
-        if 0 < i and i < len(segments):
+        is_annotated_event_boundary = any(
+            abs(current_y - event_y) < 1e-6 for event_y in event_label_y_positions
+        )
+        if 0 < i and i < len(segments) and not is_annotated_event_boundary:
             last_chr = segments[i-1][0]
             if real_chr[0] != last_chr[0]:
                 text_label = f"t({last_chr[0][3:]};{real_chr[0][3:]})"
@@ -343,6 +350,11 @@ def plot_virtual_chromosome(ax, segments_data, maxh, cell_col, def_cell_col, lab
 
         current_y += seg_length
         
+    for event_y, event_label in event_labels:
+        event_y = max(0, min(100, event_y))
+        text_obj = ax.text(text_x, event_y, event_label, **decoration_args)
+        text_obj_list.append(text_obj)
+
     mark_overlapping_texts_with_arrows(ax, text_obj_list, min_gap=5)
     outline_patch = patches.FancyBboxPatch(
         (x_center - radius, 0),
@@ -835,7 +847,8 @@ def get_ctg_intype_interrupt_pieces(key_int : int, endpoint_chroms : set) -> lis
 
     return pieces
 
-def get_karyotype_summary_from_index(path_path : str) -> list:
+def get_karyotype_summary_from_index(path_path : str, type4_edge_to_event_key=None,
+                                     type4_event_by_key=None) -> list:
     """
     Fallback summary from the compact index path. This keeps the old behavior
     for prefixes that do not have the 21_pat_depth PAF fragments available.
@@ -878,6 +891,15 @@ def get_karyotype_summary_from_index(path_path : str) -> list:
             (path[i-1][0], prev_node_name),
             (path[i][0], curr_node_name),
         )
+        type4_event_key = None
+        type4_event = None
+        if type4_edge_to_event_key is not None:
+            type4_event_key = type4_edge_to_event_key.get(edge_key)
+        if type4_event_key is not None and type4_event_by_key is not None:
+            type4_event = type4_event_by_key.get(type4_event_key)
+        type4_deletion_edge = (
+            type4_event is not None and type4_event.get("event_type") == "d"
+        )
         ctg_intype_key_int = ctg_intype_key_by_edge.get(edge_key)
         interrupt_pieces = []
         if ctg_intype_key_int is not None:
@@ -886,7 +908,8 @@ def get_karyotype_summary_from_index(path_path : str) -> list:
 
         if path[i][CHR_CHANGE_IDX] > path[i-1][CHR_CHANGE_IDX] \
         or path[i][DIR_CHANGE_IDX] > path[i-1][DIR_CHANGE_IDX] \
-        or interrupt_pieces:
+        or interrupt_pieces \
+        or type4_deletion_edge:
             
             # Add last piece
             if curr_incr == '+':
@@ -918,7 +941,8 @@ def get_karyotype_summary_from_index(path_path : str) -> list:
     append_karyotype_piece(pieces, curr_chr[0], curr_chr[1], abs(final_length), merge=False)
     return pieces
 
-def get_karyotype_summary(non_type4_path_list: list):
+def get_karyotype_summary(non_type4_path_list: list, type4_edge_to_event_key=None,
+                          type4_event_by_key=None):
     """
     Summarizes karyotype data from the compact index path. Only CTG_IN_TYPE
     edges are inspected in the expanded PAF fragments to reveal long inserted
@@ -927,7 +951,9 @@ def get_karyotype_summary(non_type4_path_list: list):
     karyotypes_data_direction_include = {}
     
     for path_path in non_type4_path_list:
-        pieces = get_karyotype_summary_from_index(path_path)
+        pieces = get_karyotype_summary_from_index(
+            path_path, type4_edge_to_event_key, type4_event_by_key
+        )
         karyotypes_data_direction_include[path_path] = pieces
         
     return karyotypes_data_direction_include
@@ -1256,7 +1282,212 @@ def build_virtual_inv_events(prefix, meandepth, chrom_lengths, min_depth_N=0.0, 
 
     return display_inv
 
-def karyotype_path_to_iscn(pieces : list):
+def type4_indel_graph_source_label(event, event_key):
+    contig_name = event.get("contig_name")
+    if contig_name:
+        return f"TYPE4_INDEL_GRAPH_{contig_name}"
+    type4_tuple = event.get("type4_tuple")
+    if type4_tuple:
+        return "TYPE4_INDEL_GRAPH_" + "_".join(map(str, type4_tuple))
+    if isinstance(event_key, tuple):
+        return "TYPE4_INDEL_GRAPH_" + "_".join(map(str, event_key))
+    return f"TYPE4_INDEL_GRAPH_{event_key}"
+
+
+def get_path_type4_indel_events(path, type4_event_by_key, type4_path_event_usage):
+    return [
+        type4_event_by_key[event_key]
+        for event_key in type4_path_event_usage.get(path, {})
+        if event_key in type4_event_by_key
+    ]
+
+
+def type4_indel_karyotype_labels(type4_indel_events):
+    labels = []
+    seen = set()
+    for event in type4_indel_events or []:
+        if event.get("span_len", 0) < KARYOTYPE_MIN_SEGMENT_LENGTH:
+            continue
+        key = (
+            event.get("event_type"),
+            event.get("chrom"),
+            event.get("st"),
+            event.get("nd"),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        labels.append(
+            f"{virtual_event_label(event['event_type'])}({chrom_to_iscn(event['chrom'])})"
+        )
+    return labels
+
+
+def append_extra_karyotype_labels(base_iscn, extra_labels):
+    remaining = list(extra_labels)
+    if base_iscn in remaining:
+        remaining.remove(base_iscn)
+    return base_iscn + ''.join(remaining)
+
+
+def get_type4_indel_boundary_labels(path_path, type4_edge_to_event_key,
+                                    type4_event_by_key, maxh):
+    if not type4_edge_to_event_key or not type4_event_by_key:
+        return []
+
+    path = import_index_path(path_path)
+    ctg_intype_key_by_edge = {}
+    for key_int in path2key_int_list.get(path_path, []):
+        key_type, key_value = int2key[key_int]
+        if key_type == CTG_IN_TYPE:
+            ctg_intype_key_by_edge[key_value] = key_int
+
+    if len(path[0]) < 4:
+        path[0] = tuple([0] + list(path[0]))
+    if len(path[-1]) < 4:
+        path[-1] = tuple([0] + list(path[-1]))
+
+    curr_incr = '+' if path[0][NODE_NAME][-1] == 'f' else '-'
+    first_real_node = ppc_data[path[1][NODE_NAME]]
+    curr_chr = [first_real_node[CHR_NAM], curr_incr]
+    curr_ref = first_real_node[CHR_STR] if curr_incr == '+' else first_real_node[CHR_END]
+    current_y_bp = 0
+    labels = []
+    seen = set()
+
+    for i in range(1, len(path) - 1):
+        prev_node_name = path[i - 1][NODE_NAME]
+        curr_node_name = path[i][NODE_NAME]
+        if not isinstance(prev_node_name, int) or not isinstance(curr_node_name, int):
+            continue
+
+        last_node = ppc_data[prev_node_name]
+        curr_node = ppc_data[curr_node_name]
+        edge_key = (
+            (path[i - 1][0], prev_node_name),
+            (path[i][0], curr_node_name),
+        )
+        type4_event_key = type4_edge_to_event_key.get(edge_key)
+        type4_event = type4_event_by_key.get(type4_event_key) if type4_event_key is not None else None
+        type4_deletion_edge = (
+            type4_event is not None and type4_event.get("event_type") == "d"
+        )
+
+        ctg_intype_key_int = ctg_intype_key_by_edge.get(edge_key)
+        interrupt_pieces = []
+        if ctg_intype_key_int is not None:
+            endpoint_chroms = {last_node[CHR_NAM], curr_node[CHR_NAM]}
+            interrupt_pieces = get_ctg_intype_interrupt_pieces(ctg_intype_key_int, endpoint_chroms)
+
+        if not (
+            path[i][CHR_CHANGE_IDX] > path[i - 1][CHR_CHANGE_IDX]
+            or path[i][DIR_CHANGE_IDX] > path[i - 1][DIR_CHANGE_IDX]
+            or interrupt_pieces
+            or type4_deletion_edge
+        ):
+            continue
+
+        if curr_incr == '+':
+            current_y_bp += abs(last_node[CHR_END] - curr_ref)
+        else:
+            current_y_bp += abs(curr_ref - last_node[CHR_STR])
+
+        if type4_deletion_edge:
+            label_key = (
+                type4_event.get("event_type"),
+                type4_event.get("chrom"),
+                type4_event.get("st"),
+                type4_event.get("nd"),
+            )
+            if label_key not in seen:
+                seen.add(label_key)
+                labels.append((
+                    current_y_bp / maxh * 100,
+                    f"{virtual_event_label(type4_event['event_type'])}({chrom_to_iscn(type4_event['chrom'])})",
+                ))
+
+        for _piece_chr, piece_length in interrupt_pieces:
+            current_y_bp += piece_length
+
+        if path[i][NODE_NAME] > path[i - 1][NODE_NAME]:
+            curr_incr = curr_node[CTG_DIR]
+            curr_chr = [curr_node[CHR_NAM], curr_incr]
+            curr_ref = curr_node[CHR_STR] if curr_incr == '+' else curr_node[CHR_END]
+        else:
+            curr_incr = '-' if curr_node[CTG_DIR] == '+' else '+'
+            curr_chr = [curr_node[CHR_NAM], curr_incr]
+            curr_ref = curr_node[CHR_STR] if curr_incr == '+' else curr_node[CHR_END]
+
+    return labels
+
+
+def type4_indel_graph_weights_for_paths(paths, loc2weight, type4_path_event_usage):
+    weights_by_event = Counter()
+    for path in paths:
+        path_weight = float(loc2weight.get(path, 0.0))
+        if path_weight <= 0:
+            continue
+        for event_key, count in type4_path_event_usage.get(path, {}).items():
+            weights_by_event[event_key] += path_weight * count
+    return weights_by_event
+
+
+def build_aggregated_indel_events(weights, min_weight=0.0, min_span=0,
+                                  type4_usage_data=None,
+                                  type4_excluded_weights=None):
+    indel_events = {}
+    rpll = len(paf_ans_list)
+
+    for i in range(rpll, min(len(weights), len(tot_loc_list))):
+        paf_loc = tot_loc_list[i]
+        if paf_loc.split('/')[-3] == '12_cent_fragment':
+            continue
+
+        indel_ind = paf_loc.split('/')[-2]
+        if indel_ind not in {'front_jump', 'back_jump'}:
+            continue
+
+        with open(paf_loc, "r") as f:
+            l = f.readline().rstrip().split("\t")
+            chrom = l[CHR_NAM]
+            pos1 = int(l[CHR_STR])
+            pos2 = int(l[CHR_END])
+
+        event_type = 'd' if indel_ind == 'front_jump' else 'i'
+        add_weighted_indel_event(
+            indel_events, event_type, chrom, pos1, pos2, float(weights[i]),
+            source=f"INDEL_INDEX_{i - rpll}",
+        )
+
+    if type4_usage_data is None:
+        type4_usage_data = summarize_type4_indel_graph_usage(
+            PREFIX, paf_ans_list, weights, import_index_path
+        )
+    type4_events, type4_weights, _ = type4_usage_data
+    if type4_excluded_weights is None:
+        type4_excluded_weights = {}
+    for event_key, raw_weight in type4_weights.items():
+        raw_weight = float(raw_weight) - float(type4_excluded_weights.get(event_key, 0.0))
+        if raw_weight <= 0:
+            continue
+        event = type4_events[event_key]
+        add_weighted_indel_event(
+            indel_events,
+            event["event_type"],
+            event["chrom"],
+            event["st"],
+            event["nd"],
+            float(raw_weight),
+            source=type4_indel_graph_source_label(event, event_key),
+        )
+
+    return [
+        event for event in indel_events.values()
+        if event["weight"] > min_weight and (event["nd"] - event["st"]) > min_span
+    ]
+
+
+def karyotype_path_to_iscn(pieces : list, type4_indel_events=None):
     """get_karyotype_summary 가 만든 pieces([((chrom, strand), length_bp), ...]) 를
     ISCN 문자열로 변환한다. KARYOTYPE_MIN_SEGMENT_LENGTH(1Mb) 미만 segment 는 무시.
     단, CTG_IN_TYPE 내부에서 끼어든 것으로 남긴 중간 chr 조각은 10Kb 이상이면 유지.
@@ -1274,8 +1505,9 @@ def karyotype_path_to_iscn(pieces : list):
             keep = curr_chrom != prev_chrom and curr_chrom != next_chrom
         if keep:
             filtered.append((seg_chr, length))
+    extra_labels = type4_indel_karyotype_labels(type4_indel_events)
     if not filtered:
-        return None
+        return ''.join(extra_labels) if extra_labels else None
     tokens = []
     for i in range(1, len(filtered)):
         prev_chrom, prev_strand = filtered[i - 1][0]
@@ -1286,7 +1518,8 @@ def karyotype_path_to_iscn(pieces : list):
             tokens.append(f"inv({chrom_to_iscn(curr_chrom)})")
         # 같은 염색체·같은 strand 인접(작은 segment 제거로 병합)은 junction 아님 -> 생략
     if tokens:
-        return ''.join(tokens)
+        base_iscn = ''.join(tokens)
+        return append_extra_karyotype_labels(base_iscn, extra_labels)
     # junction 이 없는 단일 염색체: reference 길이의 90%(KARYOTYPE_NORMAL_RATIO) 미만이면
     # 일부 결실로 보아 del 로 취급, 그렇지 않으면 정상('1')
     chrom = filtered[0][0][0]
@@ -1295,13 +1528,22 @@ def karyotype_path_to_iscn(pieces : list):
     if ratio is not None:
         logging.debug(f"single-chrom path {chrom}: len={total_len} ref_ratio={ratio:.3f}")
     if ratio is not None and ratio < KARYOTYPE_NORMAL_RATIO:
-        return f"del({chrom_to_iscn(chrom)})"
-    return chrom_to_iscn(chrom)
+        base_iscn = f"del({chrom_to_iscn(chrom)})"
+        return append_extra_karyotype_labels(base_iscn, extra_labels)
+    base_iscn = chrom_to_iscn(chrom)
+    if extra_labels:
+        return ''.join(extra_labels)
+    return base_iscn
 
 def build_karyotype_diagram(fig_prefix : str = '', filter_depth_N : float = TARGET_DEPTH):
     weights = np.load(f'{PREFIX}/weight{fig_prefix}.npy')
     loc2weight = dict(zip(tot_loc_list, weights))
     weights_sorted_data = sorted(enumerate(weights), key=lambda t:t[1], reverse=True)
+    type4_usage_data = summarize_type4_indel_graph_usage(
+        PREFIX, paf_ans_list, weights, import_index_path
+    )
+    type4_event_by_key, _, type4_path_event_usage = type4_usage_data
+    _type4_loaded_events, type4_edge_to_event_key = load_type4_indel_graph_event_index(PREFIX)
     
     non_type4_top_path = []
     for ind, w in weights_sorted_data:
@@ -1311,13 +1553,12 @@ def build_karyotype_diagram(fig_prefix : str = '', filter_depth_N : float = TARG
             if w > filter_depth_N * meandepth / 2:
                 non_type4_top_path.append(paf_loc)
 
-    karyotypes_data = get_karyotype_summary(non_type4_top_path)
-
-    all_insertion_path = []
-    insertion_path_dict = {}
-
-    all_deletion_path = []
-    deletion_path_dict = {}
+    karyotypes_data = get_karyotype_summary(
+        non_type4_top_path, type4_edge_to_event_key, type4_event_by_key
+    )
+    shown_type4_indel_weights = type4_indel_graph_weights_for_paths(
+        karyotypes_data.keys(), loc2weight, type4_path_event_usage
+    )
 
     all_ecdna_path = []
     ecdna_path_dict = {}
@@ -1327,42 +1568,9 @@ def build_karyotype_diagram(fig_prefix : str = '', filter_depth_N : float = TARG
         key = paf_loc.split('/')[-3]
         indel_ind = paf_loc.split('/')[-2]
         if key == '11_ref_ratio_outliers':
-            if indel_ind == 'front_jump' and w > NCLOSE_SIM_DIFF_THRESHOLD:
-                deletion_path_dict[paf_loc] = w
-                all_deletion_path.append(paf_loc)
-            if indel_ind == 'back_jump' and w > NCLOSE_SIM_DIFF_THRESHOLD:
-                insertion_path_dict[paf_loc] = w
-                all_insertion_path.append(paf_loc)
             if indel_ind == 'ecdna' and w > NCLOSE_SIM_DIFF_THRESHOLD:
                 ecdna_path_dict[paf_loc] = w
                 all_ecdna_path.append(paf_loc)
-
-    long_deletion_path = {}
-    long_insertion_path = {}
-
-    for i in all_deletion_path:
-        with open(i, "r") as f:
-            l = f.readline()
-            l = l.rstrip()
-            l = l.split("\t")
-            chr_nam1 = l[CHR_NAM]
-            chr_nam2 = l[CHR_NAM]
-            pos1 = int(l[CHR_STR])
-            pos2 = int(l[CHR_END])
-            if abs(pos1-pos2) > TYPE4_CLUSTER_SIZE:
-                long_deletion_path[i] = (chr_nam1, pos1, pos2)
-
-    for i in all_insertion_path:
-        with open(i, "r") as f:
-            l = f.readline()
-            l = l.rstrip()
-            l = l.split("\t")
-            chr_nam1 = l[CHR_NAM]
-            chr_nam2 = l[CHR_NAM]
-            pos1 = int(l[CHR_STR])
-            pos2 = int(l[CHR_END])
-            if abs(pos1-pos2) > TYPE4_CLUSTER_SIZE:
-                long_insertion_path[i] = (chr_nam1, pos1, pos2)
 
     # long_ecdna_path = {}
     # for i in all_ecdna_path:
@@ -1384,17 +1592,19 @@ def build_karyotype_diagram(fig_prefix : str = '', filter_depth_N : float = TARG
 
     display_indel = defaultdict(list)
 
-    for path, check_arg in long_deletion_path.items():
-        chrom, pos1, pos2 = check_arg
-        # if check_near_type4(chrom, pos1, pos1) or \
-        #    check_near_type4(chrom, pos2, pos2):
-        display_indel[chrom].append(("d", pos1, pos2, deletion_path_dict[path]/meandepth * 2, chrom, path))
-
-    for path, check_arg in long_insertion_path.items():
-        chrom, pos1, pos2 = check_arg
-        # if check_near_type4(chrom, pos1, pos1) or \
-        #    check_near_type4(chrom, pos2, pos2):
-        display_indel[chrom].append(("i", pos1, pos2, insertion_path_dict[path]/meandepth * 2, chrom, path))
+    for event in build_aggregated_indel_events(
+        weights, NCLOSE_SIM_DIFF_THRESHOLD, TYPE4_CLUSTER_SIZE, type4_usage_data,
+        shown_type4_indel_weights
+    ):
+        chrom = event["chrom"]
+        display_indel[chrom].append((
+            event["event_type"],
+            event["st"],
+            event["nd"],
+            event["weight"] / meandepth * 2,
+            chrom,
+            indel_event_source_label(event),
+        ))
 
     virtual_inv_display = build_virtual_inv_events(
         PREFIX, meandepth, chr_len, min_depth_N=filter_depth_N, weights=weights
@@ -1489,11 +1699,18 @@ def build_karyotype_diagram(fig_prefix : str = '', filter_depth_N : float = TARG
         bef_now_col = now_col
         plot_chr_name(ax_array[now_col][0], chr_name)
         for i, data in enumerate(data_list):
-            iscn = karyotype_path_to_iscn(karyotypes_data[data[0]])
+            path_type4_events = get_path_type4_indel_events(
+                data[0], type4_event_by_key, type4_path_event_usage
+            )
+            iscn = karyotype_path_to_iscn(karyotypes_data[data[0]], path_type4_events)
+            event_labels = get_type4_indel_boundary_labels(
+                data[0], type4_edge_to_event_key, type4_event_by_key, maxh
+            )
             plot_virtual_chromosome(ax_array[i // cols + now_col][i % cols + len(prefix_ratios)], data, maxh,
                                     cell_col, def_cell_col,
                                     label=f"{round(float(loc2weight[data[0]] / meandepth * 2), 2)}N",
-                                    karyotype_str=iscn if iscn is not None else '')
+                                    karyotype_str=iscn if iscn is not None else '',
+                                    event_labels=event_labels)
         for j, data in enumerate(chr_indel):
             i = j + len(data_list)
             plot_indel(ax_array[i // cols + now_col][i % cols + len(prefix_ratios)], data, maxh,
@@ -1581,7 +1798,10 @@ def build_karyotype_diagram(fig_prefix : str = '', filter_depth_N : float = TARG
     karyotype_rows = []  # (iscn_str, depth_N)
     for chr_name, data_list in sorted_grouped_norm_data_items:
         for path, _norm in data_list:
-            iscn = karyotype_path_to_iscn(karyotypes_data[path])
+            path_type4_events = get_path_type4_indel_events(
+                path, type4_event_by_key, type4_path_event_usage
+            )
+            iscn = karyotype_path_to_iscn(karyotypes_data[path], path_type4_events)
             if iscn is not None:
                 karyotype_rows.append((iscn, loc2weight[path] / meandepth * 2))
         for indel in display_indel.get(chr_name, []):
@@ -1637,6 +1857,8 @@ main_stat_loc = args.main_stat_loc
 TELOMERE_INFO_FILE_PATH = args.telomere_bed_path
 PREPROCESSED_PAF_FILE_PATH = args.ppc_paf_file_path
 CELL_LINE = args.cell_line_name
+pipeline_mode_config = load_pipeline_mode(PREFIX)
+logging.info(describe_pipeline_mode(pipeline_mode_config))
 
 RATIO_OUTLIER_FOLDER = f"{PREFIX}/11_ref_ratio_outliers/"
 front_contig_path = RATIO_OUTLIER_FOLDER+"front_jump/"
@@ -1746,11 +1968,7 @@ weights = np.load(f'{PREFIX}/weight.npy')
 
 build_karyotype_diagram()
 
-with open(f"{PREFIX}/report.txt", 'r') as f:
-    f.readline()
-    path_cnt = int(f.readline().strip())
-
-use_julia_solver = path_cnt <= HARD_PATH_COUNT_BASELINE
+use_julia_solver = pipeline_mode_is_karyotype(pipeline_mode_config)
 
 if use_julia_solver:
     build_karyotype_diagram(fig_prefix='_filter')

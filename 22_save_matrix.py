@@ -53,7 +53,6 @@ CTG_GLOBALIDX = 21
 ABS_MAX_COVERAGE_RATIO = 3
 MAX_PATH_CNT = 100
 NORMAL_PRIOR_STRENGTH = 0.01
-NORMAL_PRIOR_NCLOSE_NODE_COUNT_LIMIT = 500
 
 DIR_FOR = 1
 TELOMERE_EXPANSION = 5 * K
@@ -305,10 +304,6 @@ def np_safe_divide(a, b):
 def get_relative_path(p):
     return tuple(p.split('/')[-3:])
 
-def count_nclose_nodes(nclose_file_path):
-    with open(nclose_file_path, "r") as f:
-        return sum(1 for line in f if line.strip()) * 2
-
 parser = argparse.ArgumentParser(description="SKYPE depth analysis")
 
 parser.add_argument("censat_bed_path",
@@ -355,6 +350,8 @@ CHROMOSOME_INFO_FILE_PATH = args.reference_fai_path
 main_stat_loc = args.main_stat_loc
 TELOMERE_INFO_FILE_PATH = args.telomere_bed_path
 PREPROCESSED_PAF_FILE_PATH = args.ppc_paf_file_path
+pipeline_mode_config = load_pipeline_mode(PREFIX)
+logging.info(describe_pipeline_mode(pipeline_mode_config))
 
 RATIO_OUTLIER_FOLDER = f"{PREFIX}/11_ref_ratio_outliers/"
 front_contig_path = RATIO_OUTLIER_FOLDER + "front_jump/"
@@ -363,15 +360,9 @@ ecdna_contig_path = RATIO_OUTLIER_FOLDER + "ecdna/"
 type2_ins_contig_path = RATIO_OUTLIER_FOLDER + "type2_ins/"
 
 TELO_CONNECT_NODES_INFO_PATH = PREFIX + "/telomere_connected_list.txt"
-NCLOSE_FILE_PATH = f"{PREFIX}/nclose_nodes_index.txt"
 
-nclose_node_count = count_nclose_nodes(NCLOSE_FILE_PATH)
-if nclose_node_count > NORMAL_PRIOR_NCLOSE_NODE_COUNT_LIMIT:
-    logging.info(
-        "Normal chromosome prior disabled: "
-        f"NClose node count {nclose_node_count} exceeds "
-        f"{NORMAL_PRIOR_NCLOSE_NODE_COUNT_LIMIT}"
-    )
+if pipeline_mode_is_variant(pipeline_mode_config):
+    logging.info("Normal chromosome prior disabled: variant mode")
     normal_prior_strength = 0.0
 
 df = pd.read_csv(main_stat_loc, compression='gzip', comment='#', sep='\t',
@@ -679,11 +670,7 @@ if missing_init_paths:
 prior_cols = init_cols
 prior_row_capacity = len(prior_cols) if normal_prior_strength > 0 and prior_cols else 0
 
-with open(f"{PREFIX}/report.txt", 'r') as f:
-    f.readline()
-    path_cnt = int(f.readline().strip())
-
-use_julia_solver = path_cnt <= HARD_PATH_COUNT_BASELINE
+use_julia_solver = pipeline_mode_is_karyotype(pipeline_mode_config)
 
 shape = (n, m + prior_row_capacity)
 A_arr = np.empty(shape, dtype=np.float32, order='C')

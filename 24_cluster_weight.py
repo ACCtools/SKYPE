@@ -450,6 +450,8 @@ CHROMOSOME_INFO_FILE_PATH = args.reference_fai_path
 main_stat_loc = args.main_stat_loc
 TELOMERE_INFO_FILE_PATH = args.telomere_bed_path
 PREPROCESSED_PAF_FILE_PATH = args.ppc_paf_file_path
+pipeline_mode_config = load_pipeline_mode(PREFIX)
+logging.info(describe_pipeline_mode(pipeline_mode_config))
 
 RATIO_OUTLIER_FOLDER = f"{PREFIX}/11_ref_ratio_outliers/"
 TELO_CONNECT_NODES_INFO_PATH = PREFIX+"/telomere_connected_list.txt"
@@ -459,11 +461,7 @@ ecdna_contig_path = RATIO_OUTLIER_FOLDER+"ecdna/"
 output_folder = f'{PREFIX}/21_pat_depth'
 NCLOSE_FILE_PATH = f"{args.prefix}/nclose_nodes_index.txt"
 
-with open(f"{PREFIX}/report.txt", 'r') as f:
-    f.readline()
-    path_cnt = int(f.readline().strip())
-
-use_julia_solver = path_cnt <= HARD_PATH_COUNT_BASELINE
+use_julia_solver = pipeline_mode_is_karyotype(pipeline_mode_config)
 
 if not use_julia_solver:
     exit(0)

@@ -1283,9 +1283,14 @@ def _pairs_to_vcf(nclose_pairs, contig_data, contig_lengths, display_indel, ampl
                 else:
                     assert(False)
 
+                ctg_name = (
+                    f"INDEL_INDEX_{indel_idx}"
+                    if isinstance(indel_idx, int)
+                    else str(indel_idx)
+                )
                 fo.write(
                     f"{chrom}\t{lo}\t{sv_id}\tN\t{alt}\t60\t.\t"
-                    f"SVTYPE={alt[1:-1]};END={hi};SVLEN={svlen};WEIGHT={round(w, 2)};CTG_NAME=INDEL_INDEX_{indel_idx}\n"
+                    f"SVTYPE={alt[1:-1]};END={hi};SVLEN={svlen};WEIGHT={round(w, 2)};CTG_NAME={ctg_name}\n"
                 )
 
         for amplicon_counter, (chrom, st, nd, _, depth_N, amplicon_idx) in enumerate(amplicon_events, start=1):
@@ -1347,6 +1352,8 @@ CHROMOSOME_INFO_FILE_PATH = args.reference_fai_path
 main_stat_loc = args.main_stat_loc
 TELOMERE_INFO_FILE_PATH = args.telomere_bed_path
 PREPROCESSED_PAF_FILE_PATH = args.ppc_paf_file_path
+pipeline_mode_config = load_pipeline_mode(PREFIX)
+logging.info(describe_pipeline_mode(pipeline_mode_config))
 
 RATIO_OUTLIER_FOLDER = f"{PREFIX}/11_ref_ratio_outliers/"
 front_contig_path = RATIO_OUTLIER_FOLDER+"front_jump/"
@@ -1596,6 +1603,65 @@ def build_amplicon_events(weights, min_weight=BREAKEND_REMARKABLE_CN):
     return events
 
 
+def type4_indel_graph_source_label(event, event_key):
+    contig_name = event.get("contig_name")
+    if contig_name:
+        return f"TYPE4_INDEL_GRAPH_{contig_name}"
+    type4_tuple = event.get("type4_tuple")
+    if type4_tuple:
+        return "TYPE4_INDEL_GRAPH_" + "_".join(map(str, type4_tuple))
+    if isinstance(event_key, tuple):
+        return "TYPE4_INDEL_GRAPH_" + "_".join(map(str, event_key))
+    return f"TYPE4_INDEL_GRAPH_{event_key}"
+
+
+def build_aggregated_indel_events(weights, min_weight=0.0):
+    indel_events = {}
+
+    for i in range(rpll, min(len(weights), len(tot_loc_list))):
+        paf_loc = tot_loc_list[i]
+        if paf_loc.split('/')[-3] == '12_cent_fragment':
+            continue
+
+        indel_ind = paf_loc.split('/')[-2]
+        if indel_ind not in {'front_jump', 'back_jump'}:
+            continue
+
+        with open(paf_loc, "r") as f:
+            l = f.readline().rstrip().split("\t")
+            chrom = l[CHR_NAM]
+            pos1 = int(l[CHR_STR])
+            pos2 = int(l[CHR_END])
+
+        event_type = 'd' if indel_ind == 'front_jump' else 'i'
+        add_weighted_indel_event(
+            indel_events, event_type, chrom, pos1, pos2, float(weights[i]),
+            source=f"INDEL_INDEX_{i - rpll}"
+        )
+
+    type4_events, type4_weights, _ = summarize_type4_indel_graph_usage(
+        PREFIX, paf_ans_list, weights, import_index_path
+    )
+    for event_key, raw_weight in type4_weights.items():
+        if raw_weight <= 0:
+            continue
+        event = type4_events[event_key]
+        add_weighted_indel_event(
+            indel_events,
+            event["event_type"],
+            event["chrom"],
+            event["st"],
+            event["nd"],
+            float(raw_weight),
+            source=type4_indel_graph_source_label(event, event_key),
+        )
+
+    return [
+        event for event in indel_events.values()
+        if event["weight"] > min_weight
+    ]
+
+
 def draw_circos_plot(fig_prefix=''):
     weights = np.load(f'{PREFIX}/weight{fig_prefix}.npy')
     smooth_B = rebin_dataframe_B(df, 10)[chr_filt_idx_list + chr_no_filt_idx_list]
@@ -1768,27 +1834,14 @@ def draw_circos_plot(fig_prefix=''):
         bnd_cn_data.append([(chr_a, pos_a), (chr_b, pos_b), v, event_type])
 
     indel_val_list = []
-    non_type4_cnt = len(bnd_cn_data)
-    rpll = len(raw_path_list)
-    for i in range(rpll, len(weights)):
-        paf_loc = tot_loc_list[i]
-        if paf_loc.split('/')[-3] == '12_cent_fragment':
-            continue
-        indel_ind = paf_loc.split('/')[-2]
-        v = weights[i]
-
-        if v > BREAKEND_REMARKABLE_CN and indel_ind in {'front_jump', 'back_jump'}:
-            with open(tot_loc_list[i], "r") as f:
-                l = f.readline()
-                l = l.rstrip()
-                l = l.split("\t")
-                chr_nam1 = l[CHR_NAM]
-                chr_nam2 = l[CHR_NAM]
-                pos1 = int(l[CHR_STR])
-                pos2 = int(l[CHR_END])
-
-            bnd_cn_data.append([(chr_nam1, pos1), (chr_nam2, pos2), v, 'indel'])
-            indel_val_list.append(v / meandepth * 2)
+    for event in build_aggregated_indel_events(weights, BREAKEND_REMARKABLE_CN):
+        bnd_cn_data.append([
+            (event["chrom"], event["st"]),
+            (event["chrom"], event["nd"]),
+            event["weight"],
+            'indel',
+        ])
+        indel_val_list.append(event["weight"] / meandepth * 2)
 
     for chrom, st, nd, raw_weight, _, _ in build_amplicon_events(weights):
         bnd_cn_data.append([(chrom, st), (chrom, nd), raw_weight, 'amplicon'])
@@ -1945,11 +1998,7 @@ def draw_circos_plot(fig_prefix=''):
 
 weights = np.load(f'{PREFIX}/weight.npy')
 
-with open(f"{PREFIX}/report.txt", 'r') as f:
-    f.readline()
-    path_cnt = int(f.readline().strip())
-
-use_julia_solver = path_cnt <= HARD_PATH_COUNT_BASELINE
+use_julia_solver = pipeline_mode_is_karyotype(pipeline_mode_config)
 
 draw_circos_plot()
 if use_julia_solver:
@@ -1988,32 +2037,19 @@ def pairs_to_vcf(out_prefix=''):
         PREFIX, meandepth, chr_len, min_depth_N=VCF_FILTER_DEPTH_N, weights=weights
     )
 
-    rpll = len(raw_path_list)
-    for i in range(rpll, len(weights)):
-        paf_loc = tot_loc_list[i]
-        if paf_loc.split('/')[-3] == '12_cent_fragment':
-            continue
-        indel_ind = paf_loc.split('/')[-2]
-        with open(tot_loc_list[i], "r") as f:
-            l = f.readline()
-            l = l.rstrip()
-            l = l.split("\t")
-            chr_nam1 = l[CHR_NAM]
-            chr_nam2 = l[CHR_NAM]
-            pos1 = int(l[CHR_STR])
-            pos2 = int(l[CHR_END])
-        v = weights[i]
-        chrom = chr_nam1
-        # Gate must match make_bed_output() so SKYPE_result.bed and SV_call_result.vcf
-        # report the SAME jump (DEL/DUP) call set.
-        # Original VCF-only gate, kept for reference — it additionally required span > 5Mb,
-        # which silently dropped smaller CNVs that the BED (v > BREAKEND_REMARKABLE_CN) kept:
-        #     if abs(pos1 - pos2) > TYPE2_FLANKING_LENGTH and v > NCLOSE_SIM_DIFF_THRESHOLD:
-        if v > BREAKEND_REMARKABLE_CN:
-            if indel_ind == 'front_jump':
-                display_indel[chrom].append(("d", pos1, pos2, v / N, chrom, i - rpll))
-            if indel_ind == 'back_jump':
-                display_indel[chrom].append(("i", pos1, pos2, v / N, chrom, i - rpll))
+    # Gate must match make_bed_output() so SKYPE_result.bed and SV_call_result.vcf
+    # report the SAME jump (DEL/DUP) call set.  This includes type4 indel graph
+    # edges embedded inside ordinary paths by --add_indel_graph.
+    for event in build_aggregated_indel_events(weights, BREAKEND_REMARKABLE_CN):
+        chrom = event["chrom"]
+        display_indel[chrom].append((
+            event["event_type"],
+            event["st"],
+            event["nd"],
+            event["weight"] / N,
+            chrom,
+            indel_event_source_label(event),
+        ))
     
     all_nclose = []
     for nclose in nclose_set:
@@ -2092,38 +2128,27 @@ def make_bed_output(output_prefix=''):
                 st, nd = point_interval(pos_b)
                 cf.writerow([chr_b, st, nd, 'Breakend', round(v / N, 2)])
 
-        for i in range(rpll, len(weights)):
+        for event in build_aggregated_indel_events(weights, BREAKEND_REMARKABLE_CN):
+            cf.writerow([
+                event["chrom"], event["st"], event["nd"],
+                'Deletion' if event["event_type"] == 'd' else 'Duplication',
+                round(event["weight"] / N, 2),
+            ])
+
+        for i in range(rpll, min(len(weights), len(tot_loc_list))):
             v = weights[i]
+            if v <= BREAKEND_REMARKABLE_CN:
+                continue
 
-            if v > BREAKEND_REMARKABLE_CN:
-                paf_loc = tot_loc_list[i]
-                event_type = paf_loc.split('/')[-2]
-
-                if event_type in {'front_jump', 'back_jump'}:
-                    with open(tot_loc_list[i], "r") as f:
-                        l = f.readline()
-                        l = l.rstrip()
-                        l = l.split("\t")
-                        
-
-                        cf.writerow([l[CHR_NAM], l[CHR_STR], l[CHR_END],
-                                        'Deletion' if event_type == 'front_jump' else 'Duplication',
-                                        round(v / N, 2)])
-
-                elif event_type == 'ecdna':
-                    continue
-
-                elif paf_loc.split('/')[-3] == '12_cent_fragment':
-                    chrom = paf_loc.split('/')[-2]
-                    info = cen_fragment_meta[chrom]
-                    if info["dir"]:
-                        st, nd = info["mid"], info["chr_len"]
-                    else:
-                        st, nd = 0, info["mid"]
-                    cf.writerow([chrom, st, nd, 'Centromere', round(v / N, 2)])
-
+            paf_loc = tot_loc_list[i]
+            if paf_loc.split('/')[-3] == '12_cent_fragment':
+                chrom = paf_loc.split('/')[-2]
+                info = cen_fragment_meta[chrom]
+                if info["dir"]:
+                    st, nd = info["mid"], info["chr_len"]
                 else:
-                    assert(False)
+                    st, nd = 0, info["mid"]
+                cf.writerow([chrom, st, nd, 'Centromere', round(v / N, 2)])
 
         for chrom, st, nd, _, depth_N, _ in build_amplicon_events(weights):
             cf.writerow([chrom, st, nd, 'Amplicon', round(depth_N, 2)])
