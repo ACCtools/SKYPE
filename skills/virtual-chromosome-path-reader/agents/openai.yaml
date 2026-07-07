@@ -1,4 +1,0 @@
-interface:
-  display_name: "Virtual Chromosome Path Reader"
-  short_description: "Read and validate SKYPE path files"
-  default_prompt: "Use $virtual-chromosome-path-reader to interpret a SKYPE 00_raw path and check its orientation consistency."
