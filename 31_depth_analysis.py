@@ -19,6 +19,7 @@ import argparse
 import collections
 import scipy.stats
 import glob
+import re
 
 
 from scipy.signal import butter, filtfilt
@@ -1391,7 +1392,6 @@ main_stat_loc = args.main_stat_loc
 TELOMERE_INFO_FILE_PATH = args.telomere_bed_path
 PREPROCESSED_PAF_FILE_PATH = args.ppc_paf_file_path
 pipeline_mode_config = load_pipeline_mode(PREFIX)
-logging.info(describe_pipeline_mode(pipeline_mode_config))
 
 RATIO_OUTLIER_FOLDER = f"{PREFIX}/11_ref_ratio_outliers/"
 front_contig_path = RATIO_OUTLIER_FOLDER+"front_jump/"
@@ -1514,7 +1514,7 @@ with open(f'{PREFIX}/cen_fragment_data.pkl', 'rb') as f:
     cen_fragment_meta = pkl.load(f)
 
 grouped_data = defaultdict(lambda: {"positions": [], "values": []})
-for i, (chrom, pos) in enumerate(chr_filt_st_list + chr_no_filt_st_list):
+for i, (chrom, pos) in enumerate(chr_filt_st_list):
     grouped_data[chrom]["positions"].append(pos)
     grouped_data[chrom]["values"].append(B[i])
 
@@ -1698,6 +1698,402 @@ def build_aggregated_indel_events(weights, min_weight=0.0):
         event for event in indel_events.values()
         if event["weight"] > min_weight
     ]
+
+
+def input_vcf_record_key(line_no, rec_id):
+    if rec_id in ("", "."):
+        return f"VCF_RECORD_{line_no}"
+    return rec_id
+
+
+def sanitize_vcf_id(value):
+    value = str(value) if value not in (None, "") else "unknown"
+    return re.sub(r"[^A-Za-z0-9_.-]+", "_", value)
+
+
+def sanitize_vcf_info_token(value):
+    return re.sub(r"[^A-Za-z0-9_.-]+", "_", str(value or "unknown"))
+
+
+def format_skype_cn(value):
+    value = float(value)
+    if abs(value) < 1e-12:
+        value = 0.0
+    return f"{value:.6g}"
+
+
+def upsert_info_fields(info_text, updates):
+    update_keys = {key for key, _ in updates}
+    items = []
+    if info_text not in ("", "."):
+        for item in info_text.split(";"):
+            if not item:
+                continue
+            key = item.split("=", 1)[0]
+            if key not in update_keys:
+                items.append(item)
+    for key, value in updates:
+        items.append(f"{key}={value}")
+    return ";".join(items) if items else "."
+
+
+def read_input_vcf_records(vcf_path):
+    header_lines = []
+    records = []
+    sanitized_to_keys = defaultdict(list)
+    with open(vcf_path, "rt") as f:
+        for line_no, line in enumerate(f, start=1):
+            line = line.rstrip("\n")
+            if line.startswith("#"):
+                header_lines.append(line)
+                continue
+            cols = line.split("\t")
+            if len(cols) < 8:
+                records.append({
+                    "line_no": line_no,
+                    "cols": cols,
+                    "key": f"VCF_RECORD_{line_no}",
+                    "malformed": True,
+                })
+                continue
+            key = input_vcf_record_key(line_no, cols[2])
+            records.append({
+                "line_no": line_no,
+                "cols": cols,
+                "key": key,
+                "malformed": False,
+            })
+            sanitized_to_keys[sanitize_vcf_id(key)].append(key)
+    return header_lines, records, sanitized_to_keys
+
+
+def load_vcf_skip_reasons():
+    skip_by_key = {}
+    skip_by_line = {}
+    skipped_path = f"{PREFIX}/vcf_mode_skipped_records.tsv"
+    if not os.path.isfile(skipped_path):
+        return skip_by_key, skip_by_line
+    with open(skipped_path, "rt") as f:
+        next(f, None)
+        for line in f:
+            cols = line.rstrip("\n").split("\t", 4)
+            if len(cols) < 4:
+                continue
+            line_no_text, rec_id, _svtype, reason = cols[:4]
+            try:
+                line_no = int(line_no_text)
+            except ValueError:
+                continue
+            skip_by_line[line_no] = reason
+            key = input_vcf_record_key(line_no, rec_id)
+            skip_by_key[key] = reason
+    return skip_by_key, skip_by_line
+
+
+def resolve_sanitized_vcf_id(sanitized_id, sanitized_to_keys):
+    return list(sanitized_to_keys.get(sanitized_id, [sanitized_id]))
+
+
+VCF_DETAIL_SIDE_ORDER = ("left", "right")
+
+
+def vcf_record_keys_from_node_name(node_name, sanitized_to_keys):
+    node_name = str(node_name)
+    if node_name.startswith("vcf_inv_"):
+        body = node_name[len("vcf_inv_"):]
+        for suffix in ("_left", "_right"):
+            if body.endswith(suffix):
+                body = body[:-len(suffix)]
+                break
+        return resolve_sanitized_vcf_id(body, sanitized_to_keys)
+
+    if node_name.startswith("vcf_bnd_"):
+        body = node_name[len("vcf_bnd_"):]
+        sanitized_ids = sorted(sanitized_to_keys, key=len, reverse=True)
+        for sanitized_id in sanitized_ids:
+            if body == sanitized_id:
+                return resolve_sanitized_vcf_id(sanitized_id, sanitized_to_keys)
+            prefix = sanitized_id + "_"
+            if not body.startswith(prefix):
+                continue
+            mate_id = body[len(prefix):]
+            if mate_id in sanitized_to_keys:
+                return (
+                    resolve_sanitized_vcf_id(sanitized_id, sanitized_to_keys)
+                    + resolve_sanitized_vcf_id(mate_id, sanitized_to_keys)
+                )
+        return resolve_sanitized_vcf_id(body, sanitized_to_keys)
+
+    return []
+
+
+def vcf_record_key_details_from_node_name(node_name, sanitized_to_keys):
+    node_name = str(node_name)
+    if not node_name.startswith("vcf_inv_"):
+        return []
+
+    body = node_name[len("vcf_inv_"):]
+    side = None
+    for suffix in ("_left", "_right"):
+        if body.endswith(suffix):
+            body = body[:-len(suffix)]
+            side = suffix[1:]
+            break
+
+    if side not in VCF_DETAIL_SIDE_ORDER:
+        return []
+    return [
+        (key, side)
+        for key in resolve_sanitized_vcf_id(body, sanitized_to_keys)
+    ]
+
+
+def event_vcf_record_keys(event):
+    keys = []
+    for value in event.get("merged_vcf_ids", []):
+        if value not in (None, "", True):
+            keys.append(str(value))
+    for key in ("vcf_id", "mate_id"):
+        value = event.get(key)
+        if value not in (None, "", True):
+            keys.append(str(value))
+    seen = set()
+    unique_keys = []
+    for key in keys:
+        if key in seen:
+            continue
+        seen.add(key)
+        unique_keys.append(key)
+    return unique_keys
+
+
+def add_vcf_cn(cn_by_key, evaluated_keys, record_keys, cn):
+    for key in record_keys:
+        if key in (None, "", True):
+            continue
+        key = str(key)
+        cn_by_key[key] = max(float(cn), cn_by_key.get(key, 0.0))
+        evaluated_keys.add(key)
+
+
+def get_vcf_type4_outlier_event(event_type, outlier_idx, vcf_type4_outlier_index):
+    return (
+        vcf_type4_outlier_index.get((event_type, outlier_idx))
+        or vcf_type4_outlier_index.get(f"{event_type}:{outlier_idx}")
+    )
+
+
+def build_vcf_annotation_cn(weights, sanitized_to_keys):
+    cn_by_key = {}
+    evaluated_keys = set()
+    detail_cn_by_key = defaultdict(dict)
+    detail_evaluated_sides_by_key = defaultdict(set)
+    detail_known_sides_by_key = defaultdict(set)
+    n_unit = float(N) if N else 0.0
+
+    def weight_to_cn(weight):
+        if n_unit == 0:
+            return 0.0
+        return max(0.0, float(weight) / n_unit)
+
+    vcf_type4_outlier_index_path = f"{PREFIX}/{VCF_TYPE4_OUTLIER_INDEX_PKL}"
+    if os.path.isfile(vcf_type4_outlier_index_path):
+        with open(vcf_type4_outlier_index_path, "rb") as f:
+            vcf_type4_outlier_index = pkl.load(f)
+    else:
+        vcf_type4_outlier_index = {}
+
+    for i, paf_loc in enumerate(tot_loc_list[:len(weights)]):
+        event_type = os.path.basename(os.path.dirname(paf_loc))
+        if event_type not in {"front_jump", "back_jump"}:
+            continue
+        basename = os.path.basename(paf_loc)
+        if not basename.endswith("_base.paf"):
+            continue
+        try:
+            outlier_idx = int(basename.split("_", 1)[0])
+        except ValueError:
+            continue
+        event = get_vcf_type4_outlier_event(event_type, outlier_idx, vcf_type4_outlier_index)
+        if event is None:
+            continue
+        add_vcf_cn(cn_by_key, evaluated_keys, event_vcf_record_keys(event), weight_to_cn(weights[i]))
+
+    for nclose in idx2nclose.values():
+        for node_idx in nclose:
+            if 0 <= int(node_idx) < len(contig_data):
+                for key, side in vcf_record_key_details_from_node_name(
+                    contig_data[int(node_idx)][CTG_NAM], sanitized_to_keys
+                ):
+                    detail_known_sides_by_key[key].add(side)
+
+    nclose_cn = defaultdict(float)
+    for i, ctr in enumerate(path_nclose_usage):
+        if i >= len(weights):
+            break
+        for nclose_idx, count in ctr.items():
+            nclose_cn[nclose_idx] += count * float(weights[i])
+
+    for nclose_idx, raw_weight in nclose_cn.items():
+        nclose = idx2nclose.get(nclose_idx)
+        if nclose is None:
+            continue
+        record_keys = []
+        detail_entries = []
+        for node_idx in nclose:
+            if 0 <= int(node_idx) < len(contig_data):
+                record_keys.extend(
+                    vcf_record_keys_from_node_name(contig_data[int(node_idx)][CTG_NAM], sanitized_to_keys)
+                )
+                detail_entries.extend(
+                    vcf_record_key_details_from_node_name(
+                        contig_data[int(node_idx)][CTG_NAM], sanitized_to_keys
+                    )
+                )
+        if record_keys:
+            cn = weight_to_cn(raw_weight)
+            add_vcf_cn(cn_by_key, evaluated_keys, record_keys, cn)
+            for key, side in detail_entries:
+                detail_known_sides_by_key[key].add(side)
+                detail_cn_by_key[key][side] = max(
+                    float(cn),
+                    float(detail_cn_by_key[key].get(side, 0.0)),
+                )
+                detail_evaluated_sides_by_key[key].add(side)
+
+    return (
+        cn_by_key,
+        evaluated_keys,
+        detail_cn_by_key,
+        detail_evaluated_sides_by_key,
+        detail_known_sides_by_key,
+    )
+
+
+def build_vcf_detail_fields(
+    key,
+    cn,
+    status,
+    record,
+    detail_cn_by_key,
+    detail_evaluated_sides_by_key,
+    detail_known_sides_by_key,
+    skip_by_key,
+    skip_by_line,
+):
+    known_sides = detail_known_sides_by_key.get(key, set())
+    if not known_sides:
+        return None, None
+
+    cn_detail = []
+    status_detail = []
+    skipped_reason = (
+        skip_by_key.get(key)
+        or skip_by_line.get(record["line_no"])
+        or "NOT_EVALUATED"
+    )
+    skipped_status = "SKIPPED_" + sanitize_vcf_info_token(skipped_reason)
+    evaluated_sides = detail_evaluated_sides_by_key.get(key, set())
+    side_cn = detail_cn_by_key.get(key, {})
+    for side in VCF_DETAIL_SIDE_ORDER:
+        cn_detail.append(format_skype_cn(side_cn.get(side, 0.0)))
+        status_detail.append("EVALUATED" if side in evaluated_sides else skipped_status)
+
+    return "|".join(cn_detail), "|".join(status_detail)
+
+
+def write_annotated_input_vcf(weights):
+    vcf_input_path = pipeline_mode_config.get("vcf_input_path")
+    if not vcf_input_path:
+        raise FileNotFoundError("VCF input mode is missing vcf_input_path in pipeline_mode.pkl")
+    if not os.path.isfile(vcf_input_path):
+        raise FileNotFoundError(f"VCF input file does not exist: {vcf_input_path}")
+
+    header_lines, records, sanitized_to_keys = read_input_vcf_records(vcf_input_path)
+    (
+        cn_by_key,
+        evaluated_keys,
+        detail_cn_by_key,
+        detail_evaluated_sides_by_key,
+        detail_known_sides_by_key,
+    ) = build_vcf_annotation_cn(weights, sanitized_to_keys)
+    skip_by_key, skip_by_line = load_vcf_skip_reasons()
+
+    has_skype_cn_header = any(line.startswith("##INFO=<ID=SKYPE_CN,") for line in header_lines)
+    has_skype_status_header = any(line.startswith("##INFO=<ID=SKYPE_STATUS,") for line in header_lines)
+    has_skype_cn_detail_header = any(line.startswith("##INFO=<ID=SKYPE_CN_DETAIL,") for line in header_lines)
+    has_skype_status_detail_header = any(line.startswith("##INFO=<ID=SKYPE_STATUS_DETAIL,") for line in header_lines)
+    has_detail_records = any(detail_known_sides_by_key.values())
+
+    with open(f"{PREFIX}/SV_benchmark_result.vcf", "wt") as out_f:
+        inserted_headers = False
+        for line in header_lines:
+            if line.startswith("#CHROM") and not inserted_headers:
+                if not has_skype_cn_header:
+                    print(
+                        '##INFO=<ID=SKYPE_CN,Number=1,Type=Float,'
+                        'Description="SKYPE normalized copy-number support">',
+                        file=out_f,
+                    )
+                if not has_skype_status_header:
+                    print(
+                        '##INFO=<ID=SKYPE_STATUS,Number=1,Type=String,'
+                        'Description="SKYPE VCF input mode evaluation status">',
+                        file=out_f,
+                    )
+                if has_detail_records and not has_skype_cn_detail_header:
+                    print(
+                        '##INFO=<ID=SKYPE_CN_DETAIL,Number=1,Type=String,'
+                        'Description="Pipe-delimited SKYPE normalized copy-number support detail. '
+                        'Only emitted for records with side-specific detail; for INV records the order is left|right">',
+                        file=out_f,
+                    )
+                if has_detail_records and not has_skype_status_detail_header:
+                    print(
+                        '##INFO=<ID=SKYPE_STATUS_DETAIL,Number=1,Type=String,'
+                        'Description="Pipe-delimited SKYPE evaluation status detail. '
+                        'Only emitted for records with side-specific detail; for INV records the order is left|right">',
+                        file=out_f,
+                    )
+                inserted_headers = True
+            print(line, file=out_f)
+
+        for record in records:
+            cols = list(record["cols"])
+            if len(cols) < 8:
+                print("\t".join(cols), file=out_f)
+                continue
+
+            key = record["key"]
+            cn = cn_by_key.get(key, 0.0)
+            if key in evaluated_keys:
+                status = "EVALUATED"
+            else:
+                reason = skip_by_key.get(key) or skip_by_line.get(record["line_no"]) or "NOT_EVALUATED"
+                status = "SKIPPED_" + sanitize_vcf_info_token(reason)
+
+            cn_detail, status_detail = build_vcf_detail_fields(
+                key,
+                cn,
+                status,
+                record,
+                detail_cn_by_key,
+                detail_evaluated_sides_by_key,
+                detail_known_sides_by_key,
+                skip_by_key,
+                skip_by_line,
+            )
+            info_updates = [
+                ("SKYPE_CN", format_skype_cn(cn)),
+                ("SKYPE_STATUS", status),
+            ]
+            if cn_detail is not None and status_detail is not None:
+                info_updates.extend([
+                    ("SKYPE_CN_DETAIL", cn_detail),
+                    ("SKYPE_STATUS_DETAIL", status_detail),
+                ])
+            cols[7] = upsert_info_fields(cols[7], info_updates)
+            print("\t".join(cols), file=out_f)
 
 
 def draw_circos_plot(fig_prefix=''):
@@ -2108,10 +2504,13 @@ def pairs_to_vcf(out_prefix=''):
         split_bnd_weights, vcf_path, adjusted_nclose_cn_std
     )
 
-pairs_to_vcf()
-if use_julia_solver:
-    pairs_to_vcf('_filter')
-    pairs_to_vcf('_cluster')
+if pipeline_mode_is_vcf_input(pipeline_mode_config):
+    write_annotated_input_vcf(weights)
+else:
+    pairs_to_vcf()
+    if use_julia_solver:
+        pairs_to_vcf('_filter')
+        pairs_to_vcf('_cluster')
 
 # Bed output for further analysis
 
@@ -2197,10 +2596,11 @@ def make_bed_output(output_prefix=''):
             cf.writerow([chrom, st, nd, 'Virtual_inversion', round(depth_N, 2)])
 
 
-make_bed_output()
-if use_julia_solver:
-    make_bed_output('_cluster')
-    make_bed_output('_filter')
+if not pipeline_mode_is_vcf_input(pipeline_mode_config):
+    make_bed_output()
+    if use_julia_solver:
+        make_bed_output('_cluster')
+        make_bed_output('_filter')
 
 # os.remove(f'{PREFIX}/matrix.h5')
 logging.info("SKYPE pipeline end")

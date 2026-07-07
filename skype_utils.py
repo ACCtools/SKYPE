@@ -28,15 +28,87 @@ PIPELINE_MODE_VARIANT = "variant"
 PIPELINE_MODE_PKL = "pipeline_mode.pkl"
 PIPELINE_MODE_NCLOSE_LIMIT = 1000
 TYPE4_INDEL_GRAPH_EDGE_PKL = "type4_indel_graph_edges.pkl"
+
+VCF_TYPE4_EVENTS_PKL = "vcf_type4_events.pkl"
+VCF_TYPE4_OUTLIER_INDEX_PKL = "vcf_type4_outlier_index.pkl"
+VCF_MODE_SUMMARY_JSON = "vcf_mode_summary.json"
+VCF_MODE_SUMMARY_TSV = "vcf_mode_summary.tsv"
+VCF_TYPE4_MIN_SPAN = 100 * K
 INDEL_MERGE_TOLERANCE = 10 * K
 RAW_VIRTUAL_INV_MIN_VAF = 0.2
+
+
+def invert_vcf_strand(strand):
+    if strand == "+":
+        return "-"
+    if strand == "-":
+        return "+"
+    raise ValueError(f"Unknown strand: {strand}")
+
+
+def vcf_strands_from_skype_dirs(dir_a, dir_b):
+    """
+    Compose VCF breakpoint STRANDS from SKYPE path directions.
+
+    SKYPE stores traversal as A_dir => B_dir. VCF-style STRANDS stores
+    the joined breakend sides, so B's side is the opposite of traversal.
+    """
+    if dir_a not in {"+", "-"} or dir_b not in {"+", "-"}:
+        raise ValueError(f"Unknown SKYPE path directions: {dir_a}, {dir_b}")
+    return dir_a + invert_vcf_strand(dir_b)
+
+
+def skype_dirs_from_vcf_strands(strands):
+    """
+    Invert VCF breakpoint STRANDS into SKYPE path directions.
+
+    Examples:
+      ++ -> +,-
+      +- -> +,+
+      -+ -> -,-
+      -- -> -,+
+    """
+    if not isinstance(strands, str) or len(strands) != 2:
+        raise ValueError(f"Malformed VCF STRANDS value: {strands}")
+    if strands[0] not in {"+", "-"} or strands[1] not in {"+", "-"}:
+        raise ValueError(f"Malformed VCF STRANDS value: {strands}")
+    return strands[0], invert_vcf_strand(strands[1])
+
+
+def skype_dirs_from_bnd_alt(alt):
+    """
+    Infer SKYPE path directions from one VCF BND ALT string.
+
+    This mirrors the ALT forms emitted by 31_depth_analysis.py:
+      t[p[ -> +,+
+      t]p] -> +,-
+      [p[t -> -,+
+      ]p]t -> -,-
+    """
+    if not alt:
+        return None
+    first_bracket = None
+    for i, char in enumerate(alt):
+        if char in "[]":
+            first_bracket = (i, char)
+            break
+    if first_bracket is None:
+        return None
+
+    bracket_idx, bracket = first_bracket
+    dir_a = "+" if bracket_idx > 0 else "-"
+    dir_b = "+" if bracket == "[" else "-"
+    return dir_a, dir_b
 
 
 def make_pipeline_mode_config(
     requested_mode=PIPELINE_MODE_KARYOTYPE,
     nclose_node_count=None,
     nclose_limit=PIPELINE_MODE_NCLOSE_LIMIT,
+    vcf_input=False,
+    vcf_input_path=None,
 ):
+    vcf_input = bool(vcf_input)
     if requested_mode not in {PIPELINE_MODE_KARYOTYPE, PIPELINE_MODE_VARIANT}:
         raise ValueError(f"Unknown pipeline mode: {requested_mode}")
 
@@ -45,7 +117,7 @@ def make_pipeline_mode_config(
         and nclose_node_count is not None
         and nclose_node_count > nclose_limit
     )
-    effective_mode = PIPELINE_MODE_VARIANT if forced_variant else requested_mode
+    effective_mode = PIPELINE_MODE_VARIANT if vcf_input or forced_variant else requested_mode
 
     return {
         "requested_mode": requested_mode,
@@ -55,6 +127,8 @@ def make_pipeline_mode_config(
         "forced_variant": forced_variant,
         "nclose_node_count": nclose_node_count,
         "nclose_limit": nclose_limit,
+        "vcf_input": vcf_input,
+        "vcf_input_path": vcf_input_path,
     }
 
 
@@ -63,11 +137,15 @@ def save_pipeline_mode(
     requested_mode=PIPELINE_MODE_KARYOTYPE,
     nclose_node_count=None,
     nclose_limit=PIPELINE_MODE_NCLOSE_LIMIT,
+    vcf_input=False,
+    vcf_input_path=None,
 ):
     config = make_pipeline_mode_config(
         requested_mode=requested_mode,
         nclose_node_count=nclose_node_count,
         nclose_limit=nclose_limit,
+        vcf_input=vcf_input,
+        vcf_input_path=vcf_input_path,
     )
     with open(_os.path.join(prefix, PIPELINE_MODE_PKL), "wb") as f:
         _pickle.dump(config, f)
@@ -76,17 +154,21 @@ def save_pipeline_mode(
 
 def load_pipeline_mode(prefix):
     path = _os.path.join(prefix, PIPELINE_MODE_PKL)
+    vcf_summary_path = _os.path.join(prefix, VCF_MODE_SUMMARY_JSON)
     if not _os.path.isfile(path):
-        return make_pipeline_mode_config()
+        return make_pipeline_mode_config(vcf_input=_os.path.isfile(vcf_summary_path))
 
     with open(path, "rb") as f:
         config = _pickle.load(f)
 
     mode = config.get("mode", config.get("requested_mode", PIPELINE_MODE_KARYOTYPE))
+    vcf_input = bool(config.get("vcf_input", False)) or _os.path.isfile(vcf_summary_path)
     loaded_config = make_pipeline_mode_config(
         requested_mode=mode,
         nclose_node_count=config.get("nclose_node_count"),
         nclose_limit=config.get("nclose_limit", PIPELINE_MODE_NCLOSE_LIMIT),
+        vcf_input=vcf_input,
+        vcf_input_path=config.get("vcf_input_path"),
     )
     loaded_config.update({
         "requested_mode": config.get("requested_mode", mode),
@@ -103,6 +185,10 @@ def pipeline_mode_is_variant(config):
     return config.get("mode") == PIPELINE_MODE_VARIANT
 
 
+def pipeline_mode_is_vcf_input(config):
+    return bool(config.get("vcf_input", False))
+
+
 def describe_pipeline_mode(config):
     text = f"Pipeline mode: {config.get('mode', PIPELINE_MODE_KARYOTYPE)}"
     requested = config.get("requested_mode")
@@ -113,6 +199,8 @@ def describe_pipeline_mode(config):
             f" forced by nclose_node_count={config.get('nclose_node_count')} "
             f"> {config.get('nclose_limit')}"
         )
+    if config.get("vcf_input"):
+        text += " (input=vcf)"
     return text
 
 

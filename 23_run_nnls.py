@@ -990,12 +990,12 @@ THREAD = args.thread
 CENSAT_PATH = args.censat_bed_path
 PAF_UTG_LOC = args.paf_utg_path
 pipeline_mode_config = load_pipeline_mode(PREFIX)
-logging.info(describe_pipeline_mode(pipeline_mode_config))
 
+VCF_INPUT_MODE = pipeline_mode_is_vcf_input(pipeline_mode_config)
 PIPELINE_23_FILTER = pipeline_mode_is_karyotype(pipeline_mode_config)
 ENABLE_RECIPROCAL_TRANSLOCATION_FILTER = PIPELINE_23_FILTER
 ENABLE_OPPOSITE_DIRECTION_DEPTH_FILTER = PIPELINE_23_FILTER
-ENABLE_HYPOTHESIS_TEST_FILTER = True # Always on
+ENABLE_HYPOTHESIS_TEST_FILTER = not VCF_INPUT_MODE
 ENABLE_CENT_FRAGMENT_FILTER = PIPELINE_23_FILTER
 ENABLE_BP_STEP_DEPTH_FILTER = PIPELINE_23_FILTER
 

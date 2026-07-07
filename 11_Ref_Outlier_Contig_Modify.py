@@ -200,11 +200,135 @@ def cs_to_cigar(cs_tag: str) -> str:
    return cigar
 
 
+def node_to_paf_row(node):
+    ref_st = min(int(node[CHR_STR]), int(node[CHR_END]))
+    ref_nd = max(int(node[CHR_STR]), int(node[CHR_END]))
+    N = max(1, ref_nd - ref_st)
+    return [
+        node[CTG_NAM], int(node[CTG_LEN]), int(node[CTG_STR]), int(node[CTG_END]),
+        node[CTG_DIR], node[CHR_NAM], int(node[CHR_LEN]), ref_st, ref_nd,
+        N, N, int(node[CTG_MAPQ]), "tp:A:P", "cs:Z:" + f":{N}"
+    ]
+
+
+def node_original_or_synthetic_paf_row(node):
+    global_idx = str(node[CTG_GLOBALIDX])
+    try:
+        paf_idx_str, row_idx_str = global_idx.split(".", 1)
+        paf_idx = int(paf_idx_str)
+        row_idx = int(row_idx_str)
+        if 0 <= paf_idx < len(paf_file) and 0 <= row_idx < len(paf_file[paf_idx]):
+            return paf_file[paf_idx][row_idx]
+    except (ValueError, IndexError):
+        pass
+    return node_to_paf_row(node)
+
+
+def row_with_cigar(row):
+    row = list(row)
+    cs_tag = next((str(item) for item in reversed(row) if str(item).startswith("cs:Z:")), None)
+    if cs_tag is None:
+        match_len = max(1, int(row[8]) - int(row[7]))
+        cs_tag = "cs:Z:" + f":{match_len}"
+        row.append(cs_tag)
+    return row + ["cg:Z:" + cs_to_cigar(cs_tag[5:])]
+
+
+def write_rows_as_paf(path, rows):
+    with open(path, "wt") as f:
+        for row in rows:
+            for value in row_with_cigar(row):
+                print(value, end="\t", file=f)
+            print("", file=f)
+
+
+def write_empty_paf(path):
+    open(path, "wt").close()
+
+
+def make_base_paf_row(chrom, ref_st, ref_nd):
+    ref_st, ref_nd = sorted((int(ref_st), int(ref_nd)))
+    N = max(1, ref_nd - ref_st)
+    return [
+        "base_contig_1", N, 0, N,
+        "+", chrom, int(chr_data[chrom]), ref_st, ref_nd,
+        N, N, 0, "tp:A:P", "cs:Z:" + f":{N}"
+    ]
+
+
+def write_base_paf(path, chrom, ref_st, ref_nd):
+    write_rows_as_paf(path, [make_base_paf_row(chrom, ref_st, ref_nd)])
+
+
+def classify_vcf_bnd_type4_pair(nclose_key, node_a_idx, node_b_idx):
+    node_a = contig_data[node_a_idx]
+    node_b = contig_data[node_b_idx]
+    if not str(node_a[CTG_NAM]).startswith("vcf_bnd_"):
+        return None
+    if node_a[CHR_NAM] != node_b[CHR_NAM]:
+        return None
+
+    pos_a = int(get_breakend_coord(node_a, 0))
+    pos_b = int(get_breakend_coord(node_b, 1))
+    st, nd = sorted((pos_a, pos_b))
+    span = nd - st
+    if span < CHUKJI_LIMIT:
+        return None
+
+    dir_a = node_a[CTG_DIR]
+    dir_b = node_b[CTG_DIR]
+    if dir_a == "+" and dir_b == "+":
+        event_type = "front_jump" if pos_a < pos_b else "back_jump"
+    elif dir_a == "-" and dir_b == "-":
+        event_type = "back_jump" if pos_a < pos_b else "front_jump"
+    else:
+        return None
+
+    indel_kind = "deletion" if event_type == "front_jump" else "insertion"
+    return {
+        "event_id": str(nclose_key),
+        "vcf_id": str(nclose_key).replace("vcf_bnd_", "", 1),
+        "svtype": "BND",
+        "event_type": event_type,
+        "indel_kind": indel_kind,
+        "chrom": node_a[CHR_NAM],
+        "st": st,
+        "nd": nd,
+        "svlen": span,
+        "source": f"VCF_BND_{nclose_key}",
+        "nodes": (int(node_a_idx), int(node_b_idx)),
+    }
+
+
+def collect_vcf_bnd_type4_events():
+    nclose_chunk_path = f"{args.prefix}/nclose_chunk_data.pkl"
+    if not os.path.isfile(nclose_chunk_path):
+        return []
+    with open(nclose_chunk_path, "rb") as f:
+        nclose_nodes, _, _ = pkl.load(f)
+
+    events = []
+    seen_spans = set()
+    for nclose_key, pair_list in nclose_nodes.items():
+        for node_a_idx, node_b_idx in pair_list:
+            event = classify_vcf_bnd_type4_pair(nclose_key, node_a_idx, node_b_idx)
+            if event is None:
+                continue
+            span_key = (
+                event["event_type"],
+                event["chrom"],
+                event["st"],
+                event["nd"],
+            )
+            if span_key in seen_spans:
+                continue
+            seen_spans.add(span_key)
+            events.append(event)
+    return events
+
+
 
 parser = argparse.ArgumentParser(description="Find reference depth of reverse contig")
-
-parser.add_argument("paf_file_path", 
-                        help="Path to the original PAF file.")
 
 parser.add_argument("reference_fai_path", 
                         help="Path to the chromosome information file.")
@@ -239,8 +363,44 @@ contig_data_size = len(contig_data)
 with open(f'{args.prefix}/conjoined_type4_ins_del.pkl', 'rb') as f:
     type4_ins, type4_del = pkl.load(file=f)
 
+vcf_type4_events_path = f"{args.prefix}/{VCF_TYPE4_EVENTS_PKL}"
+if os.path.isfile(vcf_type4_events_path):
+    with open(vcf_type4_events_path, "rb") as f:
+        vcf_type4_events = pkl.load(f)
+else:
+    vcf_type4_events = []
+vcf_bnd_type4_events = collect_vcf_bnd_type4_events()
+
+unique_vcf_type4_events = []
+seen_vcf_type4_spans = set()
+vcf_span_to_event = {}
+for event in vcf_type4_events + vcf_bnd_type4_events:
+    span_key = (
+        event.get("event_type"),
+        event.get("chrom"),
+        int(event.get("st", 0)),
+        int(event.get("nd", 0)),
+    )
+    if span_key in seen_vcf_type4_spans:
+        existing = vcf_span_to_event[span_key]
+        for key in ("vcf_id", "mate_id"):
+            if event.get(key):
+                existing.setdefault("merged_vcf_ids", []).append(event[key])
+        continue
+    seen_vcf_type4_spans.add(span_key)
+    event = dict(event)
+    merged_vcf_ids = []
+    for key in ("vcf_id", "mate_id"):
+        if event.get(key):
+            merged_vcf_ids.append(event[key])
+    if merged_vcf_ids:
+        event["merged_vcf_ids"] = merged_vcf_ids
+    vcf_span_to_event[span_key] = event
+    unique_vcf_type4_events.append(event)
+
 emitted_indel_candidates = []
 merged_indel_candidates = []
+vcf_type4_outlier_index = {}
 
 def should_emit_indel_candidate(candidate):
     for prev in emitted_indel_candidates:
@@ -267,15 +427,10 @@ while s<contig_data_size:
                     s = e+1
                     continue
                 cntfj += 1
-                with open(f"{TYPE_4_VECTOR_PATH}/front_jump/{cntfj}.paf", "wt") as f:
-                    for i in range(s, e+1):
-                        glob_paf_idx = int(contig_data[i][CTG_GLOBALIDX][0])
-                        glob_idx = int(contig_data[i][CTG_GLOBALIDX][2:])
-                        cigar_str = 'cg:Z:' + cs_to_cigar(paf_file[glob_paf_idx][glob_idx][-1][5:])
-                        for j in paf_file[glob_paf_idx][glob_idx]:
-                            print(j, end="\t", file=f)
-                        print(cigar_str, end="\t", file=f)
-                        print("", file=f)
+                write_rows_as_paf(
+                    f"{TYPE_4_VECTOR_PATH}/front_jump/{cntfj}.paf",
+                    [node_original_or_synthetic_paf_row(contig_data[i]) for i in range(s, e+1)]
+                )
                 with open(f"{TYPE_4_VECTOR_PATH}/front_jump/{cntfj}_base.paf", "wt") as f:
                     N = ref_st_ed[1] - ref_st_ed[0]
                     virtual_contig = ["base_contig_1", N, 0, N]
@@ -293,15 +448,10 @@ while s<contig_data_size:
                     s = e+1
                     continue
                 cntbj += 1
-                with open(f"{TYPE_4_VECTOR_PATH}/back_jump/{cntbj}.paf", "wt") as f:
-                    for i in range(s, e+1):
-                        glob_paf_idx = int(contig_data[i][CTG_GLOBALIDX][0])
-                        glob_idx = int(contig_data[i][CTG_GLOBALIDX][2:])
-                        cigar_str = 'cg:Z:' + cs_to_cigar(paf_file[glob_paf_idx][glob_idx][-1][5:])
-                        for j in paf_file[glob_paf_idx][glob_idx]:
-                            print(j, end="\t", file=f)
-                        print(cigar_str, end="\t", file=f)
-                        print("", file=f)
+                write_rows_as_paf(
+                    f"{TYPE_4_VECTOR_PATH}/back_jump/{cntbj}.paf",
+                    [node_original_or_synthetic_paf_row(contig_data[i]) for i in range(s, e+1)]
+                )
                 with open(f"{TYPE_4_VECTOR_PATH}/back_jump/{cntbj}_base.paf", "wt") as f:
                     N = ref_st_ed[0] - ref_st_ed[1]
                     virtual_contig = ["base_contig_1", N, 0, N]
@@ -315,6 +465,43 @@ while s<contig_data_size:
                     print("", file=f)
             
     s = e+1
+
+
+for event in unique_vcf_type4_events:
+    event = dict(event)
+    event_type = event.get("event_type")
+    chrom = event.get("chrom")
+    ref_st = int(event.get("st", 0))
+    ref_nd = int(event.get("nd", 0))
+    if event_type not in {"front_jump", "back_jump"} or chrom not in chr_data or ref_st == ref_nd:
+        logging.warning(f"Skipping malformed VCF Indel event in 11: {event}")
+        continue
+
+    base_row = make_base_paf_row(chrom, ref_st, ref_nd)
+    svtype = str(event.get("svtype", "")).upper()
+    if svtype == "INS":
+        base_rows = event.get("paf_rows") or []
+        if not base_rows:
+            raise ValueError(
+                "VCF INS type4 event is missing query PAF rows: "
+                f"{event.get('vcf_id', event)}"
+            )
+    else:
+        base_rows = [base_row]
+
+    if event_type == "front_jump":
+        cntfj += 1
+        outlier_idx = cntfj
+        write_empty_paf(f"{TYPE_4_VECTOR_PATH}/front_jump/{outlier_idx}.paf")
+        write_rows_as_paf(f"{TYPE_4_VECTOR_PATH}/front_jump/{outlier_idx}_base.paf", base_rows)
+    else:
+        cntbj += 1
+        outlier_idx = cntbj
+        write_empty_paf(f"{TYPE_4_VECTOR_PATH}/back_jump/{outlier_idx}.paf")
+        write_rows_as_paf(f"{TYPE_4_VECTOR_PATH}/back_jump/{outlier_idx}_base.paf", base_rows)
+
+    event["outlier_index"] = outlier_idx
+    vcf_type4_outlier_index[(event_type, outlier_idx)] = event
 
 
 type2_indel_cnt = 0
@@ -332,15 +519,10 @@ for s1, e1, s2, e2 in type4_ins:
         continue
 
     cntbj+=1
-    with open(f"{TYPE_4_VECTOR_PATH}/back_jump/{cntbj}_type2_merge_{type2_indel_cnt}.paf", "wt") as f:
-        for i in (s1, e2):
-            glob_paf_idx = int(contig_data[i][CTG_GLOBALIDX][0])
-            glob_idx = int(contig_data[i][CTG_GLOBALIDX][2:])
-            cigar_str = 'cg:Z:' + cs_to_cigar(paf_file[glob_paf_idx][glob_idx][-1][5:])
-            for j in paf_file[glob_paf_idx][glob_idx]:
-                print(j, end="\t", file=f)
-            print(cigar_str, end="\t", file=f)
-            print("", file=f)
+    write_rows_as_paf(
+        f"{TYPE_4_VECTOR_PATH}/back_jump/{cntbj}_type2_merge_{type2_indel_cnt}.paf",
+        [node_original_or_synthetic_paf_row(contig_data[i]) for i in (s1, e2)]
+    )
         
     with open(f"{TYPE_4_VECTOR_PATH}/back_jump/{cntbj}_base.paf", "wt") as f:
             N = ref_st - ref_nd
@@ -367,15 +549,10 @@ for s1, e1, s2, e2 in type4_del:
         continue
 
     cntfj+=1
-    with open(f"{TYPE_4_VECTOR_PATH}/front_jump/{cntfj}_type2_merge_{type2_indel_cnt}.paf", "wt") as f:
-        for i in (s1, e2):
-            glob_paf_idx = int(contig_data[i][CTG_GLOBALIDX][0])
-            glob_idx = int(contig_data[i][CTG_GLOBALIDX][2:])
-            cigar_str = 'cg:Z:' + cs_to_cigar(paf_file[glob_paf_idx][glob_idx][-1][5:])
-            for j in paf_file[glob_paf_idx][glob_idx]:
-                print(j, end="\t", file=f)
-            print(cigar_str, end="\t", file=f)
-            print("", file=f)
+    write_rows_as_paf(
+        f"{TYPE_4_VECTOR_PATH}/front_jump/{cntfj}_type2_merge_{type2_indel_cnt}.paf",
+        [node_original_or_synthetic_paf_row(contig_data[i]) for i in (s1, e2)]
+    )
         
     with open(f"{TYPE_4_VECTOR_PATH}/front_jump/{cntfj}_base.paf", "wt") as f:
             N = ref_nd - ref_st
@@ -389,8 +566,13 @@ for s1, e1, s2, e2 in type4_del:
                 print(j, end="\t", file=f)
             print("", file=f)
 
+with open(f"{args.prefix}/{VCF_TYPE4_OUTLIER_INDEX_PKL}", "wb") as f:
+    pkl.dump(vcf_type4_outlier_index, f)
+
 logging.info(f"Forward-directed outlier contig count : {cntfj}")
 logging.info(f"Backward-directed outlier contig count : {cntbj}")
+logging.info(f"VCF-derived Indel outlier count : {len(vcf_type4_outlier_index)}")
+logging.info(f"VCF BND-derived Indel outlier count : {len(vcf_bnd_type4_events)}")
 logging.info(f"Merged duplicate indel candidate count : {len(merged_indel_candidates)}")
 for candidate, prev in merged_indel_candidates[:20]:
     logging.debug(

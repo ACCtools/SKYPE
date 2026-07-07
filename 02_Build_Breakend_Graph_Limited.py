@@ -7,6 +7,8 @@ from skype_utils import *
 import shutil
 import argparse
 import subprocess
+import json
+import re
 
 import pickle as pkl
 import pandas as pd
@@ -29,8 +31,6 @@ from functools import partial
 import logging
 
 # logging 설정(레벨/포맷)은 skype_utils 에서 중앙 관리한다 (LOG_LEVEL).
-logging.info('SKYPE pipeline start')
-logging.info("02_Build_Breakend_Graph start")
 
 CTG_NAM = 0
 CTG_LEN = 1
@@ -788,8 +788,8 @@ def extract_all_repeat_contig(contig_data : list, repeat_data : dict, ctg_index 
         s = e+1
     return rpt_con
 
-def check_censat_contig(all_repeat_censat_con : set, ALIGNED_PAF_LOC_LIST : list, ORIGNAL_PAF_LOC_LIST : list, contig_data : list):
-    div_repeat_paf_name = div_repeat_paf(ORIGNAL_PAF_LOC_LIST, ALIGNED_PAF_LOC_LIST, contig_data)
+def check_censat_contig(all_repeat_censat_con : set, ALIGNED_PAF_LOC_LIST : list, ORIGINAL_PAF_LOC_LIST : list, contig_data : list):
+    div_repeat_paf_name = div_repeat_paf(ORIGINAL_PAF_LOC_LIST, ALIGNED_PAF_LOC_LIST, contig_data)
     return all_repeat_censat_con & div_repeat_paf_name
     
 def extract_bnd_contig(contig_data : list) -> set:
@@ -2535,7 +2535,7 @@ def pass_pipeline(pre_contig_data, telo_dict, telo_bound_dict, repeat_data, repe
 
 
 def extract_nclose_node(contig_data : list, bnd_contig : set, repeat_contig_name : set, \
-                        censat_contig_name : set, repeat_censat_data : dict, ALIGNED_PAF_LOC_LIST : list, ORIGNAL_PAF_LOC_LIST : list, \
+                        censat_contig_name : set, repeat_censat_data : dict, ALIGNED_PAF_LOC_LIST : list, ORIGINAL_PAF_LOC_LIST : list, \
                         telo_set : set, telo_contig : dict, chr_len : dict, asm2cov : dict) -> tuple:
     s = 0
     fake_bnd = dict()
@@ -2563,7 +2563,7 @@ def extract_nclose_node(contig_data : list, bnd_contig : set, repeat_contig_name
         return (get_corr_dir(is_for, contig_data[low_node][CTG_DIR]),
                 get_corr_dir(is_for, contig_data[high_node][CTG_DIR]))
 
-    div_repeat_paf_name = div_repeat_paf(ORIGNAL_PAF_LOC_LIST, ALIGNED_PAF_LOC_LIST, contig_data)
+    div_repeat_paf_name = div_repeat_paf(ORIGINAL_PAF_LOC_LIST, ALIGNED_PAF_LOC_LIST, contig_data)
 
     while s<contig_data_size:
         e = contig_data[s][CTG_ENDND]
@@ -3857,8 +3857,8 @@ def contig_preprocessing_00(PAF_FILE_PATH_ : list):
 
     overlap_low_split_contig = []
     if is_unitig_reduced == False:
-        ctgname2overlap = get_overlap_total_score_dict(ORIGNAL_PAF_LOC_LIST)
-        not_trust_contig_name = get_not_trust_contig_name(ORIGNAL_PAF_LOC_LIST)
+        ctgname2overlap = get_overlap_total_score_dict(ORIGINAL_PAF_LOC_LIST)
+        not_trust_contig_name = get_not_trust_contig_name(ORIGINAL_PAF_LOC_LIST)
 
         target_split_contig_nameset = set()
         for k, v in ctgname2overlap.items():
@@ -5324,6 +5324,1077 @@ def get_type4_indel_zero_dim_edge_set(selected_edges):
     return zero_dim_edge_set
 
 
+VCF_SYNTHETIC_FLANK = 1 * K
+VCF_SYNTHETIC_PAF_NAME = "vcf_synthetic.paf"
+VCF_SKIPPED_RECORDS_TSV = "vcf_mode_skipped_records.tsv"
+VCF_ORIENTATION_MISMATCH_TSV = "vcf_mode_orientation_mismatches.tsv"
+VCF_TELOMERE_PAF_NODES_TSV = "vcf_telomere_paf_nodes.tsv"
+VCF_TELOMERE_PAF_QUERY_END_SLACK = 50 * K
+VCF_TELOMERE_PAF_NCLOSE_PROXIMITY = 1 * M
+
+
+def sanitize_vcf_id(value):
+    value = str(value) if value not in (None, "") else "unknown"
+    return re.sub(r"[^A-Za-z0-9_.-]+", "_", value)
+
+
+def parse_vcf_info(info_text):
+    info = {}
+    if info_text in ("", "."):
+        return info
+    for item in info_text.split(";"):
+        if not item:
+            continue
+        if "=" in item:
+            key, value = item.split("=", 1)
+            info[key] = value
+        else:
+            info[item] = True
+    return info
+
+
+def parse_optional_int(value):
+    if value is None or value is True:
+        return None
+    value = str(value).split(",")[0]
+    try:
+        return int(float(value))
+    except ValueError:
+        return None
+
+
+def parse_vcf_bnd_alt(alt):
+    if not alt or alt in {".", "<BND>"}:
+        return None
+    brackets = [(idx, char) for idx, char in enumerate(str(alt)) if char in "[]"]
+    if len(brackets) != 2:
+        return None
+    (first_idx, first_bracket), (second_idx, second_bracket) = brackets
+    if first_bracket != second_bracket:
+        return None
+    mate = str(alt)[first_idx + 1:second_idx]
+    if ":" not in mate:
+        return None
+    chrom, pos_text = mate.rsplit(":", 1)
+    try:
+        pos = int(pos_text)
+    except ValueError:
+        return None
+
+    return {
+        "mate_chrom": chrom,
+        "mate_pos": pos,
+        "dir_a": "+" if first_idx > 0 else "-",
+        "dir_b": "+" if first_bracket == "[" else "-",
+        "shape": ("prefix" if first_idx > 0 else "suffix") + first_bracket,
+    }
+
+
+def parse_bnd_alt_mate(alt):
+    parsed = parse_vcf_bnd_alt(alt)
+    if parsed is None:
+        return None
+    return parsed["mate_chrom"], parsed["mate_pos"]
+
+
+def vcf_ins_query_name(record):
+    return f"vcf_ins_{int(record['line_no'])}_{sanitize_vcf_id(record['id'])}"
+
+
+def load_vcf_ins_alt_alignment_spans(paf_path):
+    alignments_by_query_chrom = defaultdict(lambda: defaultdict(lambda: {
+        "chrom": None,
+        "st": INF,
+        "nd": -1,
+        "score": 0,
+        "rows": 0,
+        "mapq": 0,
+    }))
+    rows_by_query = defaultdict(list)
+    if not paf_path:
+        return {}
+    if not os.path.isfile(paf_path):
+        logging.warning(f"VCF INS --alt PAF does not exist: {paf_path}")
+        return {}
+
+    with open(paf_path, "rt") as paf:
+        for line in paf:
+            cols = line.rstrip("\n").split("\t")
+            if len(cols) < 12:
+                continue
+            try:
+                qname = cols[0]
+                chrom = cols[5]
+                st, nd = sorted((int(cols[7]), int(cols[8])))
+                matches = int(cols[9])
+                block_len = int(cols[10])
+                mapq = int(cols[11])
+            except (IndexError, ValueError):
+                continue
+            if nd <= st:
+                continue
+            rows_by_query[qname].append(cols)
+            bucket = alignments_by_query_chrom[qname][chrom]
+            bucket["chrom"] = chrom
+            bucket["st"] = min(bucket["st"], st)
+            bucket["nd"] = max(bucket["nd"], nd)
+            bucket["score"] += max(matches, block_len, nd - st)
+            bucket["rows"] += 1
+            bucket["mapq"] = max(bucket["mapq"], mapq)
+
+    best_by_query = {}
+    for qname, chrom_buckets in alignments_by_query_chrom.items():
+        best = max(
+            chrom_buckets.values(),
+            key=lambda item: (
+                item["score"],
+                item["mapq"],
+                item["nd"] - item["st"],
+                -item["rows"],
+            ),
+        )
+        if best["chrom"] is not None and best["nd"] > best["st"]:
+            best = dict(best)
+            best["paf_rows"] = rows_by_query.get(qname, [])
+            best_by_query[qname] = best
+    return best_by_query
+
+
+def parse_vcf_contig_header(line):
+    if not line.startswith("##contig=<") or not line.endswith(">"):
+        return None
+    body = line[len("##contig=<"):-1]
+    fields = {}
+    for item in body.split(","):
+        if "=" in item:
+            key, value = item.split("=", 1)
+            fields[key] = value
+    if "ID" not in fields or "length" not in fields:
+        return None
+    try:
+        return fields["ID"], int(fields["length"])
+    except ValueError:
+        return None
+
+
+def read_vcf_records(vcf_path):
+    header_contigs = {}
+    records = []
+    with open(vcf_path, "rt") as f:
+        for line_no, line in enumerate(f, start=1):
+            line = line.rstrip("\n")
+            if not line:
+                continue
+            if line.startswith("##contig=<"):
+                parsed = parse_vcf_contig_header(line)
+                if parsed is not None:
+                    header_contigs[parsed[0]] = parsed[1]
+                continue
+            if line.startswith("#"):
+                continue
+            cols = line.split("\t")
+            if len(cols) < 8:
+                records.append({
+                    "line_no": line_no,
+                    "malformed": True,
+                    "malformed_reason": "fewer_than_8_columns",
+                    "raw": line,
+                })
+                continue
+            chrom, pos_text, rec_id, ref, alt, qual, filt, info_text = cols[:8]
+            try:
+                pos = int(pos_text)
+            except ValueError:
+                records.append({
+                    "line_no": line_no,
+                    "malformed": True,
+                    "malformed_reason": "bad_pos",
+                    "raw": line,
+                })
+                continue
+            info = parse_vcf_info(info_text)
+            if rec_id in ("", "."):
+                rec_id = f"VCF_RECORD_{line_no}"
+            records.append({
+                "line_no": line_no,
+                "chrom": chrom,
+                "pos": pos,
+                "id": rec_id,
+                "ref": ref,
+                "alt": alt.split(",")[0],
+                "qual": qual,
+                "filter": filt,
+                "info": info,
+                "raw": line,
+            })
+    return header_contigs, records
+
+
+def validate_vcf_reference(header_contigs, records, chr_len):
+    errors = []
+    for chrom, length in sorted(header_contigs.items(), key=lambda kv: kv[0]):
+        if chrom not in chr_len:
+            errors.append(f"{chrom}: present in VCF header but absent from reference_fai")
+        elif int(chr_len[chrom]) != int(length):
+            errors.append(f"{chrom}: VCF length {length} != FAI length {chr_len[chrom]}")
+    used_chroms = {
+        rec["chrom"] for rec in records
+        if not rec.get("malformed") and rec.get("chrom")
+    }
+    for rec in records:
+        if rec.get("malformed"):
+            continue
+        mate = parse_bnd_alt_mate(rec.get("alt"))
+        if mate is not None:
+            used_chroms.add(mate[0])
+    for chrom in sorted(used_chroms):
+        if chrom not in chr_len:
+            errors.append(f"{chrom}: used by VCF record but absent from reference_fai")
+    if errors:
+        raise ValueError("VCF/reference mismatch:\n" + "\n".join(errors))
+
+
+def endpoint_interval(pos, chrom_len, path_dir, endpoint_role):
+    pos = max(1, min(int(pos), int(chrom_len)))
+    flank = min(VCF_SYNTHETIC_FLANK, max(1, int(chrom_len)))
+    if endpoint_role == "exit":
+        if path_dir == "+":
+            ref_end = pos
+            ref_st = max(0, ref_end - flank)
+        else:
+            ref_st = pos
+            ref_end = min(int(chrom_len), ref_st + flank)
+    else:
+        if path_dir == "+":
+            ref_st = pos
+            ref_end = min(int(chrom_len), ref_st + flank)
+        else:
+            ref_end = pos
+            ref_st = max(0, ref_end - flank)
+
+    if ref_end <= ref_st:
+        if ref_st <= 0:
+            ref_st, ref_end = 0, 1
+        else:
+            ref_st, ref_end = ref_st - 1, ref_st
+    return int(ref_st), int(ref_end)
+
+
+def make_synthetic_vcf_node(contig_name, chrom, pos, path_dir, endpoint_role,
+                            chr_len, ctg_typ, idx, global_idx):
+    ref_st, ref_end = endpoint_interval(pos, chr_len[chrom], path_dir, endpoint_role)
+    ref_len = max(1, ref_end - ref_st)
+    return [
+        contig_name,
+        ref_len,
+        0,
+        ref_len,
+        path_dir,
+        chrom,
+        int(chr_len[chrom]),
+        ref_st,
+        ref_end,
+        60,
+        ctg_typ,
+        idx,
+        idx,
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        path_dir,
+        chrom,
+        f"2.{global_idx}",
+    ]
+
+
+def make_synthetic_span_node(contig_name, chrom, st, nd, path_dir,
+                             chr_len, ctg_typ, idx, global_idx):
+    st, nd = sorted((int(st), int(nd)))
+    if nd <= st:
+        nd = st + 1
+    st = max(0, min(st, int(chr_len[chrom]) - 1))
+    nd = max(st + 1, min(nd, int(chr_len[chrom])))
+    ref_len = nd - st
+    return [
+        contig_name,
+        ref_len,
+        0,
+        ref_len,
+        path_dir,
+        chrom,
+        int(chr_len[chrom]),
+        st,
+        nd,
+        60,
+        ctg_typ,
+        idx,
+        idx,
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        path_dir,
+        chrom,
+        f"2.{global_idx}",
+    ]
+
+
+def synthetic_node_to_paf_row(node):
+    ref_len = max(1, int(node[CHR_END]) - int(node[CHR_STR]))
+    return list(node[:9]) + [ref_len, ref_len, int(node[CTG_MAPQ]), "tp:A:P", f"cs:Z::{ref_len}"]
+
+
+def telo_data_to_dict(telo_data):
+    telo_dict = defaultdict(list)
+    for entry in telo_data:
+        telo_dict[entry[0]].append(entry[1:])
+    return telo_dict
+
+
+def telomere_label_to_name(label):
+    if label[0] == "0" or label[1] == "0":
+        return None
+    side = str(label[1])[0]
+    if side not in {"f", "b"}:
+        return None
+    return f"{label[0]}{side}"
+
+
+def no_repeat_labels(contig_data):
+    return [("0", "0") for _ in contig_data]
+
+
+def paf_row_query_terminal_side(row):
+    query_left = int(row[CTG_STR]) <= VCF_TELOMERE_PAF_QUERY_END_SLACK
+    query_right = int(row[CTG_LEN]) - int(row[CTG_END]) <= VCF_TELOMERE_PAF_QUERY_END_SLACK
+    return query_left, query_right
+
+
+def query_interval_distance(row_a, row_b):
+    if max(int(row_a[CTG_STR]), int(row_b[CTG_STR])) <= min(int(row_a[CTG_END]), int(row_b[CTG_END])):
+        return 0
+    return min(
+        abs(int(row_a[CTG_END]) - int(row_b[CTG_STR])),
+        abs(int(row_b[CTG_END]) - int(row_a[CTG_STR])),
+    )
+
+
+def interval_distance_to_loci(row, loci_by_chrom):
+    loci = loci_by_chrom.get(row[CHR_NAM], [])
+    if not loci:
+        return None
+    st, nd = sorted((int(row[CHR_STR]), int(row[CHR_END])))
+    return min(0 if st <= pos <= nd else min(abs(pos - st), abs(pos - nd)) for pos in loci)
+
+
+def build_vcf_telomere_paf_nodes(telomere_paf_path, telo_data, repeat_censat_data,
+                                 chr_len, base_idx, nclose_loci_by_chrom=None):
+    raw_rows = import_data(telomere_paf_path)
+    if not raw_rows:
+        return [], [], [], Counter()
+
+    telo_dict = telo_data_to_dict(telo_data)
+    raw_telo_labels = label_node(raw_rows, telo_dict)
+    raw_repeat_labels = no_repeat_labels(raw_rows)
+    raw_censat_labels = label_repeat_node(raw_rows, repeat_censat_data, chr_len)
+
+    terminal_telo_rows = {}
+    for raw_idx, label in enumerate(raw_telo_labels):
+        telo_name = telomere_label_to_name(label)
+        if telo_name is None:
+            continue
+        query_left, query_right = paf_row_query_terminal_side(raw_rows[raw_idx])
+        if not (query_left or query_right):
+            continue
+        terminal_telo_rows[raw_idx] = telo_name
+
+    raw_indices_by_contig = defaultdict(list)
+    for raw_idx, row in enumerate(raw_rows):
+        raw_indices_by_contig[row[CTG_NAM]].append(raw_idx)
+
+    if nclose_loci_by_chrom is not None:
+        filtered_terminal_telo_rows = {}
+        for raw_idx, telo_name in terminal_telo_rows.items():
+            same_contig_indices = raw_indices_by_contig[raw_rows[raw_idx][CTG_NAM]]
+            internal_candidates = [
+                idx for idx in same_contig_indices
+                if idx != raw_idx and telomere_label_to_name(raw_telo_labels[idx]) is None
+            ]
+            candidate_indices = [raw_idx] + internal_candidates
+            distances = [
+                interval_distance_to_loci(raw_rows[idx], nclose_loci_by_chrom)
+                for idx in candidate_indices
+            ]
+            distances = [dist for dist in distances if dist is not None]
+            if distances and min(distances) <= VCF_TELOMERE_PAF_NCLOSE_PROXIMITY:
+                filtered_terminal_telo_rows[raw_idx] = telo_name
+        terminal_telo_rows = filtered_terminal_telo_rows
+
+    selected_contigs = {raw_rows[raw_idx][CTG_NAM] for raw_idx in terminal_telo_rows}
+    if not selected_contigs:
+        return [], [], [], Counter({
+            "telomere_paf_rows": len(raw_rows),
+            "telomere_paf_contigs": 0,
+            "telomere_paf_nodes": 0,
+            "telomere_paf_edges": 0,
+        })
+
+    selected_raw_indices = [
+        idx for idx, row in enumerate(raw_rows)
+        if row[CTG_NAM] in selected_contigs
+    ]
+    selected_raw_indices.sort(key=lambda idx: (
+        raw_rows[idx][CTG_NAM],
+        int(raw_rows[idx][CTG_STR]),
+        int(raw_rows[idx][CTG_END]),
+        idx,
+    ))
+
+    raw_to_global_idx = {}
+    group_local_indices = defaultdict(list)
+    nodes = []
+    for raw_idx in selected_raw_indices:
+        row = raw_rows[raw_idx]
+        global_node_idx = base_idx + len(nodes)
+        raw_to_global_idx[raw_idx] = global_node_idx
+        group_local_indices[row[CTG_NAM]].append(global_node_idx)
+        telo_name = terminal_telo_rows.get(raw_idx, "0")
+        node = [
+            row[CTG_NAM],
+            int(row[CTG_LEN]),
+            int(row[CTG_STR]),
+            int(row[CTG_END]),
+            row[CTG_DIR],
+            row[CHR_NAM],
+            int(row[CHR_LEN]),
+            int(row[CHR_STR]),
+            int(row[CHR_END]),
+            int(row[CTG_MAPQ]),
+            3,
+            global_node_idx,
+            global_node_idx,
+            raw_telo_labels[raw_idx][0],
+            raw_telo_labels[raw_idx][1],
+            telo_name,
+            raw_repeat_labels[raw_idx][0],
+            raw_repeat_labels[raw_idx][1],
+            raw_censat_labels[raw_idx][1],
+            row[CTG_DIR],
+            row[CHR_NAM],
+            f"1.{raw_idx}",
+        ]
+        nodes.append(node)
+
+    for node in nodes:
+        group_indices = group_local_indices[node[CTG_NAM]]
+        node[CTG_STRND] = min(group_indices)
+        node[CTG_ENDND] = max(group_indices)
+
+    edges = []
+    report_rows = []
+    seen_edges = set()
+
+    def add_edge(telo_name, raw_idx, kind):
+        if raw_idx not in raw_to_global_idx:
+            return
+        node_idx = raw_to_global_idx[raw_idx]
+        key = (telo_name, node_idx)
+        if key in seen_edges:
+            return
+        seen_edges.add(key)
+        edge = (telo_name, (DIR_OUT, node_idx, 0))
+        edges.append(edge)
+        row = raw_rows[raw_idx]
+        report_rows.append((
+            kind,
+            telo_name,
+            node_idx,
+            row[CTG_NAM],
+            row[CTG_STR],
+            row[CTG_END],
+            row[CHR_NAM],
+            row[CHR_STR],
+            row[CHR_END],
+            row[CTG_DIR],
+            raw_idx,
+        ))
+
+    selected_by_contig = defaultdict(list)
+    for raw_idx in selected_raw_indices:
+        selected_by_contig[raw_rows[raw_idx][CTG_NAM]].append(raw_idx)
+
+    for raw_idx, telo_name in terminal_telo_rows.items():
+        add_edge(telo_name, raw_idx, "telomere_aln")
+
+        same_contig_indices = selected_by_contig[raw_rows[raw_idx][CTG_NAM]]
+        internal_candidates = [
+            idx for idx in same_contig_indices
+            if idx != raw_idx and telomere_label_to_name(raw_telo_labels[idx]) is None
+        ]
+        if not internal_candidates:
+            continue
+        nearest_idx = min(
+            internal_candidates,
+            key=lambda idx: (query_interval_distance(raw_rows[raw_idx], raw_rows[idx]), idx),
+        )
+        add_edge(telo_name, nearest_idx, "adjacent_internal")
+
+    metrics = Counter({
+        "telomere_paf_rows": len(raw_rows),
+        "telomere_paf_contigs": len(selected_contigs),
+        "telomere_paf_nodes": len(nodes),
+        "telomere_paf_edges": len(edges),
+    })
+    return nodes, edges, report_rows, metrics
+
+
+def annotate_synthetic_nodes(contig_data, telo_data, repeat_censat_data, chr_len):
+    if not hasattr(telo_data, "items"):
+        telo_data = telo_data_to_dict(telo_data)
+    telo_labels = label_node(contig_data, telo_data)
+    repeat_labels = no_repeat_labels(contig_data)
+    censat_labels = label_repeat_node(contig_data, repeat_censat_data, chr_len)
+    for idx, node in enumerate(contig_data):
+        node[CTG_TELCHR] = telo_labels[idx][0]
+        node[CTG_TELDIR] = telo_labels[idx][1]
+        node[CTG_RPTCHR] = repeat_labels[idx][0]
+        node[CTG_RPTCASE] = repeat_labels[idx][1]
+        node[CTG_CENSAT] = censat_labels[idx][1]
+        if node[CTG_TELCON] == "0" and str(node[CTG_NAM]).startswith("vcf_telo_"):
+            node[CTG_TELCON] = str(node[CTG_NAM])[len("vcf_telo_"):]
+
+
+def vcf_record_mate_id(record):
+    value = record["info"].get("MATE_ID", record["info"].get("MATEID"))
+    if value in (None, True, ""):
+        return None
+    return str(value).split(",")[0]
+
+
+def vcf_bnd_alt_pair(record, mate_record):
+    alt_a = parse_vcf_bnd_alt(record.get("alt"))
+    alt_b = parse_vcf_bnd_alt(mate_record.get("alt"))
+    if alt_a is None or alt_b is None:
+        return None, "malformed_BND_ALT"
+    if vcf_record_mate_id(mate_record) != record["id"]:
+        return None, "nonreciprocal_MATEID"
+    if (alt_a["mate_chrom"], alt_a["mate_pos"]) != (mate_record["chrom"], mate_record["pos"]):
+        return None, "BND_ALT_mate_coord_mismatch"
+    if (alt_b["mate_chrom"], alt_b["mate_pos"]) != (record["chrom"], record["pos"]):
+        return None, "BND_ALT_mate_coord_mismatch"
+
+    expected_mate_dirs = (
+        invert_vcf_strand(alt_a["dir_b"]),
+        invert_vcf_strand(alt_a["dir_a"]),
+    )
+    observed_mate_dirs = (alt_b["dir_a"], alt_b["dir_b"])
+    if observed_mate_dirs != expected_mate_dirs:
+        return None, "BND_ALT_orientation_mismatch"
+    return (alt_a, alt_b), None
+
+
+def vcf_bnd_type4_event_from_alt_pair(record, mate_alt):
+    if record["chrom"] != mate_alt["mate_chrom"]:
+        return None
+    pos_a = int(record["pos"])
+    pos_b = int(mate_alt["mate_pos"])
+    st, nd = sorted((pos_a, pos_b))
+    span = nd - st
+    if span < VCF_TYPE4_MIN_SPAN:
+        return None
+
+    dir_a = mate_alt["dir_a"]
+    dir_b = mate_alt["dir_b"]
+    if dir_a == "+" and dir_b == "+":
+        event_type = "front_jump" if pos_a < pos_b else "back_jump"
+    elif dir_a == "-" and dir_b == "-":
+        event_type = "back_jump" if pos_a < pos_b else "front_jump"
+    else:
+        return None
+
+    indel_kind = "deletion" if event_type == "front_jump" else "insertion"
+    mate_id = vcf_record_mate_id(record)
+    event_id = f"vcf_bnd_{sanitize_vcf_id(record['id'])}"
+    if mate_id:
+        event_id += f"_{sanitize_vcf_id(mate_id)}"
+    return {
+        "event_id": event_id,
+        "vcf_id": record["id"],
+        "mate_id": mate_id,
+        "svtype": "BND",
+        "event_type": event_type,
+        "indel_kind": indel_kind,
+        "chrom": record["chrom"],
+        "st": st,
+        "nd": nd,
+        "svlen": span,
+        "line_no": record["line_no"],
+        "source": f"VCF_BND_{event_id}",
+    }
+
+
+def add_vcf_nclose_pair(contig_data, nclose_nodes, event_name, chr_a, pos_a, dir_a,
+                        chr_b, pos_b, dir_b, chr_len, global_idx_start):
+    ctg_typ = 1 if chr_a != chr_b else 2
+    s_idx = len(contig_data)
+    e_idx = s_idx + 1
+    node_a = make_synthetic_vcf_node(
+        event_name, chr_a, pos_a, dir_a, "exit", chr_len, ctg_typ, s_idx, global_idx_start
+    )
+    node_b = make_synthetic_vcf_node(
+        event_name, chr_b, pos_b, dir_b, "entry", chr_len, ctg_typ, e_idx, global_idx_start + 1
+    )
+    node_a[CTG_STRND] = node_b[CTG_STRND] = s_idx
+    node_a[CTG_ENDND] = node_b[CTG_ENDND] = e_idx
+    contig_data.extend([node_a, node_b])
+    nclose_nodes[event_name].append((s_idx, e_idx))
+    return global_idx_start + 2
+
+
+def vcf_type4_event_from_record(record, chr_len, ins_alt_alignments=None):
+    info = record["info"]
+    svtype = str(info.get("SVTYPE", "")).upper()
+    svlen = abs(parse_optional_int(info.get("SVLEN")) or 0)
+    if svtype in {"DEL", "DUP"}:
+        end = parse_optional_int(info.get("END"))
+        if end is None:
+            return None, "missing_END"
+        chrom = record["chrom"]
+        if chrom not in chr_len:
+            return None, "unknown_chrom"
+        st, nd = sorted((int(record["pos"]), int(end)))
+        span = nd - st
+        if max(svlen, span) < VCF_TYPE4_MIN_SPAN:
+            return None, "small_indel_size"
+        event_type = "front_jump" if svtype == "DEL" else "back_jump"
+        indel_kind = "deletion" if svtype == "DEL" else "insertion"
+        return {
+            "event_id": sanitize_vcf_id(record["id"]),
+            "vcf_id": record["id"],
+            "svtype": svtype,
+            "event_type": event_type,
+            "indel_kind": indel_kind,
+            "chrom": chrom,
+            "st": st,
+            "nd": nd,
+            "svlen": svlen,
+            "line_no": record["line_no"],
+            "source": f"VCF_{sanitize_vcf_id(record['id'])}",
+        }, None
+
+    if svtype == "INS":
+        if 0 < svlen < VCF_TYPE4_MIN_SPAN:
+            return None, "small_indel_size"
+        query_name = vcf_ins_query_name(record)
+        aligned = (ins_alt_alignments or {}).get(query_name)
+        if aligned is None:
+            return None, "INS_no_alt_alignment"
+        chrom = aligned["chrom"]
+        st = int(aligned["st"])
+        nd = int(aligned["nd"])
+        if chrom not in chr_len:
+            return None, "unknown_alt_alignment_chrom"
+        span = nd - st
+        if max(svlen, span) < VCF_TYPE4_MIN_SPAN:
+            return None, "small_indel_size"
+        return {
+            "event_id": sanitize_vcf_id(record["id"]),
+            "vcf_id": record["id"],
+            "svtype": svtype,
+            "event_type": "back_jump",
+            "indel_kind": "insertion",
+            "chrom": chrom,
+            "st": st,
+            "nd": nd,
+            "svlen": svlen,
+            "line_no": record["line_no"],
+            "query_name": query_name,
+            "paf_rows": aligned.get("paf_rows", []),
+            "source": f"VCF_{sanitize_vcf_id(record['id'])}",
+        }, None
+    return None, "not_type4_svtype"
+
+
+def build_vcf_mode_inputs():
+    chr_len = find_chr_len(CHROMOSOME_INFO_FILE_PATH)
+    header_contigs, records = read_vcf_records(args.vcf_input)
+    validate_vcf_reference(header_contigs, records, chr_len)
+    vcf_ins_alt_alignments = load_vcf_ins_alt_alignment_spans(args.alt)
+
+    depth_df = pd.read_csv(
+        main_stat_loc,
+        compression="gzip",
+        comment="#",
+        sep="\t",
+        names=["chr", "st", "nd", "length", "covsite", "totaldepth", "cov", "meandepth"],
+    ).query('chr != "chrM"')
+
+    repeat_censat_data = import_censat_repeat_data(CENSAT_PATH)
+    telo_data = import_telo_data(TELOMERE_INFO_FILE_PATH, chr_len)
+
+    summary = Counter()
+    skipped_records = []
+    orientation_mismatches = []
+    contig_data = []
+    nclose_nodes = defaultdict(list)
+    yield_type4_events = []
+    global_idx = 0
+
+    records_by_id = {
+        rec["id"]: rec
+        for rec in records
+        if not rec.get("malformed")
+    }
+    consumed_bnd_ids = set()
+
+    for record in records:
+        if record.get("malformed"):
+            summary["malformed_records"] += 1
+            skipped_records.append((record.get("line_no"), ".", ".", record.get("malformed_reason"), record.get("raw", "")))
+            continue
+        info = record["info"]
+        svtype = str(info.get("SVTYPE", "")).upper()
+
+        if svtype == "BND":
+            if record["id"] in consumed_bnd_ids:
+                continue
+            mate_id = vcf_record_mate_id(record)
+            mate_record = records_by_id.get(mate_id) if mate_id else None
+            if mate_record is None:
+                summary["missing_mates"] += 1
+                skipped_records.append((record["line_no"], record["id"], svtype, "missing_mate", record["raw"]))
+                consumed_bnd_ids.add(record["id"])
+                continue
+            if str(mate_record["info"].get("SVTYPE", "")).upper() != "BND":
+                summary["malformed_records"] += 1
+                skipped_records.append((record["line_no"], record["id"], svtype, "mate_not_BND", record["raw"]))
+                consumed_bnd_ids.add(record["id"])
+                consumed_bnd_ids.add(mate_id)
+                continue
+            alt_pair, reason = vcf_bnd_alt_pair(record, mate_record)
+            if alt_pair is None:
+                summary["malformed_records"] += 2
+                skipped_records.append((record["line_no"], record["id"], svtype, reason, record["raw"]))
+                skipped_records.append((mate_record["line_no"], mate_record["id"], svtype, reason, mate_record["raw"]))
+                consumed_bnd_ids.add(record["id"])
+                consumed_bnd_ids.add(mate_id)
+                continue
+
+            alt_a, _ = alt_pair
+            if alt_a["mate_chrom"] not in chr_len or record["chrom"] not in chr_len:
+                summary["malformed_records"] += 2
+                skipped_records.append((record["line_no"], record["id"], svtype, "unknown_chrom", record["raw"]))
+                skipped_records.append((mate_record["line_no"], mate_record["id"], svtype, "unknown_chrom", mate_record["raw"]))
+                consumed_bnd_ids.add(record["id"])
+                consumed_bnd_ids.add(mate_id)
+                continue
+
+            type4_event = vcf_bnd_type4_event_from_alt_pair(record, alt_a)
+            if type4_event is not None:
+                yield_type4_events.append(type4_event)
+                summary["used_type4_events"] += 1
+                summary["used_bnd_type4_events"] += 1
+                consumed_bnd_ids.add(record["id"])
+                consumed_bnd_ids.add(mate_id)
+                continue
+
+            event_name = f"vcf_bnd_{sanitize_vcf_id(record['id'])}"
+            if mate_id:
+                event_name += f"_{sanitize_vcf_id(mate_id)}"
+            global_idx = add_vcf_nclose_pair(
+                contig_data, nclose_nodes, event_name,
+                record["chrom"], record["pos"], alt_a["dir_a"],
+                alt_a["mate_chrom"], alt_a["mate_pos"], alt_a["dir_b"],
+                chr_len, global_idx
+            )
+            summary["used_bnd_events"] += 1
+            consumed_bnd_ids.add(record["id"])
+            if mate_id:
+                consumed_bnd_ids.add(mate_id)
+            continue
+
+        if svtype == "INV":
+            end = parse_optional_int(info.get("END"))
+            if end is None:
+                summary["malformed_records"] += 1
+                skipped_records.append((record["line_no"], record["id"], svtype, "missing_END", record["raw"]))
+                continue
+            if record["chrom"] not in chr_len:
+                summary["malformed_records"] += 1
+                skipped_records.append((record["line_no"], record["id"], svtype, "unknown_chrom", record["raw"]))
+                continue
+            chrom = record["chrom"]
+            pos_a, pos_b = sorted((record["pos"], end))
+            event_name = f"vcf_inv_{sanitize_vcf_id(record['id'])}_left"
+            global_idx = add_vcf_nclose_pair(
+                contig_data, nclose_nodes, event_name,
+                chrom, pos_a, "+", chrom, pos_b, "-",
+                chr_len, global_idx
+            )
+            event_name = f"vcf_inv_{sanitize_vcf_id(record['id'])}_right"
+            global_idx = add_vcf_nclose_pair(
+                contig_data, nclose_nodes, event_name,
+                chrom, pos_a, "-", chrom, pos_b, "+",
+                chr_len, global_idx
+            )
+            summary["used_inv_events"] += 1
+            continue
+
+        event, reason = vcf_type4_event_from_record(record, chr_len, vcf_ins_alt_alignments)
+        if event is not None:
+            summary["used_type4_events"] += 1
+            yield_type4_events.append(event)
+        elif svtype == "INS" and reason == "INS_no_alt_alignment":
+            summary["skipped_ins"] += 1
+            summary["skipped_ins_no_alt_alignment"] += 1
+            skipped_records.append((record["line_no"], record["id"], svtype, reason, record["raw"]))
+        elif svtype in {"DEL", "DUP", "INS"} and reason == "small_indel_size":
+            if svtype == "INS":
+                summary["skipped_ins"] += 1
+                summary["skipped_ins_small_size"] += 1
+            summary["skipped_small_indel_size"] += 1
+            skipped_records.append((record["line_no"], record["id"], svtype, reason, record["raw"]))
+        elif reason == "not_type4_svtype":
+            summary["skipped_not_type4_svtype"] += 1
+            skipped_records.append((record["line_no"], record["id"], svtype, reason, record["raw"]))
+        elif svtype in {"DEL", "DUP", "INS"} and reason != "not_type4_svtype":
+            summary["malformed_records"] += 1
+            skipped_records.append((record["line_no"], record["id"], svtype, reason, record["raw"]))
+
+    telo_edges = []
+    telomere_paf_report_rows = []
+    telomere_paf_metrics = Counter()
+    if args.paf_file_path is not None:
+        nclose_loci_by_chrom = defaultdict(list)
+        for node in contig_data:
+            nclose_loci_by_chrom[node[CHR_NAM]].extend((int(node[CHR_STR]), int(node[CHR_END])))
+        telomere_paf_nodes, telomere_paf_edges, telomere_paf_report_rows, telomere_paf_metrics = \
+            build_vcf_telomere_paf_nodes(
+                args.paf_file_path,
+                telo_data,
+                repeat_censat_data,
+                chr_len,
+                len(contig_data),
+                nclose_loci_by_chrom,
+            )
+        contig_data.extend(telomere_paf_nodes)
+        telo_edges.extend(telomere_paf_edges)
+
+    paf_telo_names = {telo_name for telo_name, _ in telo_edges}
+    synthetic_telomere_nodes = 0
+    standard_chroms = [f"chr{i}" for i in range(1, 23)] + ["chrX"]
+    for chrom in standard_chroms:
+        if chrom not in chr_len:
+            continue
+        chrom_len = int(chr_len[chrom])
+        for side, path_dir, st, nd in (
+            ("f", "+", 0, min(VCF_SYNTHETIC_FLANK, chrom_len)),
+            ("b", "-", max(0, chrom_len - VCF_SYNTHETIC_FLANK), chrom_len),
+        ):
+            idx = len(contig_data)
+            telo_name = f"{chrom}{side}"
+            if telo_name in paf_telo_names:
+                continue
+            node = make_synthetic_span_node(
+                f"vcf_telo_{telo_name}", chrom, st, nd, path_dir,
+                chr_len, 3, idx, global_idx
+            )
+            node[CTG_TELCON] = telo_name
+            contig_data.append(node)
+            telo_edges.append((telo_name, (DIR_OUT, idx, 0)))
+            global_idx += 1
+            synthetic_telomere_nodes += 1
+
+    annotate_synthetic_nodes(contig_data, telo_data, repeat_censat_data, chr_len)
+    contig_data = [tuple(row) for row in contig_data]
+
+    with open(PREPROCESSED_PAF_FILE_PATH, "wt") as f:
+        for row in contig_data:
+            print("\t".join(map(str, row)), file=f)
+    with open(PAF_FILE_PATH[0], "wt") as f:
+        for row in contig_data:
+            print("\t".join(map(str, synthetic_node_to_paf_row(row))), file=f)
+
+    with open(f"{PREFIX}/telomere_connected_list.txt", "wt") as f:
+        for telo_name, edge in telo_edges:
+            print(telo_name, tuple(edge), sep="\t", file=f)
+    with open(f"{PREFIX}/telomere_connected_list_readable.txt", "wt") as f:
+        for telo_name, edge in telo_edges:
+            print(telo_name, edge, contig_data[edge[1]], sep="\t", file=f)
+    with open(f"{PREFIX}/{VCF_TELOMERE_PAF_NODES_TSV}", "wt") as f:
+        print("kind\ttelomere\tnode_idx\tcontig\tquery_start\tquery_end\tchrom\tref_start\tref_end\tdir\tpaf_row_idx", file=f)
+        for row in telomere_paf_report_rows:
+            print("\t".join(map(str, row)), file=f)
+
+    raw_nclose_nodes = nclose_nodes
+    all_nclose_comp = defaultdict(list)
+    for key, pair_list in nclose_nodes.items():
+        for pair in pair_list:
+            all_nclose_comp[key].append(tuple(pair))
+
+    with open(f"{PREFIX}/conjoined_type4_ins_del.pkl", "wb") as f:
+        pkl.dump(([], []), f)
+    with open(f"{PREFIX}/{VCF_TYPE4_EVENTS_PKL}", "wb") as f:
+        pkl.dump(yield_type4_events, f)
+    with open(f"{PREFIX}/indel_exclude_idx_set.pkl", "wb") as f:
+        pkl.dump(set(), f)
+
+    _, cen_fragment_meta = find_breakend_centromere(
+        repeat_censat_data,
+        chr_len,
+        depth_df,
+        raw_nclose_nodes=raw_nclose_nodes,
+        contig_data=contig_data,
+        log_context="VCF mode",
+    )
+    with open(f"{PREFIX}/cen_fragment_data.pkl", "wb") as f:
+        pkl.dump(cen_fragment_meta, f)
+
+    chr_corr, chr_rev_corr = chr_correlation_maker(contig_data)
+    telo_contig = extract_telomere_connect_contig(f"{PREFIX}/telomere_connected_list.txt")
+    telo_set = {edge[1] for edge_list in telo_contig.values() for edge in edge_list}
+    telo_node_count = len(telo_set)
+    nclose_node_count = sum(2 for pairs in nclose_nodes.values() for _ in pairs)
+
+    with open(f"{PREFIX}/all_nclose_nodes_list.txt", "wt") as f_all, \
+         open(f"{PREFIX}/compressed_nclose_nodes_list.txt", "wt") as f_comp, \
+         open(f"{PREFIX}/nclose_nodes_index.txt", "wt") as f_idx:
+        nclose_type = defaultdict(list)
+        for key, pair_list in nclose_nodes.items():
+            for pair in pair_list:
+                a, b = pair
+                ca, cb = contig_data[a], contig_data[b]
+                type_key = (ca[CHR_NAM], cb[CHR_NAM]) if chr2int(ca[CHR_NAM]) <= chr2int(cb[CHR_NAM]) else (cb[CHR_NAM], ca[CHR_NAM])
+                nclose_type[type_key].append(pair)
+                print(key, a, b, contig_data[a][CTG_TYP], file=f_idx)
+        for out_f in (f_all, f_comp):
+            for type_key, pair_list in sorted(nclose_type.items()):
+                print(f"{type_key[0]}, {type_key[1]}, {len(pair_list)}", file=out_f)
+                for pair in pair_list:
+                    a, b = pair
+                    ca, cb = contig_data[a], contig_data[b]
+                    is_for = a < b
+                    list_a = [ca[CTG_NAM], get_corr_dir(is_for, ca[CTG_DIR]), ca[CHR_STR], ca[CHR_END]]
+                    list_b = [cb[CTG_NAM], get_corr_dir(is_for, cb[CTG_DIR]), cb[CHR_STR], cb[CHR_END]]
+                    print(list_a, list_b, file=out_f)
+                print("", file=out_f)
+
+    for metric in (
+        "used_bnd_events",
+        "used_bnd_type4_events",
+        "used_inv_events",
+        "used_type4_events",
+        "skipped_ins",
+        "skipped_pure_ins",
+        "skipped_ins_small_size",
+        "skipped_ins_no_alt_alignment",
+        "skipped_small_indel_size",
+        "skipped_not_type4_svtype",
+        "missing_mates",
+        "malformed_records",
+        "orientation_mismatches",
+    ):
+        summary.setdefault(metric, 0)
+    summary.update({
+        "vcf_records": len([r for r in records if not r.get("malformed")]),
+        "nclose_pairs": sum(len(v) for v in nclose_nodes.values()),
+        "synthetic_nodes": len(contig_data),
+        "synthetic_telomere_nodes": synthetic_telomere_nodes,
+        "type4_min_span": VCF_TYPE4_MIN_SPAN,
+        "vcf_ins_alt_alignment_queries": len(vcf_ins_alt_alignments),
+    })
+    summary.update(telomere_paf_metrics)
+    with open(f"{PREFIX}/{VCF_MODE_SUMMARY_JSON}", "wt") as f:
+        json.dump(dict(summary), f, indent=2, sort_keys=True)
+    with open(f"{PREFIX}/{VCF_MODE_SUMMARY_TSV}", "wt") as f:
+        print("metric\tvalue", file=f)
+        for key, value in sorted(summary.items()):
+            print(f"{key}\t{value}", file=f)
+    with open(f"{PREFIX}/{VCF_SKIPPED_RECORDS_TSV}", "wt") as f:
+        print("line_no\tid\tsvtype\treason\traw", file=f)
+        for row in skipped_records:
+            print("\t".join(map(str, row)), file=f)
+    with open(f"{PREFIX}/{VCF_ORIENTATION_MISMATCH_TSV}", "wt") as f:
+        print("line_no\tid\tstrands\tskype_dirs_from_strands\tskype_dirs_from_alt\talt", file=f)
+        for row in orientation_mismatches:
+            print("\t".join(map(str, row)), file=f)
+
+    no_chrY = False
+    if "chrY" in set(depth_df["chr"]):
+        ydf = depth_df.query('chr == "chrY"')
+        if len(ydf) > 0:
+            no_chrY = (len(ydf.query("meandepth != 0")) / len(ydf)) < chrY_MINIMUM_RATIO
+
+    if VCF_TYPE4_MIN_SPAN % M == 0:
+        vcf_indel_min_size_label = f"{VCF_TYPE4_MIN_SPAN // M}Mbp"
+    elif VCF_TYPE4_MIN_SPAN % K == 0:
+        vcf_indel_min_size_label = f"{VCF_TYPE4_MIN_SPAN // K}Kbp"
+    else:
+        vcf_indel_min_size_label = f"{VCF_TYPE4_MIN_SPAN}bp"
+
+    ins_skip_reasons = []
+    if summary["skipped_ins_small_size"] > 0:
+        reason = f"SIZE <{vcf_indel_min_size_label}"
+        if summary["skipped_ins_small_size"] != summary["skipped_ins"]:
+            reason = f"{reason}: {summary['skipped_ins_small_size']}"
+        ins_skip_reasons.append(reason)
+    if summary["skipped_ins_no_alt_alignment"] > 0:
+        reason = "no ALT alignment"
+        if summary["skipped_ins_no_alt_alignment"] != summary["skipped_ins"]:
+            reason = f"{reason}: {summary['skipped_ins_no_alt_alignment']}"
+        ins_skip_reasons.append(reason)
+    ins_skip_detail = f" ({', '.join(ins_skip_reasons)})" if ins_skip_reasons else ""
+
+    logging.info(
+        f"VCF mode: {summary['used_bnd_events']} BND, {summary['used_inv_events']} INV, "
+        f"{summary['used_type4_events']} Indel events "
+        f"({summary['used_bnd_type4_events']} BND Indel), "
+        f"{summary['skipped_ins']} INS skipped{ins_skip_detail}"
+    )
+
+    return {
+        "df": depth_df,
+        "no_chrY": no_chrY,
+        "repeat_censat_data": repeat_censat_data,
+        "chr_len": chr_len,
+        "contig_data": contig_data,
+        "contig_data_size": len(contig_data),
+        "chr_corr": chr_corr,
+        "chr_rev_corr": chr_rev_corr,
+        "telo_contig": telo_contig,
+        "telo_node_count": telo_node_count,
+        "telo_set": telo_set,
+        "rpt_con": set(),
+        "rpt_censat_con": set(),
+        "bnd_contig": {key for key in nclose_nodes},
+        "raw_nclose_nodes": raw_nclose_nodes,
+        "nclose_nodes": nclose_nodes,
+        "nclose_start_compress": defaultdict(dict),
+        "nclose_end_compress": defaultdict(dict),
+        "vctg_dict": {},
+        "all_nclose_comp": all_nclose_comp,
+        "nclose_coverage": Counter(),
+        "nclose_compress_track": defaultdict(list),
+        "st_compress": {},
+        "ed_compress": {},
+        "uncomp_node_count": nclose_node_count,
+        "nclose_node_count": nclose_node_count,
+        "transloc_nclose_pair_count": sum(
+            1
+            for pair_list in nclose_nodes.values()
+            for a, b in pair_list
+            if contig_data[a][CHR_NAM] != contig_data[b][CHR_NAM]
+        ),
+        "indel_exclude_idx_set": set(),
+        "telo_coverage": Counter(),
+    }
+
+
 def nclose_calc():
     repeat_censat_data = import_censat_repeat_data(CENSAT_PATH)
     chr_len = find_chr_len(CHROMOSOME_INFO_FILE_PATH)
@@ -5351,14 +6422,14 @@ def nclose_calc():
     repeat_censat_data = import_repeat_data(CENSAT_PATH)
     rpt_con = extract_all_repeat_contig(contig_data, repeat_data, CTG_RPTCASE, NON_REPEAT_NOISE_RATIO)
     rpt_censat_con = extract_all_repeat_contig(contig_data, repeat_censat_data, CTG_CENSAT)
-    rpt_censat_con = check_censat_contig(rpt_censat_con, PAF_FILE_PATH, ORIGNAL_PAF_LOC_LIST, contig_data)
+    rpt_censat_con = check_censat_contig(rpt_censat_con, PAF_FILE_PATH, ORIGINAL_PAF_LOC_LIST, contig_data)
 
     bnd_contig = extract_bnd_contig(contig_data)
 
 
     # Type 1, 2, 4에 대해서 
     raw_nclose_nodes, nclose_start_compress, nclose_end_compress, vctg_dict, all_nclose_comp, nclose_coverage, nclose_compress_track = \
-        extract_nclose_node(contig_data, bnd_contig, rpt_con, rpt_censat_con, repeat_censat_data, PAF_FILE_PATH, ORIGNAL_PAF_LOC_LIST, telo_set, telo_contig, chr_len, asm2cov)
+        extract_nclose_node(contig_data, bnd_contig, rpt_con, rpt_censat_con, repeat_censat_data, PAF_FILE_PATH, ORIGINAL_PAF_LOC_LIST, telo_set, telo_contig, chr_len, asm2cov)
 
     depth_df = df if 'df' in globals() else pd.read_csv(
         main_stat_loc,
@@ -6080,7 +7151,7 @@ parser = argparse.ArgumentParser(description="Find breakend contigs with contig 
 
 # 위치 인자 정의
 parser.add_argument("paf_file_path", 
-                    help="Path to the original PAF file.")
+                    help="Path to the original PAF file. In VCF input mode, this is the reference-aligned PAF used for telomere/neotelomere anchors.")
 parser.add_argument("reference_fai_path", 
                     help="Path to the chromosome information file.")
 parser.add_argument("telomere_bed_path", 
@@ -6096,9 +7167,9 @@ parser.add_argument("prefix",
 parser.add_argument("read_bam_loc", 
                     help="Raw read alignment bam location")
 parser.add_argument("--alt", 
-                    help="Path to an alternative PAF file (optional).")
-parser.add_argument("--orignal_paf_loc", nargs='+',
-                    help="Orignal paf location to detect location (primary, alternative paf location)")
+                    help="Path to an alternative PAF file (optional). In VCF mode this is the VCF INS sequence alignment PAF.")
+parser.add_argument("--original_paf_loc", nargs='+',
+                    help="Original paf location to detect location (primary, alternative paf location)")
 parser.add_argument("-t", "--thread", 
                     help="Number of thread", type=int)
 parser.add_argument("-d", "--graph_depth", 
@@ -6134,6 +7205,9 @@ parser.add_argument("--add_indel_graph",
                     dest="add_indel_graph",
                     help="Add selected type4 indel rescue edges to the breakend graph without increasing graph dimensions.",
                     action='store_true')
+parser.add_argument("--vcf_input",
+                    help="VCF input for benchmark mode; bypass PAF-derived nclose discovery and use VCF calls instead.",
+                    default=None)
 
 mode_group = parser.add_mutually_exclusive_group()
 mode_group.add_argument("--karyotype_mode",
@@ -6150,16 +7224,26 @@ mode_group.add_argument("--variant_mode",
 
 args = parser.parse_args()
 
-# t = "02_Build_Breakend_Graph_Limited.py /home/hyunwoo/ACCtools-pipeline/90_skype_run/H1437/20_alignasm/H1437.ctg.aln.paf public_data/chm13v2.0.fa.fai public_data/chm13v2.0_telomere.bed public_data/chm13v2.0_repeat.m.bed public_data/chm13v2.0_censat_v2.1.m.bed /home/hyunwoo/ACCtools-pipeline/90_skype_run/H1437/01_depth/H1437_normalized.win.stat.gz 30_skype_pipe/H1437_23_00_00 /home/hyunwoo/ACCtools-pipeline/90_skype_run/H1437/01_depth/H1437.bam --alt /home/hyunwoo/ACCtools-pipeline/90_skype_run/H1437/20_alignasm/H1437.utg.aln.paf --orignal_paf_loc /home/hyunwoo/ACCtools-pipeline/90_skype_run/H1437/20_alignasm/H1437.ctg.paf /home/hyunwoo/ACCtools-pipeline/90_skype_run/H1437/20_alignasm/H1437.utg.paf --test --skip_bam_analysis -t 128"
+# t = "02_Build_Breakend_Graph_Limited.py /home/hyunwoo/ACCtools-pipeline/90_skype_run/H1437/20_alignasm/H1437.ctg.aln.paf public_data/chm13v2.0.fa.fai public_data/chm13v2.0_telomere.bed public_data/chm13v2.0_repeat.m.bed public_data/chm13v2.0_censat_v2.1.m.bed /home/hyunwoo/ACCtools-pipeline/90_skype_run/H1437/01_depth/H1437_normalized.win.stat.gz 30_skype_pipe/H1437_23_00_00 /home/hyunwoo/ACCtools-pipeline/90_skype_run/H1437/01_depth/H1437.bam --alt /home/hyunwoo/ACCtools-pipeline/90_skype_run/H1437/20_alignasm/H1437.utg.aln.paf --original_paf_loc /home/hyunwoo/ACCtools-pipeline/90_skype_run/H1437/20_alignasm/H1437.ctg.paf /home/hyunwoo/ACCtools-pipeline/90_skype_run/H1437/20_alignasm/H1437.utg.paf --test --skip_bam_analysis -t 128"
 # args = parser.parse_args(t.split()[1:])
 
 PREFIX = args.prefix
-REQUESTED_PIPELINE_MODE = args.pipeline_mode
+REQUESTED_PIPELINE_MODE = PIPELINE_MODE_VARIANT if args.vcf_input is not None else args.pipeline_mode
+
+initial_pipeline_mode_config = make_pipeline_mode_config(
+    requested_mode=REQUESTED_PIPELINE_MODE,
+    vcf_input=args.vcf_input is not None,
+)
+logging.info('SKYPE pipeline start')
+logging.info(describe_pipeline_mode(initial_pipeline_mode_config))
+logging.info("02_Build_Breakend_Graph start")
 
 os.makedirs(PREFIX, exist_ok=True)
 
 PAF_FILE_PATH = []
-if args.alt is None:
+if args.vcf_input is not None:
+    PAF_FILE_PATH = [f"{PREFIX}/{VCF_SYNTHETIC_PAF_NAME}", args.paf_file_path]
+elif args.alt is None:
     PAF_FILE_PATH = [args.paf_file_path]
 else:
     PAF_FILE_PATH = [args.paf_file_path, args.alt]
@@ -6169,7 +7253,7 @@ CHROMOSOME_INFO_FILE_PATH = args.reference_fai_path
 TELOMERE_INFO_FILE_PATH = args.telomere_bed_path
 REPEAT_INFO_FILE_PATH = args.repeat_bed_path
 CENSAT_PATH = args.censat_bed_path
-ORIGNAL_PAF_LOC_LIST_ = args.orignal_paf_loc
+ORIGINAL_PAF_LOC_LIST_ = args.original_paf_loc
 main_stat_loc = args.main_stat_path
 read_bam_loc = args.read_bam_loc
 PRINT_IDX_FILE = args.verbose
@@ -6177,23 +7261,36 @@ THREAD=args.thread
 SKIP_BAM_ANAL=args.skip_bam_analysis
 CHR_CHANGE_LIMIT_ABS_MAX = args.graph_depth
 
-ORIGNAL_PAF_LOC_LIST = ORIGNAL_PAF_LOC_LIST_
+ORIGINAL_PAF_LOC_LIST = ORIGINAL_PAF_LOC_LIST_
 
 if args.test:
     logging.warning("Test mode is enabled. This mode is for debugging purposes only. The results may be inaccurate and should not be trusted.")
     CHR_CHANGE_LIMIT_ABS_MAX = 2
 
-assert(len(PAF_FILE_PATH) == len(ORIGNAL_PAF_LOC_LIST))
+if args.vcf_input is None:
+    assert(len(PAF_FILE_PATH) == len(ORIGINAL_PAF_LOC_LIST))
+else:
+    ORIGINAL_PAF_LOC_LIST_ = []
+    ORIGINAL_PAF_LOC_LIST = []
 
 gfa_file_path = []
 asm2cov = Counter()
 # with open(f'{PREFIX}/asm2cov.pkl', 'rb') as f:
 #     gfa_file_path, asm2cov = pkl.load(f)
 
-ori_ctg_name_data = get_ori_ctg_name_data(PAF_FILE_PATH)
 is_unitig_reduced = False
-telo_coverage = contig_preprocessing_00(PAF_FILE_PATH)
-globals().update(nclose_calc())
+ori_ctg_name_data = []
+
+if args.vcf_input is not None:
+    if args.original_paf_loc is not None:
+        logging.warning("--original_paf_loc is ignored in VCF input mode.")
+    if args.add_indel_graph:
+        logging.warning("--add_indel_graph is ignored in VCF input mode; VCF nclose calls are used directly.")
+    globals().update(build_vcf_mode_inputs())
+else:
+    ori_ctg_name_data = get_ori_ctg_name_data(PAF_FILE_PATH)
+    telo_coverage = contig_preprocessing_00(PAF_FILE_PATH)
+    globals().update(nclose_calc())
 
 telo_connected_node_tuple = extract_telomere_connect_contig_bytuple(PREFIX+"/telomere_connected_list.txt")
 chr_fb_len_dict = defaultdict(list)
@@ -6224,7 +7321,7 @@ for idx, len_value, chr in telo_len_data:
     if len_value > 0:
         nonzero_telo_set.add(idx)
 
-if nclose_node_count > FAIL_NCLOSE_COUNT:
+if args.vcf_input is None and nclose_node_count > FAIL_NCLOSE_COUNT:
     logging.info("NClose node count is too high.")
     if len(PAF_FILE_PATH) == 1:
         logging.info("No method to reduce nclose node count.")
@@ -6234,7 +7331,7 @@ if nclose_node_count > FAIL_NCLOSE_COUNT:
         logging.info("Retrying with the primary PAF file.")
 
         PAF_FILE_PATH = [args.paf_file_path, args.paf_file_path]
-        ORIGNAL_PAF_LOC_LIST = [ORIGNAL_PAF_LOC_LIST_[0], ORIGNAL_PAF_LOC_LIST_[0]]
+        ORIGINAL_PAF_LOC_LIST = [ORIGINAL_PAF_LOC_LIST_[0], ORIGINAL_PAF_LOC_LIST_[0]]
         ori_ctg_name_data = get_ori_ctg_name_data(PAF_FILE_PATH)
 
         telo_coverage = contig_preprocessing_00(PAF_FILE_PATH)
@@ -6247,7 +7344,7 @@ if nclose_node_count > FAIL_NCLOSE_COUNT:
 selected_type4_indel_graph_edges = []
 type4_indel_zero_dim_edge_set = set()
 graph_nclose_nodes = nclose_nodes
-if args.add_indel_graph:
+if args.vcf_input is None and args.add_indel_graph:
     type4_indel_graph_candidates = collect_type4_indel_graph_candidates(
         contig_data, df, repeat_censat_data
     )
@@ -6778,7 +7875,7 @@ def run_graph_pipeline():
 last_success = run_graph_pipeline()
 if not last_success:
     logging.info('Breakend graph is too divergent.')
-    if is_unitig_reduced or len(PAF_FILE_PATH) == 1:
+    if args.vcf_input is not None or is_unitig_reduced or len(PAF_FILE_PATH) == 1:
         logging.info('Breakend path failed.')
         sys.exit(1)
     else:
@@ -6786,7 +7883,7 @@ if not last_success:
         logging.info("Retrying with the primary PAF file.")
 
         PAF_FILE_PATH = [args.paf_file_path, args.paf_file_path]
-        ORIGNAL_PAF_LOC_LIST = [ORIGNAL_PAF_LOC_LIST_[0], ORIGNAL_PAF_LOC_LIST_[0]]
+        ORIGINAL_PAF_LOC_LIST = [ORIGINAL_PAF_LOC_LIST_[0], ORIGINAL_PAF_LOC_LIST_[0]]
         ori_ctg_name_data = get_ori_ctg_name_data(PAF_FILE_PATH)
 
         telo_coverage = contig_preprocessing_00(PAF_FILE_PATH)
@@ -6862,8 +7959,9 @@ pipeline_mode_config = save_pipeline_mode(
     requested_mode=REQUESTED_PIPELINE_MODE,
     nclose_node_count=nclose_node_count,
     nclose_limit=HARD_NCLOSE_COUNT,
+    vcf_input=args.vcf_input is not None,
+    vcf_input_path=os.path.abspath(args.vcf_input) if args.vcf_input is not None else None,
 )
-logging.info(describe_pipeline_mode(pipeline_mode_config))
 
 with open(f'{PREFIX}/path_data.pkl', 'wb') as f:
     pkl.dump(path_list_dict, f)

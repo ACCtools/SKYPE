@@ -1896,7 +1896,6 @@ TELOMERE_INFO_FILE_PATH = args.telomere_bed_path
 PREPROCESSED_PAF_FILE_PATH = args.ppc_paf_file_path
 CELL_LINE = args.cell_line_name
 pipeline_mode_config = load_pipeline_mode(PREFIX)
-logging.info(describe_pipeline_mode(pipeline_mode_config))
 
 RATIO_OUTLIER_FOLDER = f"{PREFIX}/11_ref_ratio_outliers/"
 front_contig_path = RATIO_OUTLIER_FOLDER+"front_jump/"
