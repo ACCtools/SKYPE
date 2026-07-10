@@ -101,25 +101,21 @@ def chr2int(x):
 
 def import_telo_data(file_path : str, chr_len : dict) -> dict :
     fai_file = open(file_path, "r")
-    telo_data = [(0,1)]
+    telo_data = []
     for curr_data in fai_file:
         temp_list = curr_data.split("\t")
         int_induce_idx = [1, 2]
         for i in int_induce_idx:
             temp_list[i] = int(temp_list[i])
-        if temp_list[0]!=telo_data[-1][0]:
-            temp_list[2]+=TELOMERE_EXPANSION
-            temp_list.append('f')
+        if temp_list[1]>chr_len[temp_list[0]]/2:
+            temp_list[1]-=TELOMERE_EXPANSION
+            temp_list.append('b')
         else:
-            if temp_list[1]>chr_len[temp_list[0]]/2:
-                temp_list[1]-=TELOMERE_EXPANSION
-                temp_list.append('b')
-            else:
-                temp_list.append('f')
-                temp_list[2]+=TELOMERE_EXPANSION
+            temp_list.append('f')
+            temp_list[2]+=TELOMERE_EXPANSION
         telo_data.append(tuple(temp_list))
     fai_file.close()
-    return telo_data[1:]
+    return telo_data
 
 def extract_telomere_connect_contig(telo_info_path : str) -> list:
     telomere_connect_contig = []

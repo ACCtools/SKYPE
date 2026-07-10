@@ -13,13 +13,13 @@ import pickle as pkl
 
 import csv
 import ast
-import h5py
 import logging
 import argparse
 import collections
 import scipy.stats
 import glob
 import re
+import vcfpy
 
 
 from scipy.signal import butter, filtfilt
@@ -29,6 +29,7 @@ from matplotlib.projections.polar import PolarAxes
 from pycirclize.track import Track
 from collections import defaultdict
 from collections import Counter
+from collections import OrderedDict
 
 # logging 설정(레벨/포맷)은 skype_utils 에서 중앙 관리한다 (LOG_LEVEL).
 logging.info("31_depth_analysis start")
@@ -312,25 +313,21 @@ def find_chr_len(file_path : str) -> dict:
 
 def import_telo_data(file_path : str, chr_len : dict) -> dict :
     fai_file = open(file_path, "r")
-    telo_data = [(0,1)]
+    telo_data = []
     for curr_data in fai_file:
         temp_list = curr_data.split("\t")
         int_induce_idx = [1, 2]
         for i in int_induce_idx:
             temp_list[i] = int(temp_list[i])
-        if temp_list[0]!=telo_data[-1][0]:
-            temp_list[2]+=TELOMERE_EXPANSION
-            temp_list.append('f')
+        if temp_list[1]>chr_len[temp_list[0]]/2:
+            temp_list[1]-=TELOMERE_EXPANSION
+            temp_list.append('b')
         else:
-            if temp_list[1]>chr_len[temp_list[0]]/2:
-                temp_list[1]-=TELOMERE_EXPANSION
-                temp_list.append('b')
-            else:
-                temp_list.append('f')
-                temp_list[2]+=TELOMERE_EXPANSION
+            temp_list.append('f')
+            temp_list[2]+=TELOMERE_EXPANSION
         telo_data.append(tuple(temp_list))
     fai_file.close()
-    return telo_data[1:]
+    return telo_data
 
 def distance_checker(node_a : tuple, node_b : tuple) -> int :
     if max(int(node_a[CHR_STR]), int(node_b[CHR_STR])) < min(int(node_a[CHR_END]), int(node_b[CHR_END])):
@@ -506,21 +503,88 @@ def inclusive_checker(tuple_a : tuple, tuple_b : tuple) -> bool :
     else:
         return False
 
-def bnd_alt(t, mate_chr, mate_pos, form):
-    """
-    Build ALT per the 4 canonical breakend forms:
-        "t[p[", "t]p]", "]p]t", "[p[t"
-    """
-    p = f"{mate_chr}:{mate_pos}"
-    if form == "t[p[":
-        return f"{t}[{p}["
-    if form == "t]p]":
-        return f"{t}]{p}]"
-    if form == "]p]t":
-        return f"]{p}]{t}"
-    if form == "[p[t":
-        return f"[{p}[{t}"
-    assert(False)
+def ordered_mapping(*items):
+    return OrderedDict(items)
+
+
+def add_alt_header_line(header, alt_id, description):
+    header.add_line(vcfpy.AltAlleleHeaderLine.from_mapping(ordered_mapping(
+        ("ID", alt_id),
+        ("Description", description),
+    )))
+
+
+def add_info_header_line(header, info_id, number, type_, description):
+    header.add_info_line(ordered_mapping(
+        ("ID", info_id),
+        ("Number", number),
+        ("Type", type_),
+        ("Description", description),
+    ))
+
+
+def build_skype_vcf_header(contig_lengths):
+    header = vcfpy.Header(lines=[vcfpy.HeaderLine("fileformat", "VCFv4.3")])
+    add_alt_header_line(header, "BND", "Breakend")
+    add_alt_header_line(header, "INV", "Inversion")
+    add_alt_header_line(header, "DEL", "Deletion")
+    add_alt_header_line(header, "DUP", "Duplication")
+    add_info_header_line(header, "SVTYPE", 1, "String", "Type of structural variant")
+    add_info_header_line(header, "END", 1, "Integer", "End position of SV")
+    add_info_header_line(header, "SVLEN", 1, "Integer", "Length of the SV")
+    add_info_header_line(header, "WEIGHT", 1, "Float", "Depth for breakend")
+    add_info_header_line(header, "CTG_NAME", 1, "String", "Name of contig for supporting variant")
+    add_info_header_line(header, "SVCLASS", 1, "String", "SKYPE event class")
+    add_info_header_line(header, "STRANDS", 1, "String", "Breakpoint strandedness")
+    add_info_header_line(header, "MATEID", ".", "String", "ID of mate breakends")
+    add_info_header_line(header, "MERGE_MATEID", ".", "String", "IDs of merged breakends")
+    for chrom, length in contig_lengths.items():
+        header.add_contig_line(ordered_mapping(
+            ("ID", chrom),
+            ("length", int(length)),
+        ))
+    return header
+
+
+def vcf_filter_list(filter_str):
+    if filter_str in (None, "", "."):
+        return []
+    if isinstance(filter_str, str):
+        return filter_str.split(";")
+    return list(filter_str)
+
+
+def make_vcf_record(chrom, pos, sv_id, ref, alt, quality, filter_str, info):
+    return vcfpy.Record(
+        CHROM=str(chrom),
+        POS=int(pos),
+        ID=[] if sv_id in (None, "", ".") else [str(sv_id)],
+        REF=str(ref),
+        ALT=[alt],
+        QUAL=quality,
+        FILTER=vcf_filter_list(filter_str),
+        INFO=info,
+    )
+
+
+BND_ALT_FORM_TO_ORIENTATION = {
+    "t[p[": ("-", "+"),
+    "t]p]": ("-", "-"),
+    "]p]t": ("+", "-"),
+    "[p[t": ("+", "+"),
+}
+
+
+def breakend_alt(mate_chr, mate_pos, form, sequence="N"):
+    orientation, mate_orientation = BND_ALT_FORM_TO_ORIENTATION[form]
+    return vcfpy.BreakEnd(
+        str(mate_chr),
+        int(mate_pos),
+        orientation,
+        mate_orientation,
+        str(sequence),
+        True,
+    )
 
 def choose_alt_forms(dir_a, dir_b):
     """
@@ -554,27 +618,8 @@ def make_strands(dir_a, dir_b):
     b = invert_strand(dir_b) if dir_b in ('+', '-') else '.'
     return f"{a}{b}"
 
-def write_vcf_header(fh, contig_lengths):
-    fh.write("##fileformat=VCFv4.3\n")
-    fh.write('##ALT=<ID=BND,Description="Breakend">\n')
-    fh.write('##ALT=<ID=INV,Description="Inversion">\n')
-    fh.write('##ALT=<ID=DEL,Description="Deletion">\n')
-    fh.write('##ALT=<ID=DUP,Description="Duplication">\n')
-    fh.write('##INFO=<ID=SVTYPE,Number=1,Type=String,Description="Type of structural variant">\n')
-    fh.write('##INFO=<ID=END,Number=1,Type=Integer,Description="End position of SV">\n')
-    fh.write('##INFO=<ID=SVLEN,Number=1,Type=Integer,Description="Length of the SV">\n')
-    fh.write('##INFO=<ID=WEIGHT,Number=1,Type=Float,Description="Depth for breakend">\n')
-    fh.write('##INFO=<ID=CTG_NAME,Number=1,Type=String,Description="Name of contig for supporting variant">\n')
-    fh.write('##INFO=<ID=SVCLASS,Number=1,Type=String,Description="SKYPE event class">\n')
-    fh.write('##INFO=<ID=STRANDS,Number=1,Type=String,Description="Breakpoint strandedness">\n')
-    fh.write('##INFO=<ID=MATEID,Number=1,Type=String,Description="ID of mate breakend">\n')
-    fh.write('##INFO=<ID=MERGE_MATEID,Number=1,Type=String,Description="ID of merged breakend">\n')
-    for chrom, length in contig_lengths.items():
-        fh.write(f"##contig=<ID={chrom},length={length}>\n")
-    fh.write("#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n")
-
 def write_bnd_vcf_pair(
-    fh,
+    writer,
     sv_id_base,
     chr_a,
     pos_a,
@@ -595,23 +640,36 @@ def write_bnd_vcf_pair(
     sv_id_a = f"{sv_id_base}_1"
     sv_id_b = f"{sv_id_base}_2"
     ref = "N"
-    alt_a = bnd_alt(ref, chr_b, pos_b, form_a)
-    alt_b = bnd_alt(ref, chr_a, pos_a, form_b)
-
-    merge_mate_id_str = ''
+    merge_mate_id_value = None
     if merge_mate_ids:
-        merge_mate_id_str = f";MERGE_MATEID={','.join(merge_mate_ids)}"
+        merge_mate_id_value = [str(mate_id) for mate_id in merge_mate_ids]
 
-    fh.write(
-        f"{chr_a}\t{pos_a}\t{sv_id_a}\t{ref}\t{alt_a}\t{quality}\t{filter_str}\t"
-        f"SVTYPE=BND;WEIGHT={round(weight_N, 2)};CTG_NAME={ctg_name};"
-        f"STRANDS={strands};MATEID={sv_id_b}{merge_mate_id_str}\n"
+    info_a = ordered_mapping(
+        ("SVTYPE", "BND"),
+        ("WEIGHT", round(weight_N, 2)),
+        ("CTG_NAME", str(ctg_name)),
+        ("STRANDS", strands),
+        ("MATEID", [sv_id_b]),
     )
-    fh.write(
-        f"{chr_b}\t{pos_b}\t{sv_id_b}\t{ref}\t{alt_b}\t{quality}\t{filter_str}\t"
-        f"SVTYPE=BND;WEIGHT={round(weight_N, 2)};CTG_NAME={ctg_name};"
-        f"STRANDS={strands};MATEID={sv_id_a}{merge_mate_id_str}\n"
+    info_b = ordered_mapping(
+        ("SVTYPE", "BND"),
+        ("WEIGHT", round(weight_N, 2)),
+        ("CTG_NAME", str(ctg_name)),
+        ("STRANDS", strands),
+        ("MATEID", [sv_id_a]),
     )
+    if merge_mate_id_value is not None:
+        info_a["MERGE_MATEID"] = merge_mate_id_value
+        info_b["MERGE_MATEID"] = merge_mate_id_value
+
+    writer.write_record(make_vcf_record(
+        chr_a, pos_a, sv_id_a, ref, breakend_alt(chr_b, pos_b, form_a, ref),
+        quality, filter_str, info_a
+    ))
+    writer.write_record(make_vcf_record(
+        chr_b, pos_b, sv_id_b, ref, breakend_alt(chr_a, pos_a, form_b, ref),
+        quality, filter_str, info_b
+    ))
 
 def invert_strand(strand):
     return '-' if strand == '+' else '+'
@@ -1208,10 +1266,7 @@ def build_virtual_inv_events(prefix, meandepth, contig_lengths, min_depth_N=0.0,
 
 def _pairs_to_vcf(nclose_pairs, contig_data, contig_lengths, display_indel, amplicon_events, virtual_inv_events,
                   split_bnd_weights, out_vcf_path, nclose_cn_std):
-    with open(out_vcf_path, 'w') as fo:
-        # 1) 헤더 쓰기
-        write_vcf_header(fo, contig_lengths)
-
+    with vcfpy.Writer.from_path(out_vcf_path, build_skype_vcf_header(contig_lengths)) as vcf_writer:
         # 2) Translocation, Inversion 처리
         for nclose in nclose_pairs:
             # 깊이 유의성(significant_nclose) 기반 PASS/FAIL 구분 제거: balanced(copy-number-neutral)
@@ -1252,7 +1307,7 @@ def _pairs_to_vcf(nclose_pairs, contig_data, contig_lengths, display_indel, ampl
             ctg_name = a[CTG_NAM]
 
             write_bnd_vcf_pair(
-                fo,
+                vcf_writer,
                 f"SKYPE.BND.{bnd_nclose_ind}",
                 chr_a,
                 pos_a,
@@ -1279,7 +1334,7 @@ def _pairs_to_vcf(nclose_pairs, contig_data, contig_lengths, display_indel, ampl
                 ctg_name,
             ) = split_key
             write_bnd_vcf_pair(
-                fo,
+                vcf_writer,
                 f"SKYPE.BND.{parent_nclose_idx}.{split_idx}",
                 chr_a,
                 pos_a,
@@ -1327,27 +1382,63 @@ def _pairs_to_vcf(nclose_pairs, contig_data, contig_lengths, display_indel, ampl
                     if isinstance(indel_idx, int)
                     else str(indel_idx)
                 )
-                fo.write(
-                    f"{chrom}\t{lo}\t{sv_id}\tN\t{alt}\t60\t.\t"
-                    f"SVTYPE={alt[1:-1]};END={hi};SVLEN={svlen};WEIGHT={round(w, 2)};CTG_NAME={ctg_name}\n"
-                )
+                vcf_writer.write_record(make_vcf_record(
+                    chrom,
+                    lo,
+                    sv_id,
+                    "N",
+                    vcfpy.SymbolicAllele(alt[1:-1]),
+                    60,
+                    ".",
+                    ordered_mapping(
+                        ("SVTYPE", alt[1:-1]),
+                        ("END", int(hi)),
+                        ("SVLEN", int(svlen)),
+                        ("WEIGHT", round(w, 2)),
+                        ("CTG_NAME", str(ctg_name)),
+                    ),
+                ))
 
         for amplicon_counter, (chrom, st, nd, _, depth_N, amplicon_idx) in enumerate(amplicon_events, start=1):
             pos = max(1, int(min(st, nd)))
             end = max(pos, int(max(st, nd)))
-            fo.write(
-                f"{chrom}\t{pos}\tSKYPE.AMP.{amplicon_counter}\tN\t<DUP>\t60\t.\t"
-                f"SVTYPE=DUP;END={end};SVLEN={end - pos};WEIGHT={round(depth_N, 2)};"
-                f"CTG_NAME=AMPLICON_INDEX_{amplicon_idx};SVCLASS=AMPLICON\n"
-            )
+            vcf_writer.write_record(make_vcf_record(
+                chrom,
+                pos,
+                f"SKYPE.AMP.{amplicon_counter}",
+                "N",
+                vcfpy.SymbolicAllele("DUP"),
+                60,
+                ".",
+                ordered_mapping(
+                    ("SVTYPE", "DUP"),
+                    ("END", end),
+                    ("SVLEN", end - pos),
+                    ("WEIGHT", round(depth_N, 2)),
+                    ("CTG_NAME", f"AMPLICON_INDEX_{amplicon_idx}"),
+                    ("SVCLASS", "AMPLICON"),
+                ),
+            ))
 
         for inv_counter, (chrom, st, nd, _, depth_N, name) in enumerate(virtual_inv_events, start=1):
             pos = max(1, int(st))
             end = max(pos, int(nd))
-            fo.write(
-                f"{chrom}\t{pos}\tSKYPE.VINV.{inv_counter}\tN\t<INV>\t60\t.\t"
-                f"SVTYPE=INV;END={end};SVLEN={end - pos};WEIGHT={round(depth_N, 2)};CTG_NAME={name}\n"
-            )
+            vcf_writer.write_record(make_vcf_record(
+                chrom,
+                pos,
+                f"SKYPE.VINV.{inv_counter}",
+                "N",
+                vcfpy.SymbolicAllele("INV"),
+                60,
+                ".",
+                ordered_mapping(
+                    ("SVTYPE", "INV"),
+                    ("END", end),
+                    ("SVLEN", end - pos),
+                    ("WEIGHT", round(depth_N, 2)),
+                    ("CTG_NAME", str(name)),
+                ),
+            ))
 
 parser = argparse.ArgumentParser(description="SKYPE depth analysis")
 
@@ -1722,30 +1813,65 @@ def format_skype_cn(value):
     return f"{value:.6g}"
 
 
-def upsert_info_fields(info_text, updates):
-    update_keys = {key for key, _ in updates}
-    items = []
-    if info_text not in ("", "."):
-        for item in info_text.split(";"):
-            if not item:
-                continue
-            key = item.split("=", 1)[0]
-            if key not in update_keys:
-                items.append(item)
-    for key, value in updates:
-        items.append(f"{key}={value}")
-    return ";".join(items) if items else "."
+SKYPE_ANNOTATION_INFO_FIELDS = (
+    "SKYPE_CN",
+    "SKYPE_STATUS",
+    "SKYPE_CN_DETAIL",
+    "SKYPE_STATUS_DETAIL",
+)
+
+
+def add_info_header_line_if_missing(header, info_id, number, type_, description):
+    if not header.has_header_line("INFO", info_id):
+        add_info_header_line(header, info_id, number, type_, description)
+
+
+def add_skype_annotation_headers(header, include_detail_records):
+    add_info_header_line_if_missing(
+        header,
+        "SKYPE_CN",
+        1,
+        "Float",
+        "SKYPE normalized copy-number support",
+    )
+    add_info_header_line_if_missing(
+        header,
+        "SKYPE_STATUS",
+        1,
+        "String",
+        "SKYPE VCF input mode evaluation status",
+    )
+    if include_detail_records:
+        add_info_header_line_if_missing(
+            header,
+            "SKYPE_CN_DETAIL",
+            1,
+            "String",
+            "Pipe-delimited SKYPE normalized copy-number support detail. "
+            "Only emitted for records with side-specific detail; for INV records the order is left|right",
+        )
+        add_info_header_line_if_missing(
+            header,
+            "SKYPE_STATUS_DETAIL",
+            1,
+            "String",
+            "Pipe-delimited SKYPE evaluation status detail. "
+            "Only emitted for records with side-specific detail; for INV records the order is left|right",
+        )
+
+
+def clear_skype_annotation_info(record):
+    for key in SKYPE_ANNOTATION_INFO_FIELDS:
+        record.INFO.pop(key, None)
 
 
 def read_input_vcf_records(vcf_path):
-    header_lines = []
     records = []
     sanitized_to_keys = defaultdict(list)
     with open(vcf_path, "rt") as f:
         for line_no, line in enumerate(f, start=1):
             line = line.rstrip("\n")
             if line.startswith("#"):
-                header_lines.append(line)
                 continue
             cols = line.split("\t")
             if len(cols) < 8:
@@ -1764,7 +1890,7 @@ def read_input_vcf_records(vcf_path):
                 "malformed": False,
             })
             sanitized_to_keys[sanitize_vcf_id(key)].append(key)
-    return header_lines, records, sanitized_to_keys
+    return records, sanitized_to_keys
 
 
 def load_vcf_skip_reasons():
@@ -2009,7 +2135,7 @@ def write_annotated_input_vcf(weights):
     if not os.path.isfile(vcf_input_path):
         raise FileNotFoundError(f"VCF input file does not exist: {vcf_input_path}")
 
-    header_lines, records, sanitized_to_keys = read_input_vcf_records(vcf_input_path)
+    records, sanitized_to_keys = read_input_vcf_records(vcf_input_path)
     (
         cn_by_key,
         evaluated_keys,
@@ -2019,81 +2145,56 @@ def write_annotated_input_vcf(weights):
     ) = build_vcf_annotation_cn(weights, sanitized_to_keys)
     skip_by_key, skip_by_line = load_vcf_skip_reasons()
 
-    has_skype_cn_header = any(line.startswith("##INFO=<ID=SKYPE_CN,") for line in header_lines)
-    has_skype_status_header = any(line.startswith("##INFO=<ID=SKYPE_STATUS,") for line in header_lines)
-    has_skype_cn_detail_header = any(line.startswith("##INFO=<ID=SKYPE_CN_DETAIL,") for line in header_lines)
-    has_skype_status_detail_header = any(line.startswith("##INFO=<ID=SKYPE_STATUS_DETAIL,") for line in header_lines)
     has_detail_records = any(detail_known_sides_by_key.values())
 
-    with open(f"{PREFIX}/SV_benchmark_result.vcf", "wt") as out_f:
-        inserted_headers = False
-        for line in header_lines:
-            if line.startswith("#CHROM") and not inserted_headers:
-                if not has_skype_cn_header:
-                    print(
-                        '##INFO=<ID=SKYPE_CN,Number=1,Type=Float,'
-                        'Description="SKYPE normalized copy-number support">',
-                        file=out_f,
+    with vcfpy.Reader.from_path(vcf_input_path) as reader:
+        header = reader.header.copy()
+        add_skype_annotation_headers(header, has_detail_records)
+        metadata_iter = iter(records)
+        with vcfpy.Writer.from_path(f"{PREFIX}/SV_benchmark_result.vcf", header) as writer:
+            for vcf_record in reader:
+                try:
+                    record = next(metadata_iter)
+                except StopIteration:
+                    raise ValueError(
+                        "VCF metadata scan produced fewer records than vcfpy.Reader"
                     )
-                if not has_skype_status_header:
-                    print(
-                        '##INFO=<ID=SKYPE_STATUS,Number=1,Type=String,'
-                        'Description="SKYPE VCF input mode evaluation status">',
-                        file=out_f,
-                    )
-                if has_detail_records and not has_skype_cn_detail_header:
-                    print(
-                        '##INFO=<ID=SKYPE_CN_DETAIL,Number=1,Type=String,'
-                        'Description="Pipe-delimited SKYPE normalized copy-number support detail. '
-                        'Only emitted for records with side-specific detail; for INV records the order is left|right">',
-                        file=out_f,
-                    )
-                if has_detail_records and not has_skype_status_detail_header:
-                    print(
-                        '##INFO=<ID=SKYPE_STATUS_DETAIL,Number=1,Type=String,'
-                        'Description="Pipe-delimited SKYPE evaluation status detail. '
-                        'Only emitted for records with side-specific detail; for INV records the order is left|right">',
-                        file=out_f,
-                    )
-                inserted_headers = True
-            print(line, file=out_f)
 
-        for record in records:
-            cols = list(record["cols"])
-            if len(cols) < 8:
-                print("\t".join(cols), file=out_f)
-                continue
+                key = record["key"]
+                cn = cn_by_key.get(key, 0.0)
+                if key in evaluated_keys:
+                    status = "EVALUATED"
+                else:
+                    reason = skip_by_key.get(key) or skip_by_line.get(record["line_no"]) or "NOT_EVALUATED"
+                    status = "SKIPPED_" + sanitize_vcf_info_token(reason)
 
-            key = record["key"]
-            cn = cn_by_key.get(key, 0.0)
-            if key in evaluated_keys:
-                status = "EVALUATED"
-            else:
-                reason = skip_by_key.get(key) or skip_by_line.get(record["line_no"]) or "NOT_EVALUATED"
-                status = "SKIPPED_" + sanitize_vcf_info_token(reason)
+                cn_detail, status_detail = build_vcf_detail_fields(
+                    key,
+                    cn,
+                    status,
+                    record,
+                    detail_cn_by_key,
+                    detail_evaluated_sides_by_key,
+                    detail_known_sides_by_key,
+                    skip_by_key,
+                    skip_by_line,
+                )
+                clear_skype_annotation_info(vcf_record)
+                vcf_record.INFO["SKYPE_CN"] = format_skype_cn(cn)
+                vcf_record.INFO["SKYPE_STATUS"] = status
+                if cn_detail is not None and status_detail is not None:
+                    vcf_record.INFO["SKYPE_CN_DETAIL"] = cn_detail
+                    vcf_record.INFO["SKYPE_STATUS_DETAIL"] = status_detail
+                writer.write_record(vcf_record)
 
-            cn_detail, status_detail = build_vcf_detail_fields(
-                key,
-                cn,
-                status,
-                record,
-                detail_cn_by_key,
-                detail_evaluated_sides_by_key,
-                detail_known_sides_by_key,
-                skip_by_key,
-                skip_by_line,
+        try:
+            next(metadata_iter)
+        except StopIteration:
+            pass
+        else:
+            raise ValueError(
+                "VCF metadata scan produced more records than vcfpy.Reader"
             )
-            info_updates = [
-                ("SKYPE_CN", format_skype_cn(cn)),
-                ("SKYPE_STATUS", status),
-            ]
-            if cn_detail is not None and status_detail is not None:
-                info_updates.extend([
-                    ("SKYPE_CN_DETAIL", cn_detail),
-                    ("SKYPE_STATUS_DETAIL", status_detail),
-                ])
-            cols[7] = upsert_info_fields(cols[7], info_updates)
-            print("\t".join(cols), file=out_f)
 
 
 def draw_circos_plot(fig_prefix=''):

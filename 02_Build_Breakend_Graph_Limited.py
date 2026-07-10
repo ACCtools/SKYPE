@@ -189,28 +189,27 @@ def import_data2(file_path : str) -> list :
 
 def import_telo_data(file_path : str, chr_len : dict) -> dict :
     fai_file = open(file_path, "r")
-    telo_data = [(0,1)]
+    telo_data = []
     for curr_data in fai_file:
         temp_list = curr_data.split("\t")
         int_induce_idx = [1, 2]
         for i in int_induce_idx:
             temp_list[i] = int(temp_list[i])
-        if temp_list[0]!=telo_data[-1][0]:
-            temp_list[2]+=TELOMERE_EXPANSION
-            temp_list.append('f')
+        if temp_list[1]>chr_len[temp_list[0]]/2:
+            temp_list[1]-=TELOMERE_EXPANSION
+            temp_list.append('b')
         else:
-            if temp_list[1]>chr_len[temp_list[0]]/2:
-                temp_list[1]-=TELOMERE_EXPANSION
-                temp_list.append('b')
-            else:
-                temp_list.append('f')
-                temp_list[2]+=TELOMERE_EXPANSION
+            temp_list.append('f')
+            temp_list[2]+=TELOMERE_EXPANSION
         telo_data.append(tuple(temp_list))
     fai_file.close()
-    return telo_data[1:]
+    return telo_data
 
 
 def import_repeat_data_00(file_path : str) -> dict :
+    if not file_path:
+        return defaultdict(list)
+
     fai_file = open(file_path, "r")
     repeat_data = defaultdict(list)
     for curr_data in fai_file:
@@ -527,6 +526,9 @@ def get_not_trust_contig_name(original_paf_path_list: list) -> set:
     return not_using_contig
 
 def import_repeat_data(file_path : str) -> dict :
+    if not file_path:
+        return defaultdict(list)
+
     fai_file = open(file_path, "r")
     repeat_data = defaultdict(list)
     for curr_data in fai_file:
@@ -3143,6 +3145,22 @@ def extract_telomere_connect_contig_bytuple(telo_info_path : str) -> list:
             telomere_connect_contig.append((chr_info, contig_id[1]))
     
     return telomere_connect_contig
+
+
+def write_telomere_connected_outputs(prefix: str, telo_edges: list, contig_data: list) -> None:
+    telo_edge_dict = defaultdict(list)
+    with open(f"{prefix}/telomere_connected_list.txt", "wt") as f:
+        for telo_name, edge in telo_edges:
+            edge = tuple(edge)
+            telo_edge_dict[telo_name].append(edge)
+            print(telo_name, edge, sep="\t", file=f)
+
+    with open(f"{prefix}/telomere_connected_list_readable.txt", "wt") as f:
+        for telo_name, edges in telo_edge_dict.items():
+            print(telo_name, file=f)
+            for edge in edges:
+                print(tuple(contig_data[edge[1]]), file=f)
+            print("", file=f)
     
 def initialize_bnd_graph(contig_data : list, nclose_nodes : dict, telo_contig : dict) -> dict:
     # Build telo direction lookup: telo_idx → 'f' or 'b'
@@ -3503,7 +3521,7 @@ def circuit_length_calculator(circuit):
         circuit_len += abs(contig_data[curr_node][CHR_END] - contig_data[next_node][CHR_STR])
     return circuit_len
 
-def contig_preprocessing_00(PAF_FILE_PATH_ : list):
+def contig_preprocessing_00(PAF_FILE_PATH_ : list, return_telomere_state: bool = False):
 
     original_node_count = 0
 
@@ -4130,22 +4148,23 @@ def contig_preprocessing_00(PAF_FILE_PATH_ : list):
         "final",
     )
 
-    rev_telo_connected_dict = defaultdict(list)
-
-    for i in telo_connected_dict:
-        rev_telo_connected_dict[telo_connected_dict[i]].append(i)
-    
-    with open(f"{PREFIX}/telomere_connected_list_readable.txt", "wt") as f:
-        for i in rev_telo_connected_dict:
-            print(i, file=f)
-            for j in rev_telo_connected_dict[i]:
-                print(tuple(real_final_contig[j]), file=f)
-            print("", file=f)
-    
-    with open(f"{PREFIX}/telomere_connected_list.txt", "wt") as f:
-        for i in telo_connected_graph_dict:
-            for j in telo_connected_graph_dict[i]:
-                print(i, tuple(j), sep = "\t", file=f)
+    telo_edges = [
+        (telo_name, tuple(edge))
+        for telo_name, edges in telo_connected_graph_dict.items()
+        for edge in edges
+    ]
+    _, synthetic_telomere_nodes = add_missing_reference_telomeres(
+        real_final_contig,
+        telo_edges,
+        chr_len,
+        telo_data,
+        repeat_censat_data,
+    )
+    if synthetic_telomere_nodes:
+        logging.info(
+            f"Added {synthetic_telomere_nodes} missing hg38 synthetic telomere nodes"
+        )
+    write_telomere_connected_outputs(PREFIX, telo_edges, real_final_contig)
 
     real_final_mainflow = find_mainflow(real_final_contig)
     for i in real_final_contig:
@@ -4162,6 +4181,8 @@ def contig_preprocessing_00(PAF_FILE_PATH_ : list):
                 print(j, end="\t", file=f)
             print("", file=f)
 
+    if return_telomere_state:
+        return telo_coverage, real_final_contig, telo_edges
     return telo_coverage
 
 def get_corr_dir(is_for : bool, dir_str : str) -> str:
@@ -5331,6 +5352,12 @@ VCF_ORIENTATION_MISMATCH_TSV = "vcf_mode_orientation_mismatches.tsv"
 VCF_TELOMERE_PAF_NODES_TSV = "vcf_telomere_paf_nodes.tsv"
 VCF_TELOMERE_PAF_QUERY_END_SLACK = 50 * K
 VCF_TELOMERE_PAF_NCLOSE_PROXIMITY = 1 * M
+HG38_SYNTHETIC_TELOMERE_NODE_PREFIX = "hg38_telo_"
+
+REFERENCE_CHR1_LENGTHS = {
+    "hs1": 248387328,
+    "hg38": 248956422,
+}
 
 
 def sanitize_vcf_id(value):
@@ -5552,6 +5579,32 @@ def validate_vcf_reference(header_contigs, records, chr_len):
             errors.append(f"{chrom}: used by VCF record but absent from reference_fai")
     if errors:
         raise ValueError("VCF/reference mismatch:\n" + "\n".join(errors))
+
+
+def resolve_reference_by_chr1(chr_len):
+    chr1_len = chr_len.get("chr1")
+    if chr1_len is None:
+        raise ValueError("Cannot determine reference build: chr1 is missing from reference_fai")
+
+    matches = [
+        reference_name
+        for reference_name, expected_len in REFERENCE_CHR1_LENGTHS.items()
+        if int(chr1_len) == expected_len
+    ]
+    if len(matches) != 1:
+        expected = ", ".join(
+            f"{name}:chr1={length}"
+            for name, length in sorted(REFERENCE_CHR1_LENGTHS.items())
+        )
+        raise ValueError(
+            "Cannot determine reference build from chr1 length: "
+            f"observed chr1={chr1_len}; expected exactly one of {expected}"
+        )
+    return matches[0]
+
+
+def is_hg38_reference(chr_len):
+    return resolve_reference_by_chr1(chr_len) == "hg38"
 
 
 def endpoint_interval(pos, chrom_len, path_dir, endpoint_role):
@@ -5865,8 +5918,55 @@ def annotate_synthetic_nodes(contig_data, telo_data, repeat_censat_data, chr_len
         node[CTG_RPTCHR] = repeat_labels[idx][0]
         node[CTG_RPTCASE] = repeat_labels[idx][1]
         node[CTG_CENSAT] = censat_labels[idx][1]
-        if node[CTG_TELCON] == "0" and str(node[CTG_NAM]).startswith("vcf_telo_"):
-            node[CTG_TELCON] = str(node[CTG_NAM])[len("vcf_telo_"):]
+        if node[CTG_TELCON] == "0" and str(node[CTG_NAM]).startswith(HG38_SYNTHETIC_TELOMERE_NODE_PREFIX):
+            node[CTG_TELCON] = str(node[CTG_NAM])[len(HG38_SYNTHETIC_TELOMERE_NODE_PREFIX):]
+
+
+def add_missing_reference_telomeres(contig_data, telo_edges, chr_len, telo_data,
+                                    repeat_censat_data):
+    reference_name = resolve_reference_by_chr1(chr_len)
+    if reference_name != "hg38":
+        return reference_name, 0
+
+    existing_telo_names = {telo_name for telo_name, _ in telo_edges}
+    synthetic_nodes = []
+    for chrom in [f"chr{i}" for i in range(1, 23)] + ["chrX"]:
+        if chrom not in chr_len:
+            continue
+        chrom_len = int(chr_len[chrom])
+        for side, path_dir, st, nd in (
+            ("f", "+", 0, min(VCF_SYNTHETIC_FLANK, chrom_len)),
+            ("b", "-", max(0, chrom_len - VCF_SYNTHETIC_FLANK), chrom_len),
+        ):
+            telo_name = f"{chrom}{side}"
+            if telo_name in existing_telo_names:
+                continue
+
+            node_idx = len(contig_data) + len(synthetic_nodes)
+            node = make_synthetic_span_node(
+                f"{HG38_SYNTHETIC_TELOMERE_NODE_PREFIX}{telo_name}",
+                chrom,
+                st,
+                nd,
+                path_dir,
+                chr_len,
+                3,
+                node_idx,
+                node_idx,
+            )
+            node[CTG_TELCON] = telo_name
+            synthetic_nodes.append(node)
+            telo_edges.append((telo_name, (DIR_OUT, node_idx, 0)))
+            existing_telo_names.add(telo_name)
+
+    annotate_synthetic_nodes(
+        synthetic_nodes,
+        telo_data,
+        repeat_censat_data,
+        chr_len,
+    )
+    contig_data.extend(synthetic_nodes)
+    return reference_name, len(synthetic_nodes)
 
 
 def vcf_record_mate_id(record):
@@ -6020,11 +6120,11 @@ def vcf_type4_event_from_record(record, chr_len, ins_alt_alignments=None):
     return None, "not_type4_svtype"
 
 
-def build_vcf_mode_inputs():
+def build_vcf_mode_inputs(assembly_contig_data, assembly_telo_edges):
     chr_len = find_chr_len(CHROMOSOME_INFO_FILE_PATH)
     header_contigs, records = read_vcf_records(args.vcf_input)
     validate_vcf_reference(header_contigs, records, chr_len)
-    vcf_ins_alt_alignments = load_vcf_ins_alt_alignment_spans(args.alt)
+    vcf_ins_alt_alignments = load_vcf_ins_alt_alignment_spans(args.vcf_ins_aln_paf)
 
     depth_df = pd.read_csv(
         main_stat_loc,
@@ -6037,10 +6137,28 @@ def build_vcf_mode_inputs():
     repeat_censat_data = import_censat_repeat_data(CENSAT_PATH)
     telo_data = import_telo_data(TELOMERE_INFO_FILE_PATH, chr_len)
 
-    summary = Counter()
+    summary = {
+        metric: 0
+        for metric in (
+            "used_bnd_events",
+            "used_bnd_type4_events",
+            "used_inv_events",
+            "used_type4_events",
+            "skipped_ins",
+            "skipped_pure_ins",
+            "skipped_ins_small_size",
+            "skipped_ins_no_alt_alignment",
+            "skipped_small_indel_size",
+            "skipped_not_type4_svtype",
+            "missing_mates",
+            "malformed_records",
+            "orientation_mismatches",
+        )
+    }
     skipped_records = []
     orientation_mismatches = []
-    contig_data = []
+    contig_data = [list(row) for row in assembly_contig_data]
+    assembly_node_count = len(contig_data)
     nclose_nodes = defaultdict(list)
     yield_type4_events = []
     global_idx = 0
@@ -6166,66 +6284,62 @@ def build_vcf_mode_inputs():
             summary["malformed_records"] += 1
             skipped_records.append((record["line_no"], record["id"], svtype, reason, record["raw"]))
 
-    telo_edges = []
+    telo_edges = [
+        (telo_name, tuple(edge))
+        for telo_name, edge in assembly_telo_edges
+    ]
+    vcf_synthetic_node_count = len(contig_data) - assembly_node_count
+    annotate_synthetic_nodes(
+        contig_data[assembly_node_count:],
+        telo_data,
+        repeat_censat_data,
+        chr_len,
+    )
+    reference_name, synthetic_telomere_nodes = add_missing_reference_telomeres(
+        contig_data,
+        telo_edges,
+        chr_len,
+        telo_data,
+        repeat_censat_data,
+    )
+    use_synthetic_telomeres = reference_name == "hg38"
+
     telomere_paf_report_rows = []
-    telomere_paf_metrics = Counter()
-    if args.paf_file_path is not None:
-        nclose_loci_by_chrom = defaultdict(list)
-        for node in contig_data:
-            nclose_loci_by_chrom[node[CHR_NAM]].extend((int(node[CHR_STR]), int(node[CHR_END])))
-        telomere_paf_nodes, telomere_paf_edges, telomere_paf_report_rows, telomere_paf_metrics = \
-            build_vcf_telomere_paf_nodes(
-                args.paf_file_path,
-                telo_data,
-                repeat_censat_data,
-                chr_len,
-                len(contig_data),
-                nclose_loci_by_chrom,
-            )
-        contig_data.extend(telomere_paf_nodes)
-        telo_edges.extend(telomere_paf_edges)
+    for telo_name, edge in telo_edges:
+        node_idx = edge[1]
+        node = contig_data[node_idx]
+        telomere_paf_report_rows.append((
+            "non_vcf_preprocessing",
+            telo_name,
+            node_idx,
+            node[CTG_NAM],
+            node[CTG_STR],
+            node[CTG_END],
+            node[CHR_NAM],
+            node[CHR_STR],
+            node[CHR_END],
+            node[CTG_DIR],
+            node[CTG_GLOBALIDX],
+        ))
+    telomere_paf_metrics = Counter({
+        "telomere_paf_contigs": len({
+            contig_data[edge[1]][CTG_NAM]
+            for _, edge in telo_edges
+        }),
+        "telomere_paf_nodes": assembly_node_count,
+        "telomere_paf_edges": len(telo_edges),
+    })
 
-    paf_telo_names = {telo_name for telo_name, _ in telo_edges}
-    synthetic_telomere_nodes = 0
-    standard_chroms = [f"chr{i}" for i in range(1, 23)] + ["chrX"]
-    for chrom in standard_chroms:
-        if chrom not in chr_len:
-            continue
-        chrom_len = int(chr_len[chrom])
-        for side, path_dir, st, nd in (
-            ("f", "+", 0, min(VCF_SYNTHETIC_FLANK, chrom_len)),
-            ("b", "-", max(0, chrom_len - VCF_SYNTHETIC_FLANK), chrom_len),
-        ):
-            idx = len(contig_data)
-            telo_name = f"{chrom}{side}"
-            if telo_name in paf_telo_names:
-                continue
-            node = make_synthetic_span_node(
-                f"vcf_telo_{telo_name}", chrom, st, nd, path_dir,
-                chr_len, 3, idx, global_idx
-            )
-            node[CTG_TELCON] = telo_name
-            contig_data.append(node)
-            telo_edges.append((telo_name, (DIR_OUT, idx, 0)))
-            global_idx += 1
-            synthetic_telomere_nodes += 1
-
-    annotate_synthetic_nodes(contig_data, telo_data, repeat_censat_data, chr_len)
     contig_data = [tuple(row) for row in contig_data]
 
     with open(PREPROCESSED_PAF_FILE_PATH, "wt") as f:
         for row in contig_data:
             print("\t".join(map(str, row)), file=f)
-    with open(PAF_FILE_PATH[0], "wt") as f:
+    with open(VCF_SYNTHETIC_PAF_PATH, "wt") as f:
         for row in contig_data:
             print("\t".join(map(str, synthetic_node_to_paf_row(row))), file=f)
 
-    with open(f"{PREFIX}/telomere_connected_list.txt", "wt") as f:
-        for telo_name, edge in telo_edges:
-            print(telo_name, tuple(edge), sep="\t", file=f)
-    with open(f"{PREFIX}/telomere_connected_list_readable.txt", "wt") as f:
-        for telo_name, edge in telo_edges:
-            print(telo_name, edge, contig_data[edge[1]], sep="\t", file=f)
+    write_telomere_connected_outputs(PREFIX, telo_edges, contig_data)
     with open(f"{PREFIX}/{VCF_TELOMERE_PAF_NODES_TSV}", "wt") as f:
         print("kind\ttelomere\tnode_idx\tcontig\tquery_start\tquery_end\tchrom\tref_start\tref_end\tdir\tpaf_row_idx", file=f)
         for row in telomere_paf_report_rows:
@@ -6284,26 +6398,14 @@ def build_vcf_mode_inputs():
                     print(list_a, list_b, file=out_f)
                 print("", file=out_f)
 
-    for metric in (
-        "used_bnd_events",
-        "used_bnd_type4_events",
-        "used_inv_events",
-        "used_type4_events",
-        "skipped_ins",
-        "skipped_pure_ins",
-        "skipped_ins_small_size",
-        "skipped_ins_no_alt_alignment",
-        "skipped_small_indel_size",
-        "skipped_not_type4_svtype",
-        "missing_mates",
-        "malformed_records",
-        "orientation_mismatches",
-    ):
-        summary.setdefault(metric, 0)
     summary.update({
         "vcf_records": len([r for r in records if not r.get("malformed")]),
         "nclose_pairs": sum(len(v) for v in nclose_nodes.values()),
         "synthetic_nodes": len(contig_data),
+        "assembly_preprocessed_nodes": assembly_node_count,
+        "vcf_synthetic_nodes": vcf_synthetic_node_count,
+        "reference_name": reference_name,
+        "synthetic_telomere_reference_enabled": int(use_synthetic_telomeres),
         "synthetic_telomere_nodes": synthetic_telomere_nodes,
         "type4_min_span": VCF_TYPE4_MIN_SPAN,
         "vcf_ins_alt_alignment_queries": len(vcf_ins_alt_alignments),
@@ -7248,7 +7350,7 @@ elif args.alt is None:
 else:
     PAF_FILE_PATH = [args.paf_file_path, args.alt]
 
-PREPROCESSED_PAF_FILE_PATH = (PAF_FILE_PATH[0] +'.ppc.paf')
+PREPROCESSED_PAF_FILE_PATH = os.path.join(PREFIX, os.path.basename(PAF_FILE_PATH[0]) + '.ppc.paf')
 CHROMOSOME_INFO_FILE_PATH = args.reference_fai_path
 TELOMERE_INFO_FILE_PATH = args.telomere_bed_path
 REPEAT_INFO_FILE_PATH = args.repeat_bed_path
