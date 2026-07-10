@@ -110,16 +110,14 @@ MAPQ_BOUND = 60
 TELOMERE_EXPANSION = 5 * K
 TELOMERE_COMPRESS_RANGE = 100*K
 CENSAT_COMPRESSABLE_THRESHOLD = 1000*K
-SYNTHETIC_TELOMERE_FLANK = 1 * K
-HG38_CHR1_LENGTH = 248956422
-HG38_SYNTHETIC_TELOMERE_NODE_PREFIX = "hg38_telo_"
+VIRTUAL_TELOMERE_FLANK = 1 * K
+VIRTUAL_TELOMERE_NODE_PREFIX = "virtual_telo_"
 
 FORCE_TELOMERE_THRESHOLD = 10*K
 TELOMERE_CLUSTER_THRESHOLD = 500*K
 SUBTELOMERE_LENGTH = 500*K
 
 CENSAT_OUT_DIFF_RATIO = 0.30
-
 
 MIN_FLANK_SIZE_BP = 1*M
 
@@ -3142,6 +3140,95 @@ def extract_telomere_connect_contig_bytuple(telo_info_path : str) -> list:
             telomere_connect_contig.append((chr_info, contig_id[1]))
     
     return telomere_connect_contig
+
+
+def write_telomere_connected_outputs(prefix: str, telo_edges: list,
+                                      contig_data: list) -> None:
+    telo_edges_by_name = defaultdict(list)
+    with open(f"{prefix}/telomere_connected_list.txt", "wt") as f:
+        for telo_name, edge in telo_edges:
+            edge = tuple(edge)
+            telo_edges_by_name[telo_name].append(edge)
+            print(telo_name, edge, sep="\t", file=f)
+
+    with open(f"{prefix}/telomere_connected_list_readable.txt", "wt") as f:
+        for telo_name, edges in telo_edges_by_name.items():
+            print(telo_name, file=f)
+            for edge in edges:
+                print(tuple(contig_data[edge[1]]), file=f)
+            print("", file=f)
+
+
+def group_nclose_nodes_by_chrom(contig_data: list, nclose_nodes: dict) -> dict:
+    nclose_type = defaultdict(list)
+    for pair_list in nclose_nodes.values():
+        for pair in pair_list:
+            contig_a = contig_data[pair[0]]
+            contig_b = contig_data[pair[1]]
+            if chr2int(contig_a[CHR_NAM]) <= chr2int(contig_b[CHR_NAM]):
+                chrom_pair = (contig_a[CHR_NAM], contig_b[CHR_NAM])
+                normalized_pair = tuple(pair)
+            else:
+                chrom_pair = (contig_b[CHR_NAM], contig_a[CHR_NAM])
+                normalized_pair = (pair[1], pair[0])
+            nclose_type[chrom_pair].append(normalized_pair)
+    return nclose_type
+
+
+def write_nclose_nodes_list(path: str, nclose_type: dict, contig_data: list,
+                            repeat_contig_names=()) -> int:
+    node_count = 0
+    with open(path, "wt") as f:
+        for chrom_pair, pair_list in nclose_type.items():
+            print(f"{chrom_pair[0]}, {chrom_pair[1]}, {len(pair_list)}", file=f)
+            for pair in pair_list:
+                node_count += 2
+                contig_a = contig_data[pair[0]]
+                contig_b = contig_data[pair[1]]
+                is_for = pair[0] < pair[1]
+                list_a = [
+                    contig_a[CTG_NAM],
+                    get_corr_dir(is_for, contig_a[CTG_DIR]),
+                    contig_a[CHR_STR],
+                    contig_a[CHR_END],
+                ]
+                list_b = [
+                    contig_b[CTG_NAM],
+                    get_corr_dir(is_for, contig_b[CTG_DIR]),
+                    contig_b[CHR_STR],
+                    contig_b[CHR_END],
+                ]
+                if contig_a[CTG_NAM] in repeat_contig_names:
+                    print(list_a, list_b, "all_repeat", file=f)
+                else:
+                    print(list_a, list_b, file=f)
+            print("", file=f)
+    return node_count
+
+
+def write_nclose_nodes_index(path: str, nclose_nodes: dict,
+                             contig_data: list) -> int:
+    node_count = 0
+    with open(path, "wt") as f:
+        for contig_name, pair_list in nclose_nodes.items():
+            for pair in pair_list:
+                node_count += 2
+                print(
+                    contig_name,
+                    pair[0],
+                    pair[1],
+                    contig_data[pair[0]][CTG_TYP],
+                    file=f,
+                )
+    return node_count
+
+
+def write_virtual_ordinary_contig(path: str, contig_data: list) -> None:
+    with open(path, "wt") as f:
+        for contig in contig_data:
+            for field in contig:
+                print(field, end="\t", file=f)
+            print("", file=f)
     
 def initialize_bnd_graph(contig_data : list, nclose_nodes : dict, telo_contig : dict) -> dict:
     # Build telo direction lookup: telo_idx → 'f' or 'b'
@@ -3930,78 +4017,6 @@ def contig_preprocessing_00(PAF_FILE_PATH_ : list):
     logging.info(f"Final preprocessed PAF file length: {len(real_final_contig)}")
     logging.info(f"Number of virtual contigs added on preprocessing : {add_node_count}")
 
-    # raw alt PAF(args.alt = utg.aln.paf)에서 텔로미어 endpoint별로
-    # 가장 가까운 chunk 1개를 stub contig로 추가한다.
-    # CTG_TYP=3, CTG_TELCON='0'으로 두어 initial_graph_build의 closest-node 분기에서만 후보로 잡히게 함.
-    # CTG_GLOBALIDX는 cl_ind=3 prefix를 써서 div_repeat_paf / form_normal_contig 등 cl_ind<2 가드들이 자동으로 우회하도록 한다.
-    if args.alt is not None and os.path.exists(args.alt):
-        chunks_per_chr = defaultdict(list)
-        with open(args.alt, "rt") as raw_f:
-            for line in raw_f:
-                cols = line.rstrip("\n").split("\t")
-                if len(cols) < 12:
-                    continue
-                ctg_name = cols[0]
-                try:
-                    chunk = [
-                        ctg_name,        # 0  CTG_NAM
-                        int(cols[1]),    # 1  CTG_LEN
-                        int(cols[2]),    # 2  CTG_STR
-                        int(cols[3]),    # 3  CTG_END
-                        cols[4],         # 4  CTG_DIR
-                        cols[5],         # 5  CHR_NAM
-                        int(cols[6]),    # 6  CHR_LEN
-                        int(cols[7]),    # 7  CHR_STR
-                        int(cols[8]),    # 8  CHR_END
-                        int(cols[11]),   # 9  CTG_MAPQ
-                    ]
-                except (IndexError, ValueError):
-                    continue
-                chunks_per_chr[chunk[CHR_NAM]].append(chunk)
-
-        selected_stub_chunks = {}
-        for telo_key, telo_range in telo_bound_dict.items():
-            chr_name = telo_key[:-1]
-            if chr_name not in chunks_per_chr:
-                continue
-            temp_telo = (0, 0, 0, 0, 0, 0, 0, telo_range[0], telo_range[1])
-            best_dist = INF
-            best_chunk = None
-            for chunk in chunks_per_chr[chr_name]:
-                d = telo_distance_checker(chunk, temp_telo)
-                if d < best_dist:
-                    best_dist = d
-                    best_chunk = chunk
-            if best_chunk is not None:
-                key = (best_chunk[CTG_NAM], best_chunk[CTG_STR], best_chunk[CTG_END])
-                if key not in selected_stub_chunks:
-                    selected_stub_chunks[key] = best_chunk
-
-        raw_telo_stub_count = 0
-        for stub_chunk in selected_stub_chunks.values():
-            stub_idx = len(real_final_contig)
-            stub_name = f"raw_telo_stub_{stub_chunk[CTG_NAM]}_{stub_chunk[CHR_NAM]}_{stub_chunk[CHR_STR]}"
-            stub = list(stub_chunk) + [
-                3,                                  # 10 CTG_TYP
-                stub_idx,                           # 11 CTG_STRND
-                stub_idx,                           # 12 CTG_ENDND
-                '0',                                # 13 CTG_TELCHR
-                '0',                                # 14 CTG_TELDIR
-                '0',                                # 15 CTG_TELCON
-                '0',                                # 16 CTG_RPTCHR
-                '0',                                # 17 CTG_RPTCASE
-                '0',                                # 18 CTG_CENSAT
-                '0',                                # 19 CTG_MAINFLOWDIR (find_mainflow가 덮어씀)
-                '0',                                # 20 CTG_MAINFLOWCHR (find_mainflow가 덮어씀)
-                f'3.{raw_telo_stub_count}',         # 21 CTG_GLOBALIDX
-            ]
-            stub[CTG_NAM] = stub_name
-            real_final_contig.append(stub)
-            raw_telo_stub_count += 1
-
-        if raw_telo_stub_count > 0:
-            logging.info(f"Number of raw telomere stub contigs added : {raw_telo_stub_count}")
-
     # Simple ctg-as-alt (--add_alt_ctg_simple):
     # primary contig PAF에서 아직 채택되지 않은 contig를 보되, telomere-like terminal chunk와
     # 10kb 이하 fragment를 빼고 90% major chromosome set에서 chr-change 후보를 뽑는다.
@@ -4134,32 +4149,19 @@ def contig_preprocessing_00(PAF_FILE_PATH_ : list):
         for telo_name, edges in telo_connected_graph_dict.items()
         for edge in edges
     ]
-    synthetic_telomere_nodes = add_missing_hg38_telomeres(
+    virtual_telomere_nodes = add_missing_virtual_telomeres(
         real_final_contig,
         telo_edges,
         chr_len,
         telo_data,
         repeat_censat_data,
     )
-    if synthetic_telomere_nodes:
+    if virtual_telomere_nodes:
         logging.info(
-            f"Added {synthetic_telomere_nodes} missing hg38 synthetic telomere nodes"
+            f"Added {virtual_telomere_nodes} missing chromosome-end virtual telomere nodes"
         )
 
-    telo_edges_by_name = defaultdict(list)
-    for telo_name, edge in telo_edges:
-        telo_edges_by_name[telo_name].append(tuple(edge))
-    
-    with open(f"{PREFIX}/telomere_connected_list_readable.txt", "wt") as f:
-        for telo_name, edges in telo_edges_by_name.items():
-            print(telo_name, file=f)
-            for edge in edges:
-                print(tuple(real_final_contig[edge[1]]), file=f)
-            print("", file=f)
-    
-    with open(f"{PREFIX}/telomere_connected_list.txt", "wt") as f:
-        for telo_name, edge in telo_edges:
-            print(telo_name, tuple(edge), sep="\t", file=f)
+    write_telomere_connected_outputs(PREFIX, telo_edges, real_final_contig)
 
     real_final_mainflow = find_mainflow(real_final_contig)
     for i in real_final_contig:
@@ -5343,8 +5345,6 @@ VCF_SYNTHETIC_PAF_NAME = "vcf_synthetic.paf"
 VCF_SKIPPED_RECORDS_TSV = "vcf_mode_skipped_records.tsv"
 VCF_ORIENTATION_MISMATCH_TSV = "vcf_mode_orientation_mismatches.tsv"
 VCF_TELOMERE_PAF_NODES_TSV = "vcf_telomere_paf_nodes.tsv"
-VCF_TELOMERE_PAF_QUERY_END_SLACK = 50 * K
-VCF_TELOMERE_PAF_NCLOSE_PROXIMITY = 1 * M
 
 
 def sanitize_vcf_id(value):
@@ -5568,11 +5568,6 @@ def validate_vcf_reference(header_contigs, records, chr_len):
         raise ValueError("VCF/reference mismatch:\n" + "\n".join(errors))
 
 
-def is_hg38_reference(chr_len):
-    chr1_len = chr_len.get("chr1")
-    return chr1_len is not None and int(chr1_len) == HG38_CHR1_LENGTH
-
-
 def endpoint_interval(pos, chrom_len, path_dir, endpoint_role):
     pos = max(1, min(int(pos), int(chrom_len)))
     flank = min(VCF_SYNTHETIC_FLANK, max(1, int(chrom_len)))
@@ -5688,101 +5683,183 @@ def no_repeat_labels(contig_data):
     return [("0", "0") for _ in contig_data]
 
 
-def paf_row_query_terminal_side(row):
-    query_left = int(row[CTG_STR]) <= VCF_TELOMERE_PAF_QUERY_END_SLACK
-    query_right = int(row[CTG_LEN]) - int(row[CTG_END]) <= VCF_TELOMERE_PAF_QUERY_END_SLACK
-    return query_left, query_right
+def telomere_bounds_by_name(telo_dict):
+    telo_bounds = {}
+    for chrom, intervals in telo_dict.items():
+        intervals_by_side = defaultdict(list)
+        for st, nd, side in intervals:
+            intervals_by_side[side].append((int(st), int(nd)))
+        for side, side_intervals in intervals_by_side.items():
+            if side == "f":
+                telo_bounds[f"{chrom}{side}"] = min(
+                    side_intervals,
+                    key=lambda interval: interval[0],
+                )
+            else:
+                telo_bounds[f"{chrom}{side}"] = max(
+                    side_intervals,
+                    key=lambda interval: interval[1],
+                )
+    return telo_bounds
 
 
-def query_interval_distance(row_a, row_b):
-    if max(int(row_a[CTG_STR]), int(row_b[CTG_STR])) <= min(int(row_a[CTG_END]), int(row_b[CTG_END])):
-        return 0
-    return min(
-        abs(int(row_a[CTG_END]) - int(row_b[CTG_STR])),
-        abs(int(row_b[CTG_END]) - int(row_a[CTG_STR])),
-    )
+def is_terminal_telomere_candidate(row, telo_name, telo_bounds, chr_len):
+    if telo_name.endswith("f"):
+        return int(row[CHR_STR]) <= TELOMERE_CLUSTER_THRESHOLD
+
+    telo_bound = telo_bounds.get(telo_name)
+    if telo_bound is not None:
+        telo_end = int(telo_bound[1])
+    else:
+        telo_end = int(chr_len[telo_name[:-1]])
+    return int(row[CHR_END]) >= telo_end - TELOMERE_CLUSTER_THRESHOLD
 
 
-def interval_distance_to_loci(row, loci_by_chrom):
-    loci = loci_by_chrom.get(row[CHR_NAM], [])
-    if not loci:
-        return None
-    st, nd = sorted((int(row[CHR_STR]), int(row[CHR_END])))
-    return min(0 if st <= pos <= nd else min(abs(pos - st), abs(pos - nd)) for pos in loci)
+def compress_paf_telomere_candidates(raw_rows, telo_connect_info, telo_dict,
+                                     chr_len):
+    """Cluster telomere anchors derived only from the assembly PAF."""
+    telo_bounds = telomere_bounds_by_name(telo_dict)
+    candidates_by_telo = defaultdict(list)
+    for raw_idx, telo_name in telo_connect_info.items():
+        candidates_by_telo[telo_name].append(raw_idx)
+
+    compressed_candidates = []
+    for telo_name, raw_indices in candidates_by_telo.items():
+        nonterminal_indices = []
+        terminal_idx = None
+        for raw_idx in raw_indices:
+            row = raw_rows[raw_idx]
+            if is_terminal_telomere_candidate(
+                row,
+                telo_name,
+                telo_bounds,
+                chr_len,
+            ):
+                if terminal_idx is None:
+                    terminal_idx = raw_idx
+                    continue
+
+                terminal_row = raw_rows[terminal_idx]
+                if telo_name.endswith("f"):
+                    is_better = (
+                        int(row[CHR_STR]) < int(terminal_row[CHR_STR])
+                        or (
+                            int(row[CHR_STR]) == int(terminal_row[CHR_STR])
+                            and int(row[CTG_LEN]) < int(terminal_row[CTG_LEN])
+                        )
+                    )
+                else:
+                    is_better = (
+                        int(row[CHR_END]) > int(terminal_row[CHR_END])
+                        or (
+                            int(row[CHR_END]) == int(terminal_row[CHR_END])
+                            and int(row[CTG_LEN]) < int(terminal_row[CTG_LEN])
+                        )
+                    )
+                if is_better:
+                    terminal_idx = raw_idx
+                continue
+
+            if any(
+                distance_checker(raw_rows[kept_idx], row)
+                < TELOMERE_COMPRESS_RANGE
+                for kept_idx in nonterminal_indices
+            ):
+                continue
+            nonterminal_indices.append(raw_idx)
+
+        compressed_candidates.extend(
+            (telo_name, raw_idx)
+            for raw_idx in nonterminal_indices
+        )
+        if terminal_idx is not None:
+            compressed_candidates.append((telo_name, terminal_idx))
+
+    # break_double_telomere_contig prevents an original contig name from being
+    # emitted for more than one final telomere edge.  This PAF-only path keeps
+    # the strongest boundary anchor instead of manufacturing split contig paths.
+    candidates_by_contig = defaultdict(list)
+    for telo_name, raw_idx in compressed_candidates:
+        candidates_by_contig[raw_rows[raw_idx][CTG_NAM]].append(
+            (telo_name, raw_idx)
+        )
+
+    selected_candidates = set()
+    duplicate_contigs_removed = 0
+    for contig_candidates in candidates_by_contig.values():
+        def candidate_rank(candidate):
+            telo_name, raw_idx = candidate
+            row = raw_rows[raw_idx]
+            is_terminal = is_terminal_telomere_candidate(
+                row,
+                telo_name,
+                telo_bounds,
+                chr_len,
+            )
+            return (
+                int(is_terminal),
+                -int(row[CTG_MAPQ]),
+                -(int(row[CHR_END]) - int(row[CHR_STR])),
+                raw_idx,
+                telo_name,
+            )
+
+        selected_candidates.add(min(contig_candidates, key=candidate_rank))
+        duplicate_contigs_removed += len(contig_candidates) - 1
+
+    return [
+        candidate
+        for candidate in compressed_candidates
+        if candidate in selected_candidates
+    ], duplicate_contigs_removed
 
 
-def build_vcf_telomere_paf_nodes(telomere_paf_path, telo_data, repeat_censat_data,
-                                 chr_len, base_idx, nclose_loci_by_chrom=None):
-    raw_rows = import_data(telomere_paf_path)
+def build_paf_telomere_nodes(paf_path, telo_data, repeat_censat_data,
+                             chr_len, base_idx):
+    """Build telomere nodes from PAF alignments without consulting VCF calls."""
+    raw_rows = import_data(paf_path)
     if not raw_rows:
         return [], [], [], Counter()
 
     telo_dict = telo_data_to_dict(telo_data)
     raw_telo_labels = label_node(raw_rows, telo_dict)
-    raw_repeat_labels = no_repeat_labels(raw_rows)
-    raw_censat_labels = label_repeat_node(raw_rows, repeat_censat_data, chr_len)
+    _, preprocess_report, telo_connect_info = preprocess_telo(
+        raw_rows,
+        raw_telo_labels,
+    )
+    # preprocess_telo appends a sentinel in-place while scanning contig groups.
+    raw_rows.pop()
 
-    terminal_telo_rows = {}
-    for raw_idx, label in enumerate(raw_telo_labels):
-        telo_name = telomere_label_to_name(label)
-        if telo_name is None:
-            continue
-        query_left, query_right = paf_row_query_terminal_side(raw_rows[raw_idx])
-        if not (query_left or query_right):
-            continue
-        terminal_telo_rows[raw_idx] = telo_name
-
-    raw_indices_by_contig = defaultdict(list)
-    for raw_idx, row in enumerate(raw_rows):
-        raw_indices_by_contig[row[CTG_NAM]].append(raw_idx)
-
-    if nclose_loci_by_chrom is not None:
-        filtered_terminal_telo_rows = {}
-        for raw_idx, telo_name in terminal_telo_rows.items():
-            same_contig_indices = raw_indices_by_contig[raw_rows[raw_idx][CTG_NAM]]
-            internal_candidates = [
-                idx for idx in same_contig_indices
-                if idx != raw_idx and telomere_label_to_name(raw_telo_labels[idx]) is None
-            ]
-            candidate_indices = [raw_idx] + internal_candidates
-            distances = [
-                interval_distance_to_loci(raw_rows[idx], nclose_loci_by_chrom)
-                for idx in candidate_indices
-            ]
-            distances = [dist for dist in distances if dist is not None]
-            if distances and min(distances) <= VCF_TELOMERE_PAF_NCLOSE_PROXIMITY:
-                filtered_terminal_telo_rows[raw_idx] = telo_name
-        terminal_telo_rows = filtered_terminal_telo_rows
-
-    selected_contigs = {raw_rows[raw_idx][CTG_NAM] for raw_idx in terminal_telo_rows}
-    if not selected_contigs:
+    boundary_candidate_count = len(telo_connect_info)
+    selected_candidates, duplicate_contigs_removed = \
+        compress_paf_telomere_candidates(
+            raw_rows,
+            telo_connect_info,
+            telo_dict,
+            chr_len,
+        )
+    if not selected_candidates:
         return [], [], [], Counter({
             "telomere_paf_rows": len(raw_rows),
             "telomere_paf_contigs": 0,
             "telomere_paf_nodes": 0,
             "telomere_paf_edges": 0,
+            "telomere_paf_boundary_candidates": boundary_candidate_count,
+            "telomere_paf_duplicate_contigs_removed": duplicate_contigs_removed,
         })
 
-    selected_raw_indices = [
-        idx for idx, row in enumerate(raw_rows)
-        if row[CTG_NAM] in selected_contigs
-    ]
-    selected_raw_indices.sort(key=lambda idx: (
-        raw_rows[idx][CTG_NAM],
-        int(raw_rows[idx][CTG_STR]),
-        int(raw_rows[idx][CTG_END]),
-        idx,
-    ))
-
-    raw_to_global_idx = {}
-    group_local_indices = defaultdict(list)
+    selected_rows = [raw_rows[raw_idx] for _, raw_idx in selected_candidates]
+    selected_censat_labels = label_repeat_node(
+        selected_rows,
+        repeat_censat_data,
+        chr_len,
+    )
     nodes = []
-    for raw_idx in selected_raw_indices:
+    edges = []
+    report_rows = []
+    for local_idx, (telo_name, raw_idx) in enumerate(selected_candidates):
         row = raw_rows[raw_idx]
-        global_node_idx = base_idx + len(nodes)
-        raw_to_global_idx[raw_idx] = global_node_idx
-        group_local_indices[row[CTG_NAM]].append(global_node_idx)
-        telo_name = terminal_telo_rows.get(raw_idx, "0")
+        global_node_idx = base_idx + local_idx
         node = [
             row[CTG_NAM],
             int(row[CTG_LEN]),
@@ -5800,39 +5877,19 @@ def build_vcf_telomere_paf_nodes(telomere_paf_path, telo_data, repeat_censat_dat
             raw_telo_labels[raw_idx][0],
             raw_telo_labels[raw_idx][1],
             telo_name,
-            raw_repeat_labels[raw_idx][0],
-            raw_repeat_labels[raw_idx][1],
-            raw_censat_labels[raw_idx][1],
+            "0",
+            "0",
+            selected_censat_labels[local_idx][1],
             row[CTG_DIR],
             row[CHR_NAM],
             f"1.{raw_idx}",
         ]
         nodes.append(node)
-
-    for node in nodes:
-        group_indices = group_local_indices[node[CTG_NAM]]
-        node[CTG_STRND] = min(group_indices)
-        node[CTG_ENDND] = max(group_indices)
-
-    edges = []
-    report_rows = []
-    seen_edges = set()
-
-    def add_edge(telo_name, raw_idx, kind):
-        if raw_idx not in raw_to_global_idx:
-            return
-        node_idx = raw_to_global_idx[raw_idx]
-        key = (telo_name, node_idx)
-        if key in seen_edges:
-            return
-        seen_edges.add(key)
-        edge = (telo_name, (DIR_OUT, node_idx, 0))
-        edges.append(edge)
-        row = raw_rows[raw_idx]
+        edges.append((telo_name, (DIR_OUT, global_node_idx, 0)))
         report_rows.append((
-            kind,
+            "preprocess_telo_boundary",
             telo_name,
-            node_idx,
+            global_node_idx,
             row[CTG_NAM],
             row[CTG_STR],
             row[CTG_END],
@@ -5843,39 +5900,29 @@ def build_vcf_telomere_paf_nodes(telomere_paf_path, telo_data, repeat_censat_dat
             raw_idx,
         ))
 
-    selected_by_contig = defaultdict(list)
-    for raw_idx in selected_raw_indices:
-        selected_by_contig[raw_rows[raw_idx][CTG_NAM]].append(raw_idx)
-
-    for raw_idx, telo_name in terminal_telo_rows.items():
-        add_edge(telo_name, raw_idx, "telomere_aln")
-
-        same_contig_indices = selected_by_contig[raw_rows[raw_idx][CTG_NAM]]
-        internal_candidates = [
-            idx for idx in same_contig_indices
-            if idx != raw_idx and telomere_label_to_name(raw_telo_labels[idx]) is None
-        ]
-        if not internal_candidates:
-            continue
-        nearest_idx = min(
-            internal_candidates,
-            key=lambda idx: (query_interval_distance(raw_rows[raw_idx], raw_rows[idx]), idx),
-        )
-        add_edge(telo_name, nearest_idx, "adjacent_internal")
-
     metrics = Counter({
         "telomere_paf_rows": len(raw_rows),
-        "telomere_paf_contigs": len(selected_contigs),
+        "telomere_paf_contigs": len(nodes),
         "telomere_paf_nodes": len(nodes),
         "telomere_paf_edges": len(edges),
+        "telomere_paf_boundary_candidates": boundary_candidate_count,
+        "telomere_paf_duplicate_contigs_removed": duplicate_contigs_removed,
+    })
+    metrics.update({
+        f"telomere_paf_preprocess_{case.lower()}": len(rows)
+        for case, rows in preprocess_report.items()
     })
     return nodes, edges, report_rows, metrics
 
 
-def annotate_synthetic_nodes(contig_data, telo_data, repeat_censat_data, chr_len):
+def annotate_synthetic_nodes(contig_data, telo_data, repeat_censat_data,
+                             chr_len, annotate_telomeres=True):
     if not hasattr(telo_data, "items"):
         telo_data = telo_data_to_dict(telo_data)
-    telo_labels = label_node(contig_data, telo_data)
+    if annotate_telomeres:
+        telo_labels = label_node(contig_data, telo_data)
+    else:
+        telo_labels = [("0", "0") for _ in contig_data]
     repeat_labels = no_repeat_labels(contig_data)
     censat_labels = label_repeat_node(contig_data, repeat_censat_data, chr_len)
     for idx, node in enumerate(contig_data):
@@ -5884,32 +5931,59 @@ def annotate_synthetic_nodes(contig_data, telo_data, repeat_censat_data, chr_len
         node[CTG_RPTCHR] = repeat_labels[idx][0]
         node[CTG_RPTCASE] = repeat_labels[idx][1]
         node[CTG_CENSAT] = censat_labels[idx][1]
-        if node[CTG_TELCON] == "0" and str(node[CTG_NAM]).startswith(HG38_SYNTHETIC_TELOMERE_NODE_PREFIX):
-            node[CTG_TELCON] = str(node[CTG_NAM])[len(HG38_SYNTHETIC_TELOMERE_NODE_PREFIX):]
+        if (
+            annotate_telomeres
+            and node[CTG_TELCON] == "0"
+            and str(node[CTG_NAM]).startswith(VIRTUAL_TELOMERE_NODE_PREFIX)
+        ):
+            node[CTG_TELCON] = str(node[CTG_NAM])[len(VIRTUAL_TELOMERE_NODE_PREFIX):]
 
 
-def add_missing_hg38_telomeres(contig_data, telo_edges, chr_len, telo_data,
-                               repeat_censat_data):
-    if not is_hg38_reference(chr_len):
-        return 0
+def has_subtelomeric_telomere_node(contig_data, telo_edges, telo_name,
+                                   chrom, chrom_len, side):
+    for edge_telo_name, edge in telo_edges:
+        if edge_telo_name != telo_name:
+            continue
+        node_idx = int(edge[1])
+        if node_idx < 0 or node_idx >= len(contig_data):
+            continue
+        node = contig_data[node_idx]
+        if node[CHR_NAM] != chrom:
+            continue
+        if side == "f":
+            if int(node[CHR_STR]) <= SUBTELOMERE_LENGTH:
+                return True
+        elif int(chrom_len) - int(node[CHR_END]) <= SUBTELOMERE_LENGTH:
+            return True
+    return False
 
-    existing_telo_names = {telo_name for telo_name, _ in telo_edges}
-    synthetic_nodes = []
+
+def add_missing_virtual_telomeres(contig_data, telo_edges, chr_len, telo_data,
+                                  repeat_censat_data):
+    virtual_nodes = []
+
     for chrom in [f"chr{i}" for i in range(1, 23)] + ["chrX"]:
         if chrom not in chr_len:
             continue
         chrom_len = int(chr_len[chrom])
         for side, path_dir, st, nd in (
-            ("f", "+", 0, min(SYNTHETIC_TELOMERE_FLANK, chrom_len)),
-            ("b", "-", max(0, chrom_len - SYNTHETIC_TELOMERE_FLANK), chrom_len),
+            ("f", "+", 0, min(VIRTUAL_TELOMERE_FLANK, chrom_len)),
+            ("b", "-", max(0, chrom_len - VIRTUAL_TELOMERE_FLANK), chrom_len),
         ):
             telo_name = f"{chrom}{side}"
-            if telo_name in existing_telo_names:
+            if has_subtelomeric_telomere_node(
+                contig_data,
+                telo_edges,
+                telo_name,
+                chrom,
+                chrom_len,
+                side,
+            ):
                 continue
 
-            node_idx = len(contig_data) + len(synthetic_nodes)
+            node_idx = len(contig_data) + len(virtual_nodes)
             node = make_synthetic_span_node(
-                f"{HG38_SYNTHETIC_TELOMERE_NODE_PREFIX}{telo_name}",
+                f"{VIRTUAL_TELOMERE_NODE_PREFIX}{telo_name}",
                 chrom,
                 st,
                 nd,
@@ -5920,19 +5994,18 @@ def add_missing_hg38_telomeres(contig_data, telo_edges, chr_len, telo_data,
                 node_idx,
             )
             node[CTG_TELCON] = telo_name
-            synthetic_nodes.append(node)
+            virtual_nodes.append(node)
             telo_edges.append((telo_name, (DIR_OUT, node_idx, 0)))
-            existing_telo_names.add(telo_name)
 
-    if synthetic_nodes:
+    if virtual_nodes:
         annotate_synthetic_nodes(
-            synthetic_nodes,
+            virtual_nodes,
             telo_data,
             repeat_censat_data,
             chr_len,
         )
-        contig_data.extend(synthetic_nodes)
-    return len(synthetic_nodes)
+        contig_data.extend(virtual_nodes)
+    return len(virtual_nodes)
 
 
 def vcf_record_mate_id(record):
@@ -6089,7 +6162,7 @@ def vcf_type4_event_from_record(record, chr_len, ins_alt_alignments=None):
 def build_vcf_mode_inputs():
     chr_len = find_chr_len(CHROMOSOME_INFO_FILE_PATH)
     header_contigs, records = read_vcf_records(args.vcf_input)
-    validate_vcf_reference(header_contigs, records, chr_len)
+    # validate_vcf_reference(header_contigs, records, chr_len)
     vcf_ins_alt_alignments = load_vcf_ins_alt_alignment_spans(args.alt)
 
     depth_df = pd.read_csv(
@@ -6249,38 +6322,45 @@ def build_vcf_mode_inputs():
             summary["malformed_records"] += 1
             skipped_records.append((record["line_no"], record["id"], svtype, reason, record["raw"]))
 
+    # Everything accumulated so far was created from VCF records.  Keep its
+    # telomere labels at zero; only PAF/virtual nodes may carry telomere data.
+    vcf_node_count = len(contig_data)
     telo_edges = []
     telomere_paf_report_rows = []
     telomere_paf_metrics = Counter()
     if args.paf_file_path is not None:
-        nclose_loci_by_chrom = defaultdict(list)
-        for node in contig_data:
-            nclose_loci_by_chrom[node[CHR_NAM]].extend((int(node[CHR_STR]), int(node[CHR_END])))
+        # Telomere nodes come exclusively from the assembly PAF.  VCF records
+        # above contribute nclose/type4 events but never telomere candidates.
         telomere_paf_nodes, telomere_paf_edges, telomere_paf_report_rows, telomere_paf_metrics = \
-            build_vcf_telomere_paf_nodes(
+            build_paf_telomere_nodes(
                 args.paf_file_path,
                 telo_data,
                 repeat_censat_data,
                 chr_len,
                 len(contig_data),
-                nclose_loci_by_chrom,
             )
         contig_data.extend(telomere_paf_nodes)
         telo_edges.extend(telomere_paf_edges)
 
-    synthetic_telomere_nodes = add_missing_hg38_telomeres(
+    virtual_telomere_nodes = add_missing_virtual_telomeres(
         contig_data,
         telo_edges,
         chr_len,
         telo_data,
         repeat_censat_data,
     )
-    if synthetic_telomere_nodes:
+    if virtual_telomere_nodes:
         logging.info(
-            f"Added {synthetic_telomere_nodes} missing hg38 synthetic telomere nodes"
+            f"Added {virtual_telomere_nodes} missing chromosome-end virtual telomere nodes"
         )
 
-    annotate_synthetic_nodes(contig_data, telo_data, repeat_censat_data, chr_len)
+    annotate_synthetic_nodes(
+        contig_data[:vcf_node_count],
+        telo_data,
+        repeat_censat_data,
+        chr_len,
+        annotate_telomeres=False,
+    )
     contig_data = [tuple(row) for row in contig_data]
 
     with open(PREPROCESSED_PAF_FILE_PATH, "wt") as f:
@@ -6290,12 +6370,7 @@ def build_vcf_mode_inputs():
         for row in contig_data:
             print("\t".join(map(str, synthetic_node_to_paf_row(row))), file=f)
 
-    with open(f"{PREFIX}/telomere_connected_list.txt", "wt") as f:
-        for telo_name, edge in telo_edges:
-            print(telo_name, tuple(edge), sep="\t", file=f)
-    with open(f"{PREFIX}/telomere_connected_list_readable.txt", "wt") as f:
-        for telo_name, edge in telo_edges:
-            print(telo_name, edge, contig_data[edge[1]], sep="\t", file=f)
+    write_telomere_connected_outputs(PREFIX, telo_edges, contig_data)
     with open(f"{PREFIX}/{VCF_TELOMERE_PAF_NODES_TSV}", "wt") as f:
         print("kind\ttelomere\tnode_idx\tcontig\tquery_start\tquery_end\tchrom\tref_start\tref_end\tdir\tpaf_row_idx", file=f)
         for row in telomere_paf_report_rows:
@@ -6329,36 +6404,34 @@ def build_vcf_mode_inputs():
     telo_contig = extract_telomere_connect_contig(f"{PREFIX}/telomere_connected_list.txt")
     telo_set = {edge[1] for edge_list in telo_contig.values() for edge in edge_list}
     telo_node_count = len(telo_set)
-    nclose_node_count = sum(2 for pairs in nclose_nodes.values() for _ in pairs)
 
-    with open(f"{PREFIX}/all_nclose_nodes_list.txt", "wt") as f_all, \
-         open(f"{PREFIX}/compressed_nclose_nodes_list.txt", "wt") as f_comp, \
-         open(f"{PREFIX}/nclose_nodes_index.txt", "wt") as f_idx:
-        nclose_type = defaultdict(list)
-        for key, pair_list in nclose_nodes.items():
-            for pair in pair_list:
-                a, b = pair
-                ca, cb = contig_data[a], contig_data[b]
-                type_key = (ca[CHR_NAM], cb[CHR_NAM]) if chr2int(ca[CHR_NAM]) <= chr2int(cb[CHR_NAM]) else (cb[CHR_NAM], ca[CHR_NAM])
-                nclose_type[type_key].append(pair)
-                print(key, a, b, contig_data[a][CTG_TYP], file=f_idx)
-        for out_f in (f_all, f_comp):
-            for type_key, pair_list in sorted(nclose_type.items()):
-                print(f"{type_key[0]}, {type_key[1]}, {len(pair_list)}", file=out_f)
-                for pair in pair_list:
-                    a, b = pair
-                    ca, cb = contig_data[a], contig_data[b]
-                    is_for = a < b
-                    list_a = [ca[CTG_NAM], get_corr_dir(is_for, ca[CTG_DIR]), ca[CHR_STR], ca[CHR_END]]
-                    list_b = [cb[CTG_NAM], get_corr_dir(is_for, cb[CTG_DIR]), cb[CHR_STR], cb[CHR_END]]
-                    print(list_a, list_b, file=out_f)
-                print("", file=out_f)
+    write_virtual_ordinary_contig(
+        f"{PREFIX}/virtual_ordinary_contig.txt",
+        [],
+    )
+    all_nclose_type = group_nclose_nodes_by_chrom(contig_data, all_nclose_comp)
+    uncomp_node_count = write_nclose_nodes_list(
+        f"{PREFIX}/all_nclose_nodes_list.txt",
+        all_nclose_type,
+        contig_data,
+    )
+    compressed_nclose_type = group_nclose_nodes_by_chrom(contig_data, nclose_nodes)
+    write_nclose_nodes_list(
+        f"{PREFIX}/compressed_nclose_nodes_list.txt",
+        compressed_nclose_type,
+        contig_data,
+    )
+    nclose_node_count = write_nclose_nodes_index(
+        f"{PREFIX}/nclose_nodes_index.txt",
+        nclose_nodes,
+        contig_data,
+    )
 
     summary.update({
         "vcf_records": len([r for r in records if not r.get("malformed")]),
         "nclose_pairs": sum(len(v) for v in nclose_nodes.values()),
         "synthetic_nodes": len(contig_data),
-        "synthetic_telomere_nodes": synthetic_telomere_nodes,
+        "virtual_telomere_nodes": virtual_telomere_nodes,
         "type4_min_span": VCF_TYPE4_MIN_SPAN,
         "vcf_ins_alt_alignment_queries": len(vcf_ins_alt_alignments),
     })
@@ -6436,7 +6509,7 @@ def build_vcf_mode_inputs():
         "nclose_compress_track": defaultdict(list),
         "st_compress": {},
         "ed_compress": {},
-        "uncomp_node_count": nclose_node_count,
+        "uncomp_node_count": uncomp_node_count,
         "nclose_node_count": nclose_node_count,
         "transloc_nclose_pair_count": sum(
             1
@@ -6575,41 +6648,18 @@ def nclose_calc():
         # do something
 
     virtual_ordinary_contig = make_virtual_ord_ctg(contig_data, vctg_dict)
-    with open(f"{PREFIX}/virtual_ordinary_contig.txt", "wt") as f:
-        for i in virtual_ordinary_contig:
-            for j in i:
-                print(j, end = "\t", file=f)
-            print("", file = f)
+    write_virtual_ordinary_contig(
+        f"{PREFIX}/virtual_ordinary_contig.txt",
+        virtual_ordinary_contig,
+    )
 
-    all_nclose_type = defaultdict(list)
-
-    for i in all_nclose_comp:
-        pairs = all_nclose_comp[i]
-        for pair in pairs:
-            contig_a = contig_data[pair[0]]
-            contig_b = contig_data[pair[1]]
-            if chr2int(contig_a[CHR_NAM]) <= chr2int(contig_b[CHR_NAM]):
-                all_nclose_type[(contig_a[CHR_NAM], contig_b[CHR_NAM])].append(pair)
-            else:
-                all_nclose_type[(contig_b[CHR_NAM], contig_a[CHR_NAM])].append((pair[1], pair[0]))
-
-    uncomp_node_count = 0
-    with open(f"{PREFIX}/all_nclose_nodes_list.txt", "wt") as f:
-        for i in all_nclose_type:
-            print(f"{i[0]}, {i[1]}, {len(all_nclose_type[i])}", file=f)
-            for pair in all_nclose_type[i]:
-                uncomp_node_count += 2
-                contig_a = contig_data[pair[0]]
-                contig_b = contig_data[pair[1]]
-
-                is_for = pair[0] < pair[1]
-                list_a = [contig_a[CTG_NAM], get_corr_dir(is_for, contig_a[CTG_DIR]), contig_a[CHR_STR], contig_a[CHR_END]]
-                list_b = [contig_b[CTG_NAM], get_corr_dir(is_for, contig_b[CTG_DIR]), contig_b[CHR_STR], contig_b[CHR_END]]
-                if contig_a[CTG_NAM] in rpt_con:
-                    print(list_a, list_b, "all_repeat", file=f)
-                else:
-                    print(list_a, list_b, file=f)
-            print("", file=f)
+    all_nclose_type = group_nclose_nodes_by_chrom(contig_data, all_nclose_comp)
+    uncomp_node_count = write_nclose_nodes_list(
+        f"{PREFIX}/all_nclose_nodes_list.txt",
+        all_nclose_type,
+        contig_data,
+        rpt_con,
+    )
 
     st_compress = dict()
     for ddict in nclose_start_compress.values():
@@ -7001,45 +7051,37 @@ def nclose_calc():
         logging.info('Skipped offset-direction-mismatched censat-noncensat nclose filtering')
 
     def write_compressed_nclose_nodes_list(current_nclose_nodes):
-        nclose_type = defaultdict(list)
-        for j in current_nclose_nodes:
-            for pair in current_nclose_nodes[j]:
-                contig_a = contig_data[pair[0]]
-                contig_b = contig_data[pair[1]]
-                if chr2int(contig_a[CHR_NAM]) <= chr2int(contig_b[CHR_NAM]):
-                    nclose_type[(contig_a[CHR_NAM], contig_b[CHR_NAM])].append(pair)
-                else:
-                    nclose_type[(contig_b[CHR_NAM], contig_a[CHR_NAM])].append((pair[1], pair[0]))
+        nclose_type = group_nclose_nodes_by_chrom(contig_data, current_nclose_nodes)
 
         transloc_nclose_pair_count = 0
-        with open(f"{PREFIX}/compressed_nclose_nodes_list.txt", "wt") as f:
-            for i in nclose_type:
-                print(f"{i[0]}, {i[1]}, {len(nclose_type[i])}", file=f)
-                if i[0] != i[1]:
-                    transloc_nclose_pair_count += len(nclose_type[i])
+        for chrom_pair, pair_list in nclose_type.items():
+            if chrom_pair[0] != chrom_pair[1]:
+                transloc_nclose_pair_count += len(pair_list)
 
-                st_flag = False
-                if (('=', i[0]), ('=', i[1])) in nclose_start_compress:
-                    st_flag = True
-                for pair in nclose_type[i]:
-                    contig_a = contig_data[pair[0]]
-                    contig_b = contig_data[pair[1]]
+            st_flag = (
+                (('=', chrom_pair[0]), ('=', chrom_pair[1]))
+                in nclose_start_compress
+            )
+            for pair in pair_list:
+                contig_a = contig_data[pair[0]]
+                if st_flag:
+                    if contig_a[CTG_NAM] in nclose_start_compress[
+                        (('=', chrom_pair[0]), ('=', chrom_pair[1]))
+                    ]:
+                        pass
 
-                    if st_flag:
-                        if contig_a[CTG_NAM] in nclose_start_compress[(('=', i[0]), ('=', i[1]))]:
-                            pass
+                original_nclose = tuple(sorted(pair))
+                assert(
+                    original_nclose not in not_using_nclose_node
+                    or original_nclose in saved_not_using_nclose_node
+                )
 
-                    is_for = pair[0] < pair[1]
-                    list_a = [contig_a[CTG_NAM], get_corr_dir(is_for, contig_a[CTG_DIR]), contig_a[CHR_STR], contig_a[CHR_END]]
-                    list_b = [contig_b[CTG_NAM], get_corr_dir(is_for, contig_b[CTG_DIR]), contig_b[CHR_STR], contig_b[CHR_END]]
-                    original_nclose = tuple(sorted(pair))
-
-                    assert(original_nclose not in not_using_nclose_node or original_nclose in saved_not_using_nclose_node)
-                    if contig_a[CTG_NAM] in rpt_con:
-                        print(list_a, list_b, "all_repeat", file=f)
-                    else:
-                        print(list_a, list_b, file=f)
-                print("", file=f)
+        write_nclose_nodes_list(
+            f"{PREFIX}/compressed_nclose_nodes_list.txt",
+            nclose_type,
+            contig_data,
+            rpt_con,
+        )
         return transloc_nclose_pair_count
 
     if args.check_nclose_count:
@@ -7165,12 +7207,11 @@ def nclose_calc():
 
     transloc_nclose_pair_count = write_compressed_nclose_nodes_list(nclose_nodes)
 
-    nclose_node_count = 0
-    with open(f"{PREFIX}/nclose_nodes_index.txt", "wt") as f: 
-        for j in nclose_nodes:
-            for i in nclose_nodes[j]:
-                nclose_node_count += 2
-                print(j, i[0], i[1], contig_data[i[0]][CTG_TYP], file=f)
+    nclose_node_count = write_nclose_nodes_index(
+        f"{PREFIX}/nclose_nodes_index.txt",
+        nclose_nodes,
+        contig_data,
+    )
 
     logging.info(f"Uncompressed NClose node count : {uncomp_node_count}")    
     logging.info(f"NClose node count : {nclose_node_count}")
