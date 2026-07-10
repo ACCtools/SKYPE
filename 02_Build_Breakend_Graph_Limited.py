@@ -110,6 +110,9 @@ MAPQ_BOUND = 60
 TELOMERE_EXPANSION = 5 * K
 TELOMERE_COMPRESS_RANGE = 100*K
 CENSAT_COMPRESSABLE_THRESHOLD = 1000*K
+SYNTHETIC_TELOMERE_FLANK = 1 * K
+HG38_CHR1_LENGTH = 248956422
+HG38_SYNTHETIC_TELOMERE_NODE_PREFIX = "hg38_telo_"
 
 FORCE_TELOMERE_THRESHOLD = 10*K
 TELOMERE_CLUSTER_THRESHOLD = 500*K
@@ -4126,22 +4129,37 @@ def contig_preprocessing_00(PAF_FILE_PATH_ : list):
         "final",
     )
 
-    rev_telo_connected_dict = defaultdict(list)
+    telo_edges = [
+        (telo_name, tuple(edge))
+        for telo_name, edges in telo_connected_graph_dict.items()
+        for edge in edges
+    ]
+    synthetic_telomere_nodes = add_missing_hg38_telomeres(
+        real_final_contig,
+        telo_edges,
+        chr_len,
+        telo_data,
+        repeat_censat_data,
+    )
+    if synthetic_telomere_nodes:
+        logging.info(
+            f"Added {synthetic_telomere_nodes} missing hg38 synthetic telomere nodes"
+        )
 
-    for i in telo_connected_dict:
-        rev_telo_connected_dict[telo_connected_dict[i]].append(i)
+    telo_edges_by_name = defaultdict(list)
+    for telo_name, edge in telo_edges:
+        telo_edges_by_name[telo_name].append(tuple(edge))
     
     with open(f"{PREFIX}/telomere_connected_list_readable.txt", "wt") as f:
-        for i in rev_telo_connected_dict:
-            print(i, file=f)
-            for j in rev_telo_connected_dict[i]:
-                print(tuple(real_final_contig[j]), file=f)
+        for telo_name, edges in telo_edges_by_name.items():
+            print(telo_name, file=f)
+            for edge in edges:
+                print(tuple(real_final_contig[edge[1]]), file=f)
             print("", file=f)
     
     with open(f"{PREFIX}/telomere_connected_list.txt", "wt") as f:
-        for i in telo_connected_graph_dict:
-            for j in telo_connected_graph_dict[i]:
-                print(i, tuple(j), sep = "\t", file=f)
+        for telo_name, edge in telo_edges:
+            print(telo_name, tuple(edge), sep="\t", file=f)
 
     real_final_mainflow = find_mainflow(real_final_contig)
     for i in real_final_contig:
@@ -5550,6 +5568,11 @@ def validate_vcf_reference(header_contigs, records, chr_len):
         raise ValueError("VCF/reference mismatch:\n" + "\n".join(errors))
 
 
+def is_hg38_reference(chr_len):
+    chr1_len = chr_len.get("chr1")
+    return chr1_len is not None and int(chr1_len) == HG38_CHR1_LENGTH
+
+
 def endpoint_interval(pos, chrom_len, path_dir, endpoint_role):
     pos = max(1, min(int(pos), int(chrom_len)))
     flank = min(VCF_SYNTHETIC_FLANK, max(1, int(chrom_len)))
@@ -5861,8 +5884,55 @@ def annotate_synthetic_nodes(contig_data, telo_data, repeat_censat_data, chr_len
         node[CTG_RPTCHR] = repeat_labels[idx][0]
         node[CTG_RPTCASE] = repeat_labels[idx][1]
         node[CTG_CENSAT] = censat_labels[idx][1]
-        if node[CTG_TELCON] == "0" and str(node[CTG_NAM]).startswith("vcf_telo_"):
-            node[CTG_TELCON] = str(node[CTG_NAM])[len("vcf_telo_"):]
+        if node[CTG_TELCON] == "0" and str(node[CTG_NAM]).startswith(HG38_SYNTHETIC_TELOMERE_NODE_PREFIX):
+            node[CTG_TELCON] = str(node[CTG_NAM])[len(HG38_SYNTHETIC_TELOMERE_NODE_PREFIX):]
+
+
+def add_missing_hg38_telomeres(contig_data, telo_edges, chr_len, telo_data,
+                               repeat_censat_data):
+    if not is_hg38_reference(chr_len):
+        return 0
+
+    existing_telo_names = {telo_name for telo_name, _ in telo_edges}
+    synthetic_nodes = []
+    for chrom in [f"chr{i}" for i in range(1, 23)] + ["chrX"]:
+        if chrom not in chr_len:
+            continue
+        chrom_len = int(chr_len[chrom])
+        for side, path_dir, st, nd in (
+            ("f", "+", 0, min(SYNTHETIC_TELOMERE_FLANK, chrom_len)),
+            ("b", "-", max(0, chrom_len - SYNTHETIC_TELOMERE_FLANK), chrom_len),
+        ):
+            telo_name = f"{chrom}{side}"
+            if telo_name in existing_telo_names:
+                continue
+
+            node_idx = len(contig_data) + len(synthetic_nodes)
+            node = make_synthetic_span_node(
+                f"{HG38_SYNTHETIC_TELOMERE_NODE_PREFIX}{telo_name}",
+                chrom,
+                st,
+                nd,
+                path_dir,
+                chr_len,
+                3,
+                node_idx,
+                node_idx,
+            )
+            node[CTG_TELCON] = telo_name
+            synthetic_nodes.append(node)
+            telo_edges.append((telo_name, (DIR_OUT, node_idx, 0)))
+            existing_telo_names.add(telo_name)
+
+    if synthetic_nodes:
+        annotate_synthetic_nodes(
+            synthetic_nodes,
+            telo_data,
+            repeat_censat_data,
+            chr_len,
+        )
+        contig_data.extend(synthetic_nodes)
+    return len(synthetic_nodes)
 
 
 def vcf_record_mate_id(record):
@@ -6033,7 +6103,24 @@ def build_vcf_mode_inputs():
     repeat_censat_data = import_censat_repeat_data(CENSAT_PATH)
     telo_data = import_telo_data(TELOMERE_INFO_FILE_PATH, chr_len)
 
-    summary = Counter()
+    summary = {
+        metric: 0
+        for metric in (
+            "used_bnd_events",
+            "used_bnd_type4_events",
+            "used_inv_events",
+            "used_type4_events",
+            "skipped_ins",
+            "skipped_pure_ins",
+            "skipped_ins_small_size",
+            "skipped_ins_no_alt_alignment",
+            "skipped_small_indel_size",
+            "skipped_not_type4_svtype",
+            "missing_mates",
+            "malformed_records",
+            "orientation_mismatches",
+        )
+    }
     skipped_records = []
     orientation_mismatches = []
     contig_data = []
@@ -6181,30 +6268,17 @@ def build_vcf_mode_inputs():
         contig_data.extend(telomere_paf_nodes)
         telo_edges.extend(telomere_paf_edges)
 
-    paf_telo_names = {telo_name for telo_name, _ in telo_edges}
-    synthetic_telomere_nodes = 0
-    standard_chroms = [f"chr{i}" for i in range(1, 23)] + ["chrX"]
-    for chrom in standard_chroms:
-        if chrom not in chr_len:
-            continue
-        chrom_len = int(chr_len[chrom])
-        for side, path_dir, st, nd in (
-            ("f", "+", 0, min(VCF_SYNTHETIC_FLANK, chrom_len)),
-            ("b", "-", max(0, chrom_len - VCF_SYNTHETIC_FLANK), chrom_len),
-        ):
-            idx = len(contig_data)
-            telo_name = f"{chrom}{side}"
-            if telo_name in paf_telo_names:
-                continue
-            node = make_synthetic_span_node(
-                f"vcf_telo_{telo_name}", chrom, st, nd, path_dir,
-                chr_len, 3, idx, global_idx
-            )
-            node[CTG_TELCON] = telo_name
-            contig_data.append(node)
-            telo_edges.append((telo_name, (DIR_OUT, idx, 0)))
-            global_idx += 1
-            synthetic_telomere_nodes += 1
+    synthetic_telomere_nodes = add_missing_hg38_telomeres(
+        contig_data,
+        telo_edges,
+        chr_len,
+        telo_data,
+        repeat_censat_data,
+    )
+    if synthetic_telomere_nodes:
+        logging.info(
+            f"Added {synthetic_telomere_nodes} missing hg38 synthetic telomere nodes"
+        )
 
     annotate_synthetic_nodes(contig_data, telo_data, repeat_censat_data, chr_len)
     contig_data = [tuple(row) for row in contig_data]
@@ -6280,22 +6354,6 @@ def build_vcf_mode_inputs():
                     print(list_a, list_b, file=out_f)
                 print("", file=out_f)
 
-    for metric in (
-        "used_bnd_events",
-        "used_bnd_type4_events",
-        "used_inv_events",
-        "used_type4_events",
-        "skipped_ins",
-        "skipped_pure_ins",
-        "skipped_ins_small_size",
-        "skipped_ins_no_alt_alignment",
-        "skipped_small_indel_size",
-        "skipped_not_type4_svtype",
-        "missing_mates",
-        "malformed_records",
-        "orientation_mismatches",
-    ):
-        summary.setdefault(metric, 0)
     summary.update({
         "vcf_records": len([r for r in records if not r.get("malformed")]),
         "nclose_pairs": sum(len(v) for v in nclose_nodes.values()),
