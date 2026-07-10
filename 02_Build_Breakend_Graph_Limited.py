@@ -116,6 +116,7 @@ VIRTUAL_TELOMERE_NODE_PREFIX = "virtual_telo_"
 FORCE_TELOMERE_THRESHOLD = 10*K
 TELOMERE_CLUSTER_THRESHOLD = 500*K
 SUBTELOMERE_LENGTH = 500*K
+MULTI_END_ALIGNMENT_WINDOW = 500*K
 
 CENSAT_OUT_DIFF_RATIO = 0.30
 
@@ -172,6 +173,50 @@ def import_data(file_path : str) -> list :
             contig_data.append(temp_list)
             idx+=1
     return contig_data
+
+
+def terminal_alignment_anchors(row, window=MULTI_END_ALIGNMENT_WINDOW) -> set:
+    """Return chromosome ends that fully contain this PAF alignment."""
+    chrom = row[CHR_NAM]
+    chrom_len = int(row[CHR_LEN])
+    ref_st = int(row[CHR_STR])
+    ref_nd = int(row[CHR_END])
+    anchors = set()
+
+    if ref_nd <= min(int(window), chrom_len):
+        anchors.add((chrom, 'f'))
+    if ref_st >= max(0, chrom_len - int(window)):
+        anchors.add((chrom, 'b'))
+    return anchors
+
+
+def find_multi_end_aligned_contigs(contig_data, window=MULTI_END_ALIGNMENT_WINDOW):
+    """Find contigs whose every PAF row lies within at least two chromosome ends."""
+    row_indices_by_contig = defaultdict(list)
+    anchors_by_contig = defaultdict(set)
+    nonterminal_contigs = set()
+
+    for row_idx, row in enumerate(contig_data):
+        contig_name = row[CTG_NAM]
+        row_indices_by_contig[contig_name].append(row_idx)
+        anchors = terminal_alignment_anchors(row, window)
+        if anchors:
+            anchors_by_contig[contig_name].update(anchors)
+        else:
+            nonterminal_contigs.add(contig_name)
+
+    excluded_contigs = {
+        contig_name
+        for contig_name, anchors in anchors_by_contig.items()
+        if contig_name not in nonterminal_contigs and len(anchors) >= 2
+    }
+    excluded_row_indices = {
+        row_idx
+        for contig_name in excluded_contigs
+        for row_idx in row_indices_by_contig[contig_name]
+    }
+    return excluded_contigs, excluded_row_indices
+
 
 def import_data2(file_path : str) -> list :
     paf_file = open(file_path, "r")
@@ -1301,9 +1346,12 @@ def initial_graph_build(contig_data : list, telo_data : dict) -> list :
 
     return adjacency
 
-def edge_optimization(contig_data : list, contig_adjacency : list, telo_dict : dict, asm2cov : dict) -> tuple :
+def edge_optimization(contig_data : list, contig_adjacency : list, telo_dict : dict,
+                      asm2cov : dict, excluded_telomere_origins=None) -> tuple :
 
     contig_data_size = len(contig_data)
+    excluded_telomere_origins = excluded_telomere_origins or set()
+    excluded_candidate_nodes = set()
     chr_corr, chr_rev_corr = chr_correlation_maker(contig_data)
     contig_pair_nodes = defaultdict(list)
     telo_coverage = Counter()
@@ -1364,6 +1412,9 @@ def edge_optimization(contig_data : list, contig_adjacency : list, telo_dict : d
             curr_coverage = 0
             for edge in optimized_adjacency[j][i]:
                 cl_ind, c_ind = map(int, contig_data[edge[1]][CTG_GLOBALIDX].split('.'))
+                if (cl_ind, c_ind) in excluded_telomere_origins:
+                    excluded_candidate_nodes.add(edge[1])
+                    continue
                 if cl_ind < 2:
                     name = ori_ctg_name_data[cl_ind][c_ind]
                 else:
@@ -1431,6 +1482,12 @@ def edge_optimization(contig_data : list, contig_adjacency : list, telo_dict : d
                 telo_connected_set.add(k[1])
                 telo_connected_dict[k[1]] = chr_rev_corr[i]
                 telo_connected_graph_dict[chr_rev_corr[i]].append(k)
+
+    if excluded_candidate_nodes:
+        logging.info(
+            f"Skipped {len(excluded_candidate_nodes)} multi-end-aligned PAF nodes "
+            "during telomere edge optimization"
+        )
 
     return telo_connected_set, telo_connected_dict, telo_connected_graph_dict, telo_coverage
 
@@ -3142,6 +3199,17 @@ def extract_telomere_connect_contig_bytuple(telo_info_path : str) -> list:
     return telomere_connect_contig
 
 
+def telomere_name_sort_key(telo_name):
+    telo_name = str(telo_name)
+    side = telo_name[-1] if telo_name.endswith(('f', 'b')) else ''
+    chrom = telo_name[:-1] if side else telo_name
+    try:
+        chrom_order = chr2int(chrom)
+    except (TypeError, ValueError):
+        chrom_order = INF
+    return ({'f': 0, 'b': 1}.get(side, 2), chrom_order, chrom, telo_name)
+
+
 def write_telomere_connected_outputs(prefix: str, telo_edges: list,
                                       contig_data: list) -> None:
     telo_edges_by_name = defaultdict(list)
@@ -3152,7 +3220,8 @@ def write_telomere_connected_outputs(prefix: str, telo_edges: list,
             print(telo_name, edge, sep="\t", file=f)
 
     with open(f"{prefix}/telomere_connected_list_readable.txt", "wt") as f:
-        for telo_name, edges in telo_edges_by_name.items():
+        for telo_name in sorted(telo_edges_by_name, key=telomere_name_sort_key):
+            edges = telo_edges_by_name[telo_name]
             print(telo_name, file=f)
             for edge in edges:
                 print(tuple(contig_data[edge[1]]), file=f)
@@ -3592,6 +3661,7 @@ def circuit_length_calculator(circuit):
 def contig_preprocessing_00(PAF_FILE_PATH_ : list):
 
     original_node_count = 0
+    excluded_telomere_origins = set()
 
     chr_len = find_chr_len(CHROMOSOME_INFO_FILE_PATH)
     telo_data = import_telo_data(TELOMERE_INFO_FILE_PATH, chr_len)
@@ -3633,6 +3703,13 @@ def contig_preprocessing_00(PAF_FILE_PATH_ : list):
     no_chrY = (chry_nz_len / len(ydf_not_censat)) < chrY_MINIMUM_RATIO
 
     contig_data = import_data(PAF_FILE_PATH_[0])
+    excluded_contigs, excluded_rows = find_multi_end_aligned_contigs(contig_data)
+    excluded_telomere_origins.update((0, row_idx) for row_idx in excluded_rows)
+    if excluded_contigs:
+        logging.info(
+            f"Detected {len(excluded_contigs)} multi-end-aligned contigs "
+            f"({len(excluded_rows)} PAF rows) in {PAF_FILE_PATH_[0]}"
+        )
 
     original_node_count += len(contig_data)
 
@@ -3641,6 +3718,19 @@ def contig_preprocessing_00(PAF_FILE_PATH_ : list):
     repeat_label = label_repeat_node(contig_data, repeat_data, chr_len)
 
     telo_preprocessed_contig, report_case, telo_connect_info = preprocess_telo(contig_data, node_label)
+    excluded_telo_candidates = sum(
+        row_idx in excluded_rows for row_idx in telo_connect_info
+    )
+    telo_connect_info = {
+        row_idx: telo_name
+        for row_idx, telo_name in telo_connect_info.items()
+        if row_idx not in excluded_rows
+    }
+    if excluded_telo_candidates:
+        logging.info(
+            f"Excluded {excluded_telo_candidates} primary PAF telomere boundary candidates "
+            "from multi-end-aligned contigs"
+        )
 
     new_contig_data = []
     telcon_set = set()
@@ -3732,9 +3822,29 @@ def contig_preprocessing_00(PAF_FILE_PATH_ : list):
     # alt process
     if args.alt != None:
         contig_data = import_data(PAF_FILE_PATH_[1])
+        excluded_contigs, excluded_rows = find_multi_end_aligned_contigs(contig_data)
+        excluded_telomere_origins.update((1, row_idx) for row_idx in excluded_rows)
+        if excluded_contigs:
+            logging.info(
+                f"Detected {len(excluded_contigs)} multi-end-aligned contigs "
+                f"({len(excluded_rows)} PAF rows) in {PAF_FILE_PATH_[1]}"
+            )
         original_node_count += len(contig_data)
         node_label = label_node(contig_data, telo_dict)
         telo_preprocessed_contig, report_case, telo_connect_info = preprocess_telo(contig_data, node_label)
+        excluded_telo_candidates = sum(
+            row_idx in excluded_rows for row_idx in telo_connect_info
+        )
+        telo_connect_info = {
+            row_idx: telo_name
+            for row_idx, telo_name in telo_connect_info.items()
+            if row_idx not in excluded_rows
+        }
+        if excluded_telo_candidates:
+            logging.info(
+                f"Excluded {excluded_telo_candidates} alternative PAF telomere boundary candidates "
+                "from multi-end-aligned contigs"
+            )
         new_contig_data = []
         telcon_set = set()
         idxcnt = 0
@@ -3873,7 +3983,13 @@ def contig_preprocessing_00(PAF_FILE_PATH_ : list):
 
     adjacency = initial_graph_build(real_final_contig, telo_bound_dict)
 
-    telo_connected_node, telo_connected_dict, telo_connected_graph_dict, telo_coverage = edge_optimization(real_final_contig, adjacency, telo_bound_dict, asm2cov)
+    telo_connected_node, telo_connected_dict, telo_connected_graph_dict, telo_coverage = edge_optimization(
+        real_final_contig,
+        adjacency,
+        telo_bound_dict,
+        asm2cov,
+        excluded_telomere_origins,
+    )
     telo_connected_node, telo_connected_dict, telo_connected_graph_dict = filter_telomere_connected_cen_fragment_mismatch(
         real_final_contig,
         telo_connected_graph_dict,
@@ -4136,7 +4252,13 @@ def contig_preprocessing_00(PAF_FILE_PATH_ : list):
 
     adjacency = initial_graph_build(real_final_contig, telo_bound_dict)
 
-    telo_connected_node, telo_connected_dict, telo_connected_graph_dict, telo_coverage = edge_optimization(real_final_contig, adjacency, telo_bound_dict, asm2cov)
+    telo_connected_node, telo_connected_dict, telo_connected_graph_dict, telo_coverage = edge_optimization(
+        real_final_contig,
+        adjacency,
+        telo_bound_dict,
+        asm2cov,
+        excluded_telomere_origins,
+    )
     telo_connected_node, telo_connected_dict, telo_connected_graph_dict = filter_telomere_connected_cen_fragment_mismatch(
         real_final_contig,
         telo_connected_graph_dict,
@@ -5820,6 +5942,7 @@ def build_paf_telomere_nodes(paf_path, telo_data, repeat_censat_data,
     raw_rows = import_data(paf_path)
     if not raw_rows:
         return [], [], [], Counter()
+    excluded_contigs, excluded_rows = find_multi_end_aligned_contigs(raw_rows)
 
     telo_dict = telo_data_to_dict(telo_data)
     raw_telo_labels = label_node(raw_rows, telo_dict)
@@ -5831,6 +5954,21 @@ def build_paf_telomere_nodes(paf_path, telo_data, repeat_censat_data,
     raw_rows.pop()
 
     boundary_candidate_count = len(telo_connect_info)
+    excluded_boundary_candidate_count = sum(
+        raw_idx in excluded_rows for raw_idx in telo_connect_info
+    )
+    telo_connect_info = {
+        raw_idx: telo_name
+        for raw_idx, telo_name in telo_connect_info.items()
+        if raw_idx not in excluded_rows
+    }
+    if excluded_contigs:
+        logging.info(
+            f"Excluded {len(excluded_contigs)} multi-end-aligned contigs "
+            f"({len(excluded_rows)} PAF rows, "
+            f"{excluded_boundary_candidate_count} telomere boundary candidates) "
+            f"from VCF-mode telomere PAF {paf_path}"
+        )
     selected_candidates, duplicate_contigs_removed = \
         compress_paf_telomere_candidates(
             raw_rows,
@@ -5846,6 +5984,9 @@ def build_paf_telomere_nodes(paf_path, telo_data, repeat_censat_data,
             "telomere_paf_edges": 0,
             "telomere_paf_boundary_candidates": boundary_candidate_count,
             "telomere_paf_duplicate_contigs_removed": duplicate_contigs_removed,
+            "telomere_paf_multi_end_contigs_excluded": len(excluded_contigs),
+            "telomere_paf_multi_end_rows_excluded": len(excluded_rows),
+            "telomere_paf_multi_end_boundary_candidates_excluded": excluded_boundary_candidate_count,
         })
 
     selected_rows = [raw_rows[raw_idx] for _, raw_idx in selected_candidates]
@@ -5907,6 +6048,9 @@ def build_paf_telomere_nodes(paf_path, telo_data, repeat_censat_data,
         "telomere_paf_edges": len(edges),
         "telomere_paf_boundary_candidates": boundary_candidate_count,
         "telomere_paf_duplicate_contigs_removed": duplicate_contigs_removed,
+        "telomere_paf_multi_end_contigs_excluded": len(excluded_contigs),
+        "telomere_paf_multi_end_rows_excluded": len(excluded_rows),
+        "telomere_paf_multi_end_boundary_candidates_excluded": excluded_boundary_candidate_count,
     })
     metrics.update({
         f"telomere_paf_preprocess_{case.lower()}": len(rows)
@@ -6162,7 +6306,7 @@ def vcf_type4_event_from_record(record, chr_len, ins_alt_alignments=None):
 def build_vcf_mode_inputs():
     chr_len = find_chr_len(CHROMOSOME_INFO_FILE_PATH)
     header_contigs, records = read_vcf_records(args.vcf_input)
-    # validate_vcf_reference(header_contigs, records, chr_len)
+    validate_vcf_reference(header_contigs, records, chr_len)
     vcf_ins_alt_alignments = load_vcf_ins_alt_alignment_spans(args.alt)
 
     depth_df = pd.read_csv(
@@ -7343,7 +7487,9 @@ elif args.alt is None:
 else:
     PAF_FILE_PATH = [args.paf_file_path, args.alt]
 
-PREPROCESSED_PAF_FILE_PATH = (PAF_FILE_PATH[0] +'.ppc.paf')
+PREPROCESSED_PAF_FILE_PATH = os.path.join(
+    PREFIX, f"{os.path.basename(args.paf_file_path)}.ppc.paf"
+)
 CHROMOSOME_INFO_FILE_PATH = args.reference_fai_path
 TELOMERE_INFO_FILE_PATH = args.telomere_bed_path
 REPEAT_INFO_FILE_PATH = args.repeat_bed_path
