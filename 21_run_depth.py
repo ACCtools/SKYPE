@@ -10,6 +10,7 @@ import glob
 import copy
 import logging
 import argparse
+import shutil
 import subprocess
 
 import numpy as np
@@ -1391,7 +1392,13 @@ for edge in selected_type4_indel_graph_edges:
 if added_type4_indel_edges:
     logging.info(f'Added {len(added_type4_indel_edges)} type4 indel graph edges for depth PAF reconstruction')
 
-os.makedirs(f'{PREFIX}/11_ref_ratio_outliers/ecdna', exist_ok=True)
+ecdna_output_folder = f'{PREFIX}/11_ref_ratio_outliers/ecdna'
+type2_output_folder = f'{PREFIX}/11_ref_ratio_outliers/type2_ins'
+for generated_folder in (ecdna_output_folder, type2_output_folder):
+    if os.path.isdir(generated_folder):
+        shutil.rmtree(generated_folder)
+    os.makedirs(generated_folder, exist_ok=True)
+
 with open(f'{PREFIX}/ecdna_circuit_data.pkl', 'rb') as f:
     ecdna_circuit, raw_nclose_nodes = pkl.load(file=f)
 
@@ -1419,7 +1426,7 @@ for node in bnd_connected_graph:
         G.add_weighted_edges_from([(node, tuple(edge[:-1]), edge[-1])])
 
 
-create_final_depth_paf_ecdna(ecdna_circuit, f'{PREFIX}/11_ref_ratio_outliers/ecdna')
+create_final_depth_paf_ecdna(ecdna_circuit, ecdna_output_folder)
 
 create_final_depth_paf_type2(type4_ins_del, PREFIX)
 
@@ -1448,6 +1455,16 @@ int2key = dict()
 final_paf_vec_data = []
 
 RATIO_OUTLIER_FOLDER = f"{PREFIX}/11_ref_ratio_outliers/"
+
+# PanDepth owns the depth files in the stage-11 jump directories.  Remove
+# previous results before rebuilding them so a removed PAF cannot leave an
+# orphaned depth file behind when stage 21 is restarted directly.
+for jump_folder in ('front_jump', 'back_jump'):
+    for depth_path in glob.glob(
+        os.path.join(RATIO_OUTLIER_FOLDER, jump_folder, '*.win.stat.gz')
+    ):
+        os.remove(depth_path)
+
 back_front_folder_path = glob.glob(RATIO_OUTLIER_FOLDER+"*")
 
 with open(f'{PREFIX}/path_data.pkl', 'rb') as f:
@@ -1482,6 +1499,8 @@ for _, key_list in index_data_list:
             key_cnt += 1
 
 output_folder = f'{PREFIX}/21_pat_depth'
+if os.path.isdir(output_folder):
+    shutil.rmtree(output_folder)
 os.makedirs(output_folder, exist_ok=True)
 
 with ProcessPoolExecutor(max_workers=THREAD) as executor:

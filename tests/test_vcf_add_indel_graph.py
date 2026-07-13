@@ -146,6 +146,20 @@ class VcfAddIndelGraphIntegrationTests(unittest.TestCase):
                     )
 
             ppc_path = output / "assembly.paf.ppc.paf"
+            stale_outlier_root = output / "11_ref_ratio_outliers"
+            for folder_name in (
+                "front_jump",
+                "back_jump",
+                "ecdna",
+                "type2_ins",
+            ):
+                stale_folder = stale_outlier_root / folder_name
+                stale_folder.mkdir(parents=True, exist_ok=True)
+                (stale_folder / "999.paf").write_text(
+                    "stale\n", encoding="utf-8"
+                )
+                (stale_folder / "999.win.stat.gz").write_bytes(b"stale")
+
             step11_result = subprocess.run(
                 [
                     sys.executable,
@@ -169,6 +183,16 @@ class VcfAddIndelGraphIntegrationTests(unittest.TestCase):
                 {event["svtype"] for event in outlier_index.values()},
                 {"DEL", "INS"},
             )
+            self.assertFalse(
+                any(stale_outlier_root.rglob("999.paf")),
+                msg="stage 11 retained an outlier PAF from a previous run",
+            )
+            self.assertFalse(
+                any(stale_outlier_root.rglob("999.win.stat.gz")),
+                msg="stage 11 retained a depth file from a previous run",
+            )
+            self.assertFalse((stale_outlier_root / "ecdna").exists())
+            self.assertFalse((stale_outlier_root / "type2_ins").exists())
 
 
 if __name__ == "__main__":

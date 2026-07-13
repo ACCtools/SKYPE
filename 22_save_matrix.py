@@ -3,6 +3,10 @@ import sys
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from skype_utils import *
+from skype_output_files import (
+    discover_ecdna_depth_inputs,
+    discover_jump_depth_inputs,
+)
 
 import numpy as np
 import pandas as pd
@@ -629,16 +633,26 @@ with ProcessPoolExecutor(max_workers=THREAD) as executor:
         i, v = future.result()
         vec_dict[i] = v
 
-fclen = len(glob.glob(front_contig_path + "*"))
-bclen = len(glob.glob(back_contig_path + "*"))
-eclen = len(glob.glob(ecdna_contig_path + "*"))
+front_depth_inputs = discover_jump_depth_inputs(
+    front_contig_path, type2_ins_contig_path
+)
+back_depth_inputs = discover_jump_depth_inputs(
+    back_contig_path, type2_ins_contig_path
+)
+ecdna_depth_inputs = discover_ecdna_depth_inputs(ecdna_contig_path)
 
 with open(f'{PREFIX}/cen_fragment_data.pkl', 'rb') as f:
     cen_fragment_meta = pkl.load(f)
 cen_fragment_list = sorted(cen_fragment_meta.items(), key=lambda kv: chr2int(kv[0]))
 
 m = np.shape(B)[0]
-n = len(paf_ans_list) + fclen // 4 + bclen // 4 + eclen // 2 + len(cen_fragment_list)
+n = (
+    len(paf_ans_list)
+    + len(front_depth_inputs)
+    + len(back_depth_inputs)
+    + len(ecdna_depth_inputs)
+    + len(cen_fragment_list)
+)
 ncnt = 0
 
 tar_def_path_ind_dict = {}
@@ -715,20 +729,13 @@ tv_empty = np.zeros(len(chr_filt_st_list) + len(chr_no_filt_st_list), dtype=np.f
 
 indel_idx = 0
 # Process forward-directed outlier contigs
-for i in tqdm(range(1, fclen // 4 + 1), desc='Parse coverage from forward-directed outlier contig gz files',
+for i, ov_loc, bv_loc, type2_ins_idx, type2_ins_loc in tqdm(
+              front_depth_inputs,
+              desc='Parse coverage from forward-directed outlier contig gz files',
               disable=not sys.stdout.isatty() and not args.progress):
-    ov_loc = front_contig_path + f"{i}.win.stat.gz"
-
-    type2_ins_idx = -1
-    if os.path.isfile(ov_loc):
-        ov = get_vec_from_stat_loc(ov_loc)
-    else:
-        ov_type2_loc = glob.glob(front_contig_path + f"{i}_type2_merge_*.win.stat.gz")[0]
-        type2_ins_idx = int(ov_type2_loc.split('/')[-1].split('.')[0].split('_')[-1])
-        type2_ins_loc = type2_ins_contig_path + f"{type2_ins_idx}.win.stat.gz"
-        ov = get_vec_from_stat_loc(ov_type2_loc) + get_vec_from_stat_loc(type2_ins_loc)
-
-    bv_loc = front_contig_path + f"{i}_base.win.stat.gz"
+    ov = get_vec_from_stat_loc(ov_loc)
+    if type2_ins_loc is not None:
+        ov += get_vec_from_stat_loc(type2_ins_loc)
     bv = get_vec_from_stat_loc(bv_loc)
     
     if indel_idx in indel_exclude_idx_set:
@@ -742,21 +749,13 @@ for i in tqdm(range(1, fclen // 4 + 1), desc='Parse coverage from forward-direct
     ncnt += 1
     indel_idx += 1
 # Process backward-directed outlier contigs
-for i in tqdm(range(1, bclen // 4 + 1), desc='Parse coverage from backward-directed outlier contig gz files',
+for i, ov_loc, bv_loc, type2_ins_idx, type2_ins_loc in tqdm(
+              back_depth_inputs,
+              desc='Parse coverage from backward-directed outlier contig gz files',
               disable=not sys.stdout.isatty() and not args.progress):
-    ov_loc = back_contig_path + f"{i}.win.stat.gz"
-
-    type2_ins_idx = -1
-    if os.path.isfile(ov_loc):
-        ov = get_vec_from_stat_loc(ov_loc)
-    else:
-        ov_type2_loc = glob.glob(back_contig_path + f"{i}_type2_merge_*.win.stat.gz")[0]
-        type2_ins_idx = int(ov_type2_loc.split('/')[-1].split('.')[0].split('_')[-1])
-        type2_ins_loc = type2_ins_contig_path + f"{type2_ins_idx}.win.stat.gz"
-        ov = get_vec_from_stat_loc(ov_type2_loc) + get_vec_from_stat_loc(type2_ins_loc)
-
-    
-    bv_loc = back_contig_path + f"{i}_base.win.stat.gz"
+    ov = get_vec_from_stat_loc(ov_loc)
+    if type2_ins_loc is not None:
+        ov += get_vec_from_stat_loc(type2_ins_loc)
     bv = get_vec_from_stat_loc(bv_loc)
 
     if indel_idx in indel_exclude_idx_set:
@@ -770,8 +769,7 @@ for i in tqdm(range(1, bclen // 4 + 1), desc='Parse coverage from backward-direc
     ncnt += 1
     indel_idx += 1
 
-for i in range(1, eclen // 2 + 1):
-    ov_loc = ecdna_contig_path + f"{i}.win.stat.gz"
+for i, ov_loc in ecdna_depth_inputs:
     ov = get_vec_from_stat_loc(ov_loc)
     type2_ins_idx = -1
 
@@ -804,7 +802,12 @@ for chrom, info in cen_fragment_list:
     cent_fragment_cols.append(ncnt)
     ncnt += 1
 
-dep_list.extend([0] * (fclen // 4 + bclen // 4 + eclen // 2 + len(cen_fragment_list)))
+dep_list.extend([0] * (
+    len(front_depth_inputs)
+    + len(back_depth_inputs)
+    + len(ecdna_depth_inputs)
+    + len(cen_fragment_list)
+))
 
 assert(len(dep_list) == n)
 

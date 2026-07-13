@@ -2708,11 +2708,10 @@ def make_bed_output(output_prefix=''):
             cf.writerow([chrom, st, nd, 'Virtual_inversion', round(depth_N, 2)])
 
 
-if not pipeline_mode_is_vcf_input(pipeline_mode_config):
-    make_bed_output()
-    if use_julia_solver:
-        make_bed_output('_cluster')
-        make_bed_output('_filter')
+make_bed_output()
+if use_julia_solver:
+    make_bed_output('_cluster')
+    make_bed_output('_filter')
 
-# os.remove(f'{PREFIX}/matrix.h5')
+os.remove(f'{PREFIX}/matrix.h5')
 logging.info("SKYPE pipeline end")

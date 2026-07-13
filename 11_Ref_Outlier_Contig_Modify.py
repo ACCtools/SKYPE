@@ -8,6 +8,7 @@ from skype_utils import *
 import re
 import logging
 import argparse
+import shutil
 
 # logging 설정(레벨/포맷)은 skype_utils 에서 중앙 관리한다 (LOG_LEVEL).
 logging.info("11_Ref_Outlier_Contig_Modify start")
@@ -353,6 +354,12 @@ paf_file = [import_origin_data(paf_loc) for paf_loc in PAF_FILE_PATH]
 PREPROCESSED_PAF_FILE_PATH = args.ppc_paf_file_path
 TYPE_4_VECTOR_PATH = f"{args.prefix}/11_ref_ratio_outliers"
 CHROMOSOME_INFO_FILE_PATH = args.reference_fai_path
+
+# This stage rebuilds the outlier set from scratch.  Keeping files from an
+# earlier run is unsafe because event indices are reused and later stages infer
+# matrix columns from the directory contents.
+if os.path.isdir(TYPE_4_VECTOR_PATH):
+    shutil.rmtree(TYPE_4_VECTOR_PATH)
 os.makedirs(f"{TYPE_4_VECTOR_PATH}/front_jump", exist_ok=True)
 os.makedirs(f"{TYPE_4_VECTOR_PATH}/back_jump", exist_ok=True)
 
