@@ -3,12 +3,12 @@ import sys
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from skype_utils import *
+from parse_vcf import parse_vcf_events, select_vcf_type4_graph_events
 
 import shutil
 import argparse
 import subprocess
 import json
-import re
 
 import pickle as pkl
 import pandas as pd
@@ -5469,83 +5469,9 @@ VCF_ORIENTATION_MISMATCH_TSV = "vcf_mode_orientation_mismatches.tsv"
 VCF_TELOMERE_PAF_NODES_TSV = "vcf_telomere_paf_nodes.tsv"
 
 
-def sanitize_vcf_id(value):
-    value = str(value) if value not in (None, "") else "unknown"
-    return re.sub(r"[^A-Za-z0-9_.-]+", "_", value)
-
-
-def parse_vcf_info(info_text):
-    info = {}
-    if info_text in ("", "."):
-        return info
-    for item in info_text.split(";"):
-        if not item:
-            continue
-        if "=" in item:
-            key, value = item.split("=", 1)
-            info[key] = value
-        else:
-            info[item] = True
-    return info
-
-
-def parse_optional_int(value):
-    if value is None or value is True:
-        return None
-    value = str(value).split(",")[0]
-    try:
-        return int(float(value))
-    except ValueError:
-        return None
-
-
-def parse_vcf_bnd_alt(alt):
-    if not alt or alt in {".", "<BND>"}:
-        return None
-    brackets = [(idx, char) for idx, char in enumerate(str(alt)) if char in "[]"]
-    if len(brackets) != 2:
-        return None
-    (first_idx, first_bracket), (second_idx, second_bracket) = brackets
-    if first_bracket != second_bracket:
-        return None
-    mate = str(alt)[first_idx + 1:second_idx]
-    if ":" not in mate:
-        return None
-    chrom, pos_text = mate.rsplit(":", 1)
-    try:
-        pos = int(pos_text)
-    except ValueError:
-        return None
-
-    return {
-        "mate_chrom": chrom,
-        "mate_pos": pos,
-        "dir_a": "+" if first_idx > 0 else "-",
-        "dir_b": "+" if first_bracket == "[" else "-",
-        "shape": ("prefix" if first_idx > 0 else "suffix") + first_bracket,
-    }
-
-
-def parse_bnd_alt_mate(alt):
-    parsed = parse_vcf_bnd_alt(alt)
-    if parsed is None:
-        return None
-    return parsed["mate_chrom"], parsed["mate_pos"]
-
-
-def vcf_ins_query_name(record):
-    return f"vcf_ins_{int(record['line_no'])}_{sanitize_vcf_id(record['id'])}"
-
-
 def load_vcf_ins_alt_alignment_spans(paf_path):
-    alignments_by_query_chrom = defaultdict(lambda: defaultdict(lambda: {
-        "chrom": None,
-        "st": INF,
-        "nd": -1,
-        "score": 0,
-        "rows": 0,
-        "mapq": 0,
-    }))
+    best_row_by_query = {}
+    best_key_by_query = {}
     rows_by_query = defaultdict(list)
     if not paf_path:
         return {}
@@ -5570,124 +5496,28 @@ def load_vcf_ins_alt_alignment_spans(paf_path):
             if nd <= st:
                 continue
             rows_by_query[qname].append(cols)
-            bucket = alignments_by_query_chrom[qname][chrom]
-            bucket["chrom"] = chrom
-            bucket["st"] = min(bucket["st"], st)
-            bucket["nd"] = max(bucket["nd"], nd)
-            bucket["score"] += max(matches, block_len, nd - st)
-            bucket["rows"] += 1
-            bucket["mapq"] = max(bucket["mapq"], mapq)
+            # Keep every row for the INS type4 base PAF, but derive the
+            # required single-chromosome representative coordinates from the
+            # largest individual alignment block only.
+            row_key = (block_len, mapq, matches, nd - st)
+            if qname not in best_key_by_query or row_key > best_key_by_query[qname]:
+                best_key_by_query[qname] = row_key
+                best_row_by_query[qname] = {
+                    "chrom": chrom,
+                    "st": st,
+                    "nd": nd,
+                    "score": block_len,
+                    "rows": 1,
+                    "mapq": mapq,
+                }
 
     best_by_query = {}
-    for qname, chrom_buckets in alignments_by_query_chrom.items():
-        best = max(
-            chrom_buckets.values(),
-            key=lambda item: (
-                item["score"],
-                item["mapq"],
-                item["nd"] - item["st"],
-                -item["rows"],
-            ),
-        )
+    for qname, best in best_row_by_query.items():
         if best["chrom"] is not None and best["nd"] > best["st"]:
             best = dict(best)
             best["paf_rows"] = rows_by_query.get(qname, [])
             best_by_query[qname] = best
     return best_by_query
-
-
-def parse_vcf_contig_header(line):
-    if not line.startswith("##contig=<") or not line.endswith(">"):
-        return None
-    body = line[len("##contig=<"):-1]
-    fields = {}
-    for item in body.split(","):
-        if "=" in item:
-            key, value = item.split("=", 1)
-            fields[key] = value
-    if "ID" not in fields or "length" not in fields:
-        return None
-    try:
-        return fields["ID"], int(fields["length"])
-    except ValueError:
-        return None
-
-
-def read_vcf_records(vcf_path):
-    header_contigs = {}
-    records = []
-    with open(vcf_path, "rt") as f:
-        for line_no, line in enumerate(f, start=1):
-            line = line.rstrip("\n")
-            if not line:
-                continue
-            if line.startswith("##contig=<"):
-                parsed = parse_vcf_contig_header(line)
-                if parsed is not None:
-                    header_contigs[parsed[0]] = parsed[1]
-                continue
-            if line.startswith("#"):
-                continue
-            cols = line.split("\t")
-            if len(cols) < 8:
-                records.append({
-                    "line_no": line_no,
-                    "malformed": True,
-                    "malformed_reason": "fewer_than_8_columns",
-                    "raw": line,
-                })
-                continue
-            chrom, pos_text, rec_id, ref, alt, qual, filt, info_text = cols[:8]
-            try:
-                pos = int(pos_text)
-            except ValueError:
-                records.append({
-                    "line_no": line_no,
-                    "malformed": True,
-                    "malformed_reason": "bad_pos",
-                    "raw": line,
-                })
-                continue
-            info = parse_vcf_info(info_text)
-            if rec_id in ("", "."):
-                rec_id = f"VCF_RECORD_{line_no}"
-            records.append({
-                "line_no": line_no,
-                "chrom": chrom,
-                "pos": pos,
-                "id": rec_id,
-                "ref": ref,
-                "alt": alt.split(",")[0],
-                "qual": qual,
-                "filter": filt,
-                "info": info,
-                "raw": line,
-            })
-    return header_contigs, records
-
-
-def validate_vcf_reference(header_contigs, records, chr_len):
-    errors = []
-    for chrom, length in sorted(header_contigs.items(), key=lambda kv: kv[0]):
-        if chrom not in chr_len:
-            errors.append(f"{chrom}: present in VCF header but absent from reference_fai")
-        elif int(chr_len[chrom]) != int(length):
-            errors.append(f"{chrom}: VCF length {length} != FAI length {chr_len[chrom]}")
-    used_chroms = {
-        rec["chrom"] for rec in records
-        if not rec.get("malformed") and rec.get("chrom")
-    }
-    for rec in records:
-        if rec.get("malformed"):
-            continue
-        mate = parse_bnd_alt_mate(rec.get("alt"))
-        if mate is not None:
-            used_chroms.add(mate[0])
-    for chrom in sorted(used_chroms):
-        if chrom not in chr_len:
-            errors.append(f"{chrom}: used by VCF record but absent from reference_fai")
-    if errors:
-        raise ValueError("VCF/reference mismatch:\n" + "\n".join(errors))
 
 
 def endpoint_interval(pos, chrom_len, path_dir, endpoint_role):
@@ -6152,75 +5982,6 @@ def add_missing_virtual_telomeres(contig_data, telo_edges, chr_len, telo_data,
     return len(virtual_nodes)
 
 
-def vcf_record_mate_id(record):
-    value = record["info"].get("MATE_ID", record["info"].get("MATEID"))
-    if value in (None, True, ""):
-        return None
-    return str(value).split(",")[0]
-
-
-def vcf_bnd_alt_pair(record, mate_record):
-    alt_a = parse_vcf_bnd_alt(record.get("alt"))
-    alt_b = parse_vcf_bnd_alt(mate_record.get("alt"))
-    if alt_a is None or alt_b is None:
-        return None, "malformed_BND_ALT"
-    if vcf_record_mate_id(mate_record) != record["id"]:
-        return None, "nonreciprocal_MATEID"
-    if (alt_a["mate_chrom"], alt_a["mate_pos"]) != (mate_record["chrom"], mate_record["pos"]):
-        return None, "BND_ALT_mate_coord_mismatch"
-    if (alt_b["mate_chrom"], alt_b["mate_pos"]) != (record["chrom"], record["pos"]):
-        return None, "BND_ALT_mate_coord_mismatch"
-
-    expected_mate_dirs = (
-        invert_vcf_strand(alt_a["dir_b"]),
-        invert_vcf_strand(alt_a["dir_a"]),
-    )
-    observed_mate_dirs = (alt_b["dir_a"], alt_b["dir_b"])
-    if observed_mate_dirs != expected_mate_dirs:
-        return None, "BND_ALT_orientation_mismatch"
-    return (alt_a, alt_b), None
-
-
-def vcf_bnd_type4_event_from_alt_pair(record, mate_alt):
-    if record["chrom"] != mate_alt["mate_chrom"]:
-        return None
-    pos_a = int(record["pos"])
-    pos_b = int(mate_alt["mate_pos"])
-    st, nd = sorted((pos_a, pos_b))
-    span = nd - st
-    if span < VCF_TYPE4_MIN_SPAN:
-        return None
-
-    dir_a = mate_alt["dir_a"]
-    dir_b = mate_alt["dir_b"]
-    if dir_a == "+" and dir_b == "+":
-        event_type = "front_jump" if pos_a < pos_b else "back_jump"
-    elif dir_a == "-" and dir_b == "-":
-        event_type = "back_jump" if pos_a < pos_b else "front_jump"
-    else:
-        return None
-
-    indel_kind = "deletion" if event_type == "front_jump" else "insertion"
-    mate_id = vcf_record_mate_id(record)
-    event_id = f"vcf_bnd_{sanitize_vcf_id(record['id'])}"
-    if mate_id:
-        event_id += f"_{sanitize_vcf_id(mate_id)}"
-    return {
-        "event_id": event_id,
-        "vcf_id": record["id"],
-        "mate_id": mate_id,
-        "svtype": "BND",
-        "event_type": event_type,
-        "indel_kind": indel_kind,
-        "chrom": record["chrom"],
-        "st": st,
-        "nd": nd,
-        "svlen": span,
-        "line_no": record["line_no"],
-        "source": f"VCF_BND_{event_id}",
-    }
-
-
 def add_vcf_nclose_pair(contig_data, nclose_nodes, event_name, chr_a, pos_a, dir_a,
                         chr_b, pos_b, dir_b, chr_len, global_idx_start):
     ctg_typ = 1 if chr_a != chr_b else 2
@@ -6239,75 +6000,98 @@ def add_vcf_nclose_pair(contig_data, nclose_nodes, event_name, chr_a, pos_a, dir
     return global_idx_start + 2
 
 
-def vcf_type4_event_from_record(record, chr_len, ins_alt_alignments=None):
-    info = record["info"]
-    svtype = str(info.get("SVTYPE", "")).upper()
-    svlen = abs(parse_optional_int(info.get("SVLEN")) or 0)
-    if svtype in {"DEL", "DUP"}:
-        end = parse_optional_int(info.get("END"))
-        if end is None:
-            return None, "missing_END"
-        chrom = record["chrom"]
-        if chrom not in chr_len:
-            return None, "unknown_chrom"
-        st, nd = sorted((int(record["pos"]), int(end)))
-        span = nd - st
-        if max(svlen, span) < VCF_TYPE4_MIN_SPAN:
-            return None, "small_indel_size"
-        event_type = "front_jump" if svtype == "DEL" else "back_jump"
-        indel_kind = "deletion" if svtype == "DEL" else "insertion"
-        return {
-            "event_id": sanitize_vcf_id(record["id"]),
-            "vcf_id": record["id"],
-            "svtype": svtype,
-            "event_type": event_type,
-            "indel_kind": indel_kind,
-            "chrom": chrom,
-            "st": st,
-            "nd": nd,
-            "svlen": svlen,
-            "line_no": record["line_no"],
-            "source": f"VCF_{sanitize_vcf_id(record['id'])}",
-        }, None
+def canonical_nclose_snapshot(nclose_nodes):
+    return {
+        key: tuple(tuple(int(node_idx) for node_idx in pair) for pair in pair_list)
+        for key, pair_list in nclose_nodes.items()
+    }
 
-    if svtype == "INS":
-        if 0 < svlen < VCF_TYPE4_MIN_SPAN:
-            return None, "small_indel_size"
-        query_name = vcf_ins_query_name(record)
-        aligned = (ins_alt_alignments or {}).get(query_name)
-        if aligned is None:
-            return None, "INS_no_alt_alignment"
-        chrom = aligned["chrom"]
-        st = int(aligned["st"])
-        nd = int(aligned["nd"])
-        if chrom not in chr_len:
-            return None, "unknown_alt_alignment_chrom"
-        span = nd - st
-        if max(svlen, span) < VCF_TYPE4_MIN_SPAN:
-            return None, "small_indel_size"
-        return {
-            "event_id": sanitize_vcf_id(record["id"]),
-            "vcf_id": record["id"],
-            "svtype": svtype,
-            "event_type": "back_jump",
-            "indel_kind": "insertion",
-            "chrom": chrom,
-            "st": st,
-            "nd": nd,
-            "svlen": svlen,
-            "line_no": record["line_no"],
-            "query_name": query_name,
-            "paf_rows": aligned.get("paf_rows", []),
-            "source": f"VCF_{sanitize_vcf_id(record['id'])}",
-        }, None
-    return None, "not_type4_svtype"
+
+def assert_vcf_nclose_has_no_indel_like(contig_data, nclose_nodes, context):
+    """Fail if canonical VCF nclose contains a same-chrom/same-dir pair."""
+
+    offenders = []
+    for event_name, pair_list in nclose_nodes.items():
+        for pair in pair_list:
+            if len(pair) != 2:
+                raise AssertionError(
+                    f"{context}: invalid canonical VCF nclose pair for "
+                    f"{event_name}: {pair}"
+                )
+            node_a = contig_data[int(pair[0])]
+            node_b = contig_data[int(pair[1])]
+            if (
+                node_a[CHR_NAM] == node_b[CHR_NAM]
+                and node_a[CTG_DIR] == node_b[CTG_DIR]
+            ):
+                offenders.append(
+                    (
+                        event_name,
+                        tuple(int(node_idx) for node_idx in pair),
+                        node_a[CHR_NAM],
+                        node_a[CTG_DIR],
+                    )
+                )
+
+    if offenders:
+        preview = ", ".join(
+            f"{name}:{pair}:{chrom}{direction}/{chrom}{direction}"
+            for name, pair, chrom, direction in offenders[:8]
+        )
+        raise AssertionError(
+            f"{context}: canonical VCF nclose contains {len(offenders)} "
+            f"Indel-like same-chrom/same-dir pair(s): {preview}"
+        )
+
+
+def add_vcf_type4_graph_pair(contig_data, event, event_index, chr_len,
+                             global_idx_start):
+    """Add graph-only breakpoint flanks for one non-INS VCF type4 event."""
+
+    chrom = str(event["chrom"])
+    st, nd = sorted((int(event["st"]), int(event["nd"])))
+    event_type = str(event["event_type"])
+    if event_type == "front_jump":
+        exit_pos, entry_pos = st, nd
+    elif event_type == "back_jump":
+        exit_pos, entry_pos = nd, st
+    else:
+        raise ValueError(f"Invalid VCF type4 graph event_type: {event_type}")
+
+    event_id = str(event.get("event_id", event.get("vcf_id", event_index)))
+    contig_name = f"{VCF_TYPE4_GRAPH_NODE_PREFIX}{event_index}_{event_id}"
+    s_idx = len(contig_data)
+    e_idx = s_idx + 1
+    node_a = make_synthetic_vcf_node(
+        contig_name, chrom, exit_pos, "+", "exit", chr_len, 4,
+        s_idx, global_idx_start,
+    )
+    node_b = make_synthetic_vcf_node(
+        contig_name, chrom, entry_pos, "+", "entry", chr_len, 4,
+        e_idx, global_idx_start + 1,
+    )
+    node_a[CTG_STRND] = node_b[CTG_STRND] = s_idx
+    node_a[CTG_ENDND] = node_b[CTG_ENDND] = e_idx
+
+    len_a = int(node_a[CTG_END]) - int(node_a[CTG_STR])
+    len_b = int(node_b[CTG_END]) - int(node_b[CTG_STR])
+    total_len = len_a + len_b
+    node_a[CTG_LEN] = node_b[CTG_LEN] = total_len
+    node_a[CTG_STR], node_a[CTG_END] = 0, len_a
+    node_b[CTG_STR], node_b[CTG_END] = len_a, total_len
+    contig_data.extend([node_a, node_b])
+    return global_idx_start + 2
 
 
 def build_vcf_mode_inputs():
     chr_len = find_chr_len(CHROMOSOME_INFO_FILE_PATH)
-    header_contigs, records = read_vcf_records(args.vcf_input)
-    validate_vcf_reference(header_contigs, records, chr_len)
     vcf_ins_alt_alignments = load_vcf_ins_alt_alignment_spans(args.alt)
+    parsed_vcf = parse_vcf_events(
+        args.vcf_input,
+        chr_len,
+        pass_filters=args.vcf_filter_pass,
+        ins_alt_alignments=vcf_ins_alt_alignments,
+    )
 
     depth_df = pd.read_csv(
         main_stat_loc,
@@ -6320,151 +6104,69 @@ def build_vcf_mode_inputs():
     repeat_censat_data = import_censat_repeat_data(CENSAT_PATH)
     telo_data = import_telo_data(TELOMERE_INFO_FILE_PATH, chr_len)
 
-    summary = {
-        metric: 0
-        for metric in (
-            "used_bnd_events",
-            "used_bnd_type4_events",
-            "used_inv_events",
-            "used_type4_events",
-            "skipped_ins",
-            "skipped_pure_ins",
-            "skipped_ins_small_size",
-            "skipped_ins_no_alt_alignment",
-            "skipped_small_indel_size",
-            "skipped_not_type4_svtype",
-            "missing_mates",
-            "malformed_records",
-            "orientation_mismatches",
-        )
-    }
-    skipped_records = []
-    orientation_mismatches = []
+    summary = dict(parsed_vcf.summary)
+    skipped_records = list(parsed_vcf.skipped_records)
+    orientation_mismatches = list(parsed_vcf.orientation_mismatches)
     contig_data = []
     nclose_nodes = defaultdict(list)
-    yield_type4_events = []
+    # VCF indels are never added to the step-02 nclose graph.  The parser
+    # places only >=100 kb indels here; step 11 consumes this handoff file.
+    step11_vcf_type4_events = list(parsed_vcf.type4_events)
     global_idx = 0
 
-    records_by_id = {
-        rec["id"]: rec
-        for rec in records
-        if not rec.get("malformed")
-    }
-    consumed_bnd_ids = set()
+    for spec in parsed_vcf.nclose_specs:
+        global_idx = add_vcf_nclose_pair(
+            contig_data,
+            nclose_nodes,
+            spec.event_name,
+            spec.chrom_a,
+            spec.pos_a,
+            spec.dir_a,
+            spec.chrom_b,
+            spec.pos_b,
+            spec.dir_b,
+            chr_len,
+            global_idx,
+        )
 
-    for record in records:
-        if record.get("malformed"):
-            summary["malformed_records"] += 1
-            skipped_records.append((record.get("line_no"), ".", ".", record.get("malformed_reason"), record.get("raw", "")))
-            continue
-        info = record["info"]
-        svtype = str(info.get("SVTYPE", "")).upper()
+    assert_vcf_nclose_has_no_indel_like(
+        contig_data,
+        nclose_nodes,
+        "VCF parser handoff",
+    )
 
-        if svtype == "BND":
-            if record["id"] in consumed_bnd_ids:
-                continue
-            mate_id = vcf_record_mate_id(record)
-            mate_record = records_by_id.get(mate_id) if mate_id else None
-            if mate_record is None:
-                summary["missing_mates"] += 1
-                skipped_records.append((record["line_no"], record["id"], svtype, "missing_mate", record["raw"]))
-                consumed_bnd_ids.add(record["id"])
-                continue
-            if str(mate_record["info"].get("SVTYPE", "")).upper() != "BND":
-                summary["malformed_records"] += 1
-                skipped_records.append((record["line_no"], record["id"], svtype, "mate_not_BND", record["raw"]))
-                consumed_bnd_ids.add(record["id"])
-                consumed_bnd_ids.add(mate_id)
-                continue
-            alt_pair, reason = vcf_bnd_alt_pair(record, mate_record)
-            if alt_pair is None:
-                summary["malformed_records"] += 2
-                skipped_records.append((record["line_no"], record["id"], svtype, reason, record["raw"]))
-                skipped_records.append((mate_record["line_no"], mate_record["id"], svtype, reason, mate_record["raw"]))
-                consumed_bnd_ids.add(record["id"])
-                consumed_bnd_ids.add(mate_id)
-                continue
-
-            alt_a, _ = alt_pair
-            if alt_a["mate_chrom"] not in chr_len or record["chrom"] not in chr_len:
-                summary["malformed_records"] += 2
-                skipped_records.append((record["line_no"], record["id"], svtype, "unknown_chrom", record["raw"]))
-                skipped_records.append((mate_record["line_no"], mate_record["id"], svtype, "unknown_chrom", mate_record["raw"]))
-                consumed_bnd_ids.add(record["id"])
-                consumed_bnd_ids.add(mate_id)
-                continue
-
-            type4_event = vcf_bnd_type4_event_from_alt_pair(record, alt_a)
-            if type4_event is not None:
-                yield_type4_events.append(type4_event)
-                summary["used_type4_events"] += 1
-                summary["used_bnd_type4_events"] += 1
-                consumed_bnd_ids.add(record["id"])
-                consumed_bnd_ids.add(mate_id)
-                continue
-
-            event_name = f"vcf_bnd_{sanitize_vcf_id(record['id'])}"
-            if mate_id:
-                event_name += f"_{sanitize_vcf_id(mate_id)}"
-            global_idx = add_vcf_nclose_pair(
-                contig_data, nclose_nodes, event_name,
-                record["chrom"], record["pos"], alt_a["dir_a"],
-                alt_a["mate_chrom"], alt_a["mate_pos"], alt_a["dir_b"],
-                chr_len, global_idx
+    vcf_type4_graph_events = (
+        select_vcf_type4_graph_events(step11_vcf_type4_events)
+        if args.add_indel_graph
+        else []
+    )
+    for event_index, event in enumerate(vcf_type4_graph_events):
+        global_idx = add_vcf_type4_graph_pair(
+            contig_data,
+            event,
+            event_index,
+            chr_len,
+            global_idx,
+        )
+    if args.add_indel_graph:
+        invalid_graph_svtypes = sorted({
+            str(event.get("svtype", "")).upper()
+            for event in vcf_type4_graph_events
+            if str(event.get("svtype", "")).upper() not in {"DEL", "DUP", "BND"}
+        })
+        if invalid_graph_svtypes:
+            raise AssertionError(
+                "VCF --add_indel_graph received ineligible SVTYPE(s): "
+                + ", ".join(invalid_graph_svtypes)
             )
-            summary["used_bnd_events"] += 1
-            consumed_bnd_ids.add(record["id"])
-            if mate_id:
-                consumed_bnd_ids.add(mate_id)
-            continue
-
-        if svtype == "INV":
-            end = parse_optional_int(info.get("END"))
-            if end is None:
-                summary["malformed_records"] += 1
-                skipped_records.append((record["line_no"], record["id"], svtype, "missing_END", record["raw"]))
-                continue
-            if record["chrom"] not in chr_len:
-                summary["malformed_records"] += 1
-                skipped_records.append((record["line_no"], record["id"], svtype, "unknown_chrom", record["raw"]))
-                continue
-            chrom = record["chrom"]
-            pos_a, pos_b = sorted((record["pos"], end))
-            event_name = f"vcf_inv_{sanitize_vcf_id(record['id'])}_left"
-            global_idx = add_vcf_nclose_pair(
-                contig_data, nclose_nodes, event_name,
-                chrom, pos_a, "+", chrom, pos_b, "-",
-                chr_len, global_idx
-            )
-            event_name = f"vcf_inv_{sanitize_vcf_id(record['id'])}_right"
-            global_idx = add_vcf_nclose_pair(
-                contig_data, nclose_nodes, event_name,
-                chrom, pos_a, "-", chrom, pos_b, "+",
-                chr_len, global_idx
-            )
-            summary["used_inv_events"] += 1
-            continue
-
-        event, reason = vcf_type4_event_from_record(record, chr_len, vcf_ins_alt_alignments)
-        if event is not None:
-            summary["used_type4_events"] += 1
-            yield_type4_events.append(event)
-        elif svtype == "INS" and reason == "INS_no_alt_alignment":
-            summary["skipped_ins"] += 1
-            summary["skipped_ins_no_alt_alignment"] += 1
-            skipped_records.append((record["line_no"], record["id"], svtype, reason, record["raw"]))
-        elif svtype in {"DEL", "DUP", "INS"} and reason == "small_indel_size":
-            if svtype == "INS":
-                summary["skipped_ins"] += 1
-                summary["skipped_ins_small_size"] += 1
-            summary["skipped_small_indel_size"] += 1
-            skipped_records.append((record["line_no"], record["id"], svtype, reason, record["raw"]))
-        elif reason == "not_type4_svtype":
-            summary["skipped_not_type4_svtype"] += 1
-            skipped_records.append((record["line_no"], record["id"], svtype, reason, record["raw"]))
-        elif svtype in {"DEL", "DUP", "INS"} and reason != "not_type4_svtype":
-            summary["malformed_records"] += 1
-            skipped_records.append((record["line_no"], record["id"], svtype, reason, record["raw"]))
+        graph_excluded_ins = sum(
+            str(event.get("svtype", "")).upper() == "INS"
+            for event in step11_vcf_type4_events
+        )
+        logging.info(
+            f"VCF --add_indel_graph: prepared {len(vcf_type4_graph_events)} "
+            f"DEL/DUP/BND Indel-like event(s); excluded {graph_excluded_ins} INS"
+        )
 
     # Everything accumulated so far was created from VCF records.  Keep its
     # telomere labels at zero; only PAF/virtual nodes may carry telomere data.
@@ -6529,7 +6231,7 @@ def build_vcf_mode_inputs():
     with open(f"{PREFIX}/conjoined_type4_ins_del.pkl", "wb") as f:
         pkl.dump(([], []), f)
     with open(f"{PREFIX}/{VCF_TYPE4_EVENTS_PKL}", "wb") as f:
-        pkl.dump(yield_type4_events, f)
+        pkl.dump(step11_vcf_type4_events, f)
     with open(f"{PREFIX}/indel_exclude_idx_set.pkl", "wb") as f:
         pkl.dump(set(), f)
 
@@ -6572,12 +6274,21 @@ def build_vcf_mode_inputs():
     )
 
     summary.update({
-        "vcf_records": len([r for r in records if not r.get("malformed")]),
         "nclose_pairs": sum(len(v) for v in nclose_nodes.values()),
         "synthetic_nodes": len(contig_data),
         "virtual_telomere_nodes": virtual_telomere_nodes,
         "type4_min_span": VCF_TYPE4_MIN_SPAN,
         "vcf_ins_alt_alignment_queries": len(vcf_ins_alt_alignments),
+        "vcf_type4_graph_events": len(vcf_type4_graph_events),
+        "vcf_type4_graph_nodes": 2 * len(vcf_type4_graph_events),
+        "vcf_type4_graph_ins_excluded": (
+            sum(
+                str(event.get("svtype", "")).upper() == "INS"
+                for event in step11_vcf_type4_events
+            )
+            if args.add_indel_graph
+            else 0
+        ),
     })
     summary.update(telomere_paf_metrics)
     with open(f"{PREFIX}/{VCF_MODE_SUMMARY_JSON}", "wt") as f:
@@ -6591,7 +6302,7 @@ def build_vcf_mode_inputs():
         for row in skipped_records:
             print("\t".join(map(str, row)), file=f)
     with open(f"{PREFIX}/{VCF_ORIENTATION_MISMATCH_TSV}", "wt") as f:
-        print("line_no\tid\tstrands\tskype_dirs_from_strands\tskype_dirs_from_alt\talt", file=f)
+        print("line_no\tid\tmate_line_no\tmate_id\tdirs\tmate_dirs\talt\tmate_alt", file=f)
         for row in orientation_mismatches:
             print("\t".join(map(str, row)), file=f)
 
@@ -7442,11 +7153,16 @@ parser.add_argument("--add_alt_ctg_simple",
 
 parser.add_argument("--add_indel_graph",
                     dest="add_indel_graph",
-                    help="Add selected type4 indel rescue edges to the breakend graph without increasing graph dimensions.",
+                    help="Add selected type4 indel rescue edges to the breakend graph without increasing graph dimensions. "
+                         "In VCF mode, DEL/DUP/Indel-like BND events are eligible and INS is excluded.",
                     action='store_true')
 parser.add_argument("--vcf_input",
                     help="VCF input for benchmark mode; bypass PAF-derived nclose discovery and use VCF calls instead.",
                     default=None)
+parser.add_argument("--vcf_filter_pass", nargs='+', metavar="FILTER",
+                    help="Exact, case-sensitive VCF FILTER values to retain in VCF mode. "
+                         "Supplying this option replaces the default PASS and . values.",
+                    default=["PASS", "."])
 
 mode_group = parser.add_mutually_exclusive_group()
 mode_group.add_argument("--karyotype_mode",
@@ -7509,6 +7225,8 @@ if args.test:
     CHR_CHANGE_LIMIT_ABS_MAX = 2
 
 if args.vcf_input is None:
+    if args.vcf_filter_pass != ["PASS", "."]:
+        logging.warning("--vcf_filter_pass is ignored without --vcf_input.")
     assert(len(PAF_FILE_PATH) == len(ORIGINAL_PAF_LOC_LIST))
 else:
     ORIGINAL_PAF_LOC_LIST_ = []
@@ -7525,8 +7243,6 @@ ori_ctg_name_data = []
 if args.vcf_input is not None:
     if args.original_paf_loc is not None:
         logging.warning("--original_paf_loc is ignored in VCF input mode.")
-    if args.add_indel_graph:
-        logging.warning("--add_indel_graph is ignored in VCF input mode; VCF nclose calls are used directly.")
     globals().update(build_vcf_mode_inputs())
 else:
     ori_ctg_name_data = get_ori_ctg_name_data(PAF_FILE_PATH)
@@ -7585,7 +7301,8 @@ if args.vcf_input is None and nclose_node_count > FAIL_NCLOSE_COUNT:
 selected_type4_indel_graph_edges = []
 type4_indel_zero_dim_edge_set = set()
 graph_nclose_nodes = nclose_nodes
-if args.vcf_input is None and args.add_indel_graph:
+canonical_nclose_before_indel_graph = canonical_nclose_snapshot(nclose_nodes)
+if args.add_indel_graph:
     type4_indel_graph_candidates = collect_type4_indel_graph_candidates(
         contig_data, df, repeat_censat_data
     )
@@ -7613,6 +7330,31 @@ if args.vcf_input is None and args.add_indel_graph:
         f'{len(type4_indel_graph_candidates)} depth-supported candidates '
         f'{dict(type4_indel_candidate_kind_count)} >= {TYPE4_INDEL_GRAPH_MIN_SPAN} bp)'
     )
+
+if canonical_nclose_snapshot(nclose_nodes) != canonical_nclose_before_indel_graph:
+    raise AssertionError(
+        "--add_indel_graph mutated canonical nclose_nodes; Indel-like edges "
+        "must remain graph-only"
+    )
+if args.vcf_input is not None:
+    assert_vcf_nclose_has_no_indel_like(
+        contig_data,
+        nclose_nodes,
+        "post --add_indel_graph canonical nclose",
+    )
+    if args.add_indel_graph:
+        non_vcf_graph_edges = [
+            edge
+            for edge in selected_type4_indel_graph_edges
+            if not str(edge.get('contig_name', '')).startswith(
+                VCF_TYPE4_GRAPH_NODE_PREFIX
+            )
+        ]
+        if non_vcf_graph_edges:
+            raise AssertionError(
+                "VCF --add_indel_graph selected an edge outside graph-only "
+                f"VCF nodes: {non_vcf_graph_edges[:2]}"
+            )
 
 bnd_graph_adjacency = initialize_bnd_graph(contig_data, graph_nclose_nodes, telo_contig)
 
@@ -8221,6 +7963,13 @@ with open(f'{PREFIX}/report.txt', 'w') as f:
     for (st, nd), c in sorted(cnt_list, key=lambda x:-x[1]):
         if c > 0:
             print(st, nd, c, file=f)
+
+if args.vcf_input is not None:
+    assert_vcf_nclose_has_no_indel_like(
+        contig_data,
+        nclose_nodes,
+        "final nclose_chunk_data.pkl",
+    )
 
 with open(f'{PREFIX}/nclose_chunk_data.pkl', 'wb') as f:
     pkl.dump((nclose_nodes, st_compress, ed_compress), f)

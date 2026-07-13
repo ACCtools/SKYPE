@@ -416,11 +416,16 @@ cntbj = 0
 while s<contig_data_size:
     e = contig_data[s][CTG_ENDND]
 
-    if contig_data[s][CTG_TYP] == 4:
+    # These flanks make the same VCF event traversable by step 02; the
+    # canonical event below still owns the single step-11 outlier entry.
+    is_vcf_graph_only_type4 = str(contig_data[s][CTG_NAM]).startswith(
+        VCF_TYPE4_GRAPH_NODE_PREFIX
+    )
+    if contig_data[s][CTG_TYP] == 4 and not is_vcf_graph_only_type4:
         chr_name = contig_data[s][CHR_NAM]
         chr_len = chr_data[chr_name]
         rat, ref_st_ed = calculate_single_contig_ref_ratio(contig_data[s:e+1])
-        if abs(ref_st_ed[1]-ref_st_ed[0]) > CHUKJI_LIMIT:
+        if abs(ref_st_ed[1]-ref_st_ed[0]) >= CHUKJI_LIMIT:
             if rat > 0:
                 candidate = make_indel_candidate('front_jump', chr_name, ref_st_ed[0], ref_st_ed[1], f'type4:{s}-{e}')
                 if not should_emit_indel_candidate(candidate):
@@ -477,8 +482,20 @@ for event in unique_vcf_type4_events:
         logging.warning(f"Skipping malformed VCF Indel event in 11: {event}")
         continue
 
-    base_row = make_base_paf_row(chrom, ref_st, ref_nd)
     svtype = str(event.get("svtype", "")).upper()
+    event_size = (
+        abs(int(event.get("svlen", 0)))
+        if svtype == "INS"
+        else abs(ref_nd - ref_st)
+    )
+    if event_size < VCF_TYPE4_MIN_SPAN:
+        logging.warning(
+            "Skipping VCF Indel event below the step-11 threshold "
+            f"({event_size} < {VCF_TYPE4_MIN_SPAN}): {event}"
+        )
+        continue
+
+    base_row = make_base_paf_row(chrom, ref_st, ref_nd)
     if svtype == "INS":
         base_rows = event.get("paf_rows") or []
         if not base_rows:

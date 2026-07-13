@@ -36,6 +36,9 @@ logging.info("31_depth_analysis start")
 BREAKEND_REMARKABLE_CN_RATIO = 0.05
 TELOMERE_REMARKABLE_CN_RATIO = 0.05
 VCF_FILTER_DEPTH_N = 0.1
+SKYPE_VCF_SOURCE_HEADER = "##source=SKYPE"
+SKYPE_VCF_POSTPROCESSED_SOURCE = "SKYPE post-processed input VCF"
+SKYPE_VCF_POSTPROCESSED_SOURCE_SUFFIX = f";{SKYPE_VCF_POSTPROCESSED_SOURCE}"
 RAW_TRANSLOCATION_RESULT_PKL = 'raw_translocation_result.pkl'
 RAW_TRANSLOCATION_REPORT_TSV = 'raw_translocation_read_counts.tsv'
 
@@ -552,6 +555,7 @@ def make_strands(dir_a, dir_b):
 
 def write_vcf_header(fh, contig_lengths):
     fh.write("##fileformat=VCFv4.3\n")
+    fh.write(f"{SKYPE_VCF_SOURCE_HEADER}\n")
     fh.write('##ALT=<ID=BND,Description="Breakend">\n')
     fh.write('##ALT=<ID=INV,Description="Inversion">\n')
     fh.write('##ALT=<ID=DEL,Description="Deletion">\n')
@@ -1763,6 +1767,39 @@ def read_input_vcf_records(vcf_path):
     return header_lines, records, sanitized_to_keys
 
 
+def add_skype_postprocessed_source_header(header_lines):
+    if any(
+        SKYPE_VCF_POSTPROCESSED_SOURCE_SUFFIX in line
+        for line in header_lines
+        if line.startswith("##source=")
+    ):
+        return header_lines
+
+    source_indexes = [
+        index for index, line in enumerate(header_lines)
+        if line.startswith("##source=")
+    ]
+    if source_indexes:
+        source_index = source_indexes[-1]
+        return (
+            header_lines[:source_index]
+            + [header_lines[source_index] + SKYPE_VCF_POSTPROCESSED_SOURCE_SUFFIX]
+            + header_lines[source_index + 1:]
+        )
+
+    fileformat_index = next(
+        (
+            index for index, line in enumerate(header_lines)
+            if line.startswith("##fileformat=")
+        ),
+        -1,
+    )
+    insert_at = fileformat_index + 1
+    return header_lines[:insert_at] + [
+        f"##source={SKYPE_VCF_POSTPROCESSED_SOURCE}"
+    ] + header_lines[insert_at:]
+
+
 def load_vcf_skip_reasons():
     skip_by_key = {}
     skip_by_line = {}
@@ -2006,6 +2043,7 @@ def write_annotated_input_vcf(weights):
         raise FileNotFoundError(f"VCF input file does not exist: {vcf_input_path}")
 
     header_lines, records, sanitized_to_keys = read_input_vcf_records(vcf_input_path)
+    header_lines = add_skype_postprocessed_source_header(header_lines)
     (
         cn_by_key,
         evaluated_keys,

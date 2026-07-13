@@ -31,6 +31,7 @@ TYPE4_INDEL_GRAPH_EDGE_PKL = "type4_indel_graph_edges.pkl"
 
 VCF_TYPE4_EVENTS_PKL = "vcf_type4_events.pkl"
 VCF_TYPE4_OUTLIER_INDEX_PKL = "vcf_type4_outlier_index.pkl"
+VCF_TYPE4_GRAPH_NODE_PREFIX = "vcf_type4_graph_"
 VCF_MODE_SUMMARY_JSON = "vcf_mode_summary.json"
 VCF_MODE_SUMMARY_TSV = "vcf_mode_summary.tsv"
 VCF_TYPE4_MIN_SPAN = 100 * K

@@ -1,0 +1,44 @@
+name: Tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Python 3.12
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    defaults:
+      run:
+        shell: bash -leo pipefail {0}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Create minimal test environment
+        uses: mamba-org/setup-micromamba@v3
+        with:
+          environment-name: skype-tests
+          cache-environment: true
+          cache-downloads: true
+          create-args: >-
+            python=3.12
+            numpy
+            pandas
+            networkx
+            tqdm
+            graph-tool
+
+      - name: Run test suite
+        run: python -m unittest discover -s tests -v

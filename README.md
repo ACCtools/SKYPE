@@ -1,30 +1,39 @@
-# Graph-based cancer genome scaffolding tool
+# Graph-based cancer genome karyotyping and structural-variant analysis tool
 
-**SKYPE** generates following results.
-- **Circos plot**, which shows copy number of chromosomes
-- **Virtual SKY diagram**, which shows most reasonable combinations of mutated chromosome
-</br></br>
+[![Tests](https://github.com/ACCtools/SKYPE/actions/workflows/tests.yml/badge.svg)](https://github.com/ACCtools/SKYPE/actions/workflows/tests.yml)
 
-**SKYPE** implements following steps to achieve above results.
-- **Classify contigs** as their mutational role and prune unnecessary parts
-- **Compress contigs** by their most significant terminal node (NClose)
-- **Build breakend graph** by connecting NClose nodes and telomere nodes
-- Find all simple **telomere-to-telomere paths of breakend graph**
-- **Recover full path** with normal contigs
-- Optimize copy number of each paths by using customized **SI-NNLS** algorithm
-- Visualize results
+**SKYPE** generates the following results.
 
-## Prequisites
-It is recommended to use **[ACCtools pipeline](https://github.com/ACCtools/ACCtools-pipeline)**, rather than using SKYPE alone.
+- A **Circos plot** showing observed and reconstructed copy number together with rearrangement junctions, indels, amplicons, and neotelomeres
+- A **Virtual SKY diagram** showing depth-weighted combinations of reconstructed cancer chromosome paths
+- An **ISCN-style karyotype summary** and copy-number-weighted structural-variant results
 
-Results are saved as 2 png files.
-- \<SKYPE result folder\>/\<CELL_LINE_RESULT_FOLDER\>/total_cov.png : Circos plot
-- \<SKYPE result folder\>/\<CELL_LINE_RESULT_FOLDER\>/virtual_sky.png : Virtual SKY diagram
+**SKYPE** implements the following steps to generate these results.
 
-## Arguments and Variables
-First argument defines cell line to analyze.
-Second argument(optional) defines the folder to save SKYPE result.
-Change THREAD variable 
+- Derive rearrangement junctions from contig/unitig alignments, or import them from a supported VCF
+- **Classify contig segments** by their mutational role and prune noisy or unnecessary segments
+- **Compress contigs** around their most significant terminal nodes (NClose)
+- **Build a breakend graph** by connecting NClose and telomere nodes
+- Find candidate **telomere-to-telomere paths** and circular components in the breakend graph
+- **Recover full chromosome paths** with normal reference segments
+- Estimate the copy number of each path using non-negative least squares
+- Visualize the reconstructed karyotype and report copy-number-weighted variants
 
-## Example
-Please check `README.md` in [ACCtools pipeline](https://github.com/ACCtools/ACCtools-pipeline)
+## Results
+
+All files below are written to the SKYPE output directory.
+
+| Stage | Output | Description |
+| --- | --- | --- |
+| `30_virtual_sky.py` | `virtual_sky.png`, `virtual_sky.pdf` | Virtual SKY diagram of reconstructed chromosome paths, colored by chromosome of origin and labeled with normalized copy number. |
+| `30_virtual_sky.py` | `karyotype.txt` | Tab-separated ISCN-style karyotype labels and their normalized depth (`N`). |
+| `31_depth_analysis.py` | `total_cov.png`, `total_cov.pdf` | Circos view of observed and reconstructed chromosome depth, with copy-number-weighted breakends, inversions, indels, amplicons, and neotelomeres. |
+| `31_depth_analysis.py` | `SV_call_result.vcf` | Structural-variant calls (`BND`, `INV`, `DEL`, and `DUP`) with normalized copy-number support. Produced in assembly-input modes. |
+| `31_depth_analysis.py` | `SKYPE_result.bed` | Simplified BED report of breakends, deletions, duplications, centromere fragments, amplicons, and virtual inversions. Produced in assembly-input modes. |
+| `31_depth_analysis.py` | `SV_benchmark_result.vcf` | Copy-number-annotated copy of the input VCF. Produced only in VCF input mode instead of `SV_call_result.vcf` and `SKYPE_result.bed`. |
+
+The unsuffixed result files are always generated. Karyotype mode also generates `_filter` and `_cluster` versions of the Virtual SKY, karyotype, Circos, VCF, and BED results. Variant mode and VCF input mode generate only the unsuffixed versions.
+
+## Running SKYPE
+
+Run SKYPE through the **[ACCtools pipeline](https://github.com/ACCtools/ACCtools-pipeline)**, which prepares the assembly, alignments, depth data, reference resources, and stage arguments required by SKYPE.
