@@ -4133,12 +4133,12 @@ def contig_preprocessing_00(PAF_FILE_PATH_ : list):
     logging.info(f"Final preprocessed PAF file length: {len(real_final_contig)}")
     logging.info(f"Number of virtual contigs added on preprocessing : {add_node_count}")
 
-    # Simple ctg-as-alt (--add_alt_ctg_simple):
+    # Simple ctg-as-alt (enabled by default; disabled with --disable_alt_ctg_simple):
     # primary contig PAF에서 아직 채택되지 않은 contig를 보되, telomere-like terminal chunk와
     # 10kb 이하 fragment를 빼고 90% major chromosome set에서 chr-change 후보를 뽑는다.
     # 같은 방향 chr-change만 기존 nclose와 비교해 10kb 이내면 중복으로 보고 제외하고,
     # 방향이 바뀌는 chr-change는 필터링하지 않고 그대로 유지한다.
-    if args.add_alt_ctg_simple:
+    if not args.disable_alt_ctg_simple:
         primary_kept_set = set(final_using_contig)
         existing_names = {c[CTG_NAM] for c in real_final_contig}
         existing_nclose_loci = collect_existing_alt_simple_nclose_loci(real_final_contig)
@@ -7143,12 +7143,12 @@ parser.add_argument("--nclose_count_vaf_threshold",
                     help="Minimum single-side raw-read VAF to keep an nclose when "
                          "--check_nclose_count is enabled.",
                     type=float, default=NCLOSE_COUNT_DEFAULT_VAF_THRESHOLD)
-parser.add_argument("--add_alt_ctg_simple",
-                    help="For each primary ctg PAF contig not already kept, trim telomere-like "
-                         "terminal chunks, ignore <=10kb fragments, select chromosomes covering "
-                         "90%% of the remaining span, skip same-direction chromosome-change "
+parser.add_argument("--disable_alt_ctg_simple",
+                    help="Disable the default primary-contig rescue that trims telomere-like "
+                         "terminal chunks, ignores <=10kb fragments, selects chromosomes covering "
+                         "90%% of the remaining span, skips same-direction chromosome-change "
                          "break candidates only when they are within 10kb of an existing nclose "
-                         "candidate, and keep direction-changing chromosome changes unfiltered.",
+                         "candidate, and keeps direction-changing chromosome changes unfiltered.",
                     action='store_true')
 
 parser.add_argument("--add_indel_graph",
