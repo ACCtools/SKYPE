@@ -3,6 +3,7 @@ import sys
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from skype_utils import *
+from skype_vcf_writer import write_vcf_record_with_fallback
 
 import numpy as np
 import pandas as pd
@@ -1815,21 +1816,22 @@ def format_skype_cn(value):
 def read_input_vcf_records(vcf_path):
     records = []
     sanitized_to_keys = defaultdict(list)
-    record_line_numbers = []
+    raw_records = []
     with open(vcf_path, "rt") as input_f:
         for line_no, line in enumerate(input_f, start=1):
             if line.strip() and not line.startswith("#"):
-                record_line_numbers.append(line_no)
+                raw_records.append((line_no, line.rstrip("\r\n")))
 
     with vcfpy.Reader.from_path(vcf_path) as reader:
         header = reader.header.copy()
-        for line_no, vcf_record in zip(record_line_numbers, reader, strict=True):
+        for (line_no, raw_line), vcf_record in zip(raw_records, reader, strict=True):
             record_id = ";".join(vcf_record.ID)
             key = input_vcf_record_key(line_no, record_id)
             records.append({
                 "line_no": line_no,
                 "key": key,
                 "record": vcf_record,
+                "raw_line": raw_line,
             })
             sanitized_to_keys[sanitize_vcf_id(key)].append(key)
     return header, records, sanitized_to_keys
@@ -2169,6 +2171,8 @@ def write_annotated_input_vcf(weights):
         )
 
     output_path = f"{PREFIX}/SV_benchmark_result.vcf"
+    fallback_count = 0
+    first_fallback_error = None
     with vcfpy.Writer.from_path(output_path, header) as writer:
         for record_data in records:
             vcf_record = record_data["record"]
@@ -2202,10 +2206,24 @@ def write_annotated_input_vcf(weights):
             if cn_detail is not None and status_detail is not None:
                 info_updates["SKYPE_CN_DETAIL"] = cn_detail
                 info_updates["SKYPE_STATUS_DETAIL"] = status_detail
-            for info_id in info_updates:
-                vcf_record.INFO.pop(info_id, None)
-            vcf_record.INFO.update(info_updates)
-            writer.write_record(vcf_record)
+            fallback_error = write_vcf_record_with_fallback(
+                writer,
+                vcf_record,
+                record_data["raw_line"],
+                info_updates,
+            )
+            if fallback_error is not None:
+                fallback_count += 1
+                if first_fallback_error is None:
+                    first_fallback_error = fallback_error
+
+    if fallback_count:
+        logging.warning(
+            "vcfpy could not serialize %d input VCF record(s); preserved their "
+            "original columns and updated INFO directly. First error: %s",
+            fallback_count,
+            first_fallback_error,
+        )
 
 
 def draw_circos_plot(fig_prefix=''):
