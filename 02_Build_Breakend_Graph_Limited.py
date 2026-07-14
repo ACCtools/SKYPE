@@ -5467,6 +5467,40 @@ VCF_SYNTHETIC_PAF_NAME = "vcf_synthetic.paf"
 VCF_SKIPPED_RECORDS_TSV = "vcf_mode_skipped_records.tsv"
 VCF_ORIENTATION_MISMATCH_TSV = "vcf_mode_orientation_mismatches.tsv"
 VCF_TELOMERE_PAF_NODES_TSV = "vcf_telomere_paf_nodes.tsv"
+LIMIT_COMBINATIONS_JSON = "limit_combinations.json"
+
+
+def load_limit_combinations(path):
+    try:
+        with open(path, "rt", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"could not read {path}: {exc}") from exc
+
+    combination = data.get("limit_combinations") if isinstance(data, dict) else None
+    if (
+        not isinstance(combination, list)
+        or len(combination) != 2
+        or any(type(value) is not int for value in combination)
+    ):
+        raise ValueError(
+            f"{path} must contain an integer pair named 'limit_combinations'"
+        )
+
+    chr_limit, dir_limit = combination
+    if chr_limit < 1 or dir_limit not in (0, 1):
+        raise ValueError(
+            f"invalid limit_combinations in {path}: {combination!r}"
+        )
+    return chr_limit, dir_limit
+
+
+def write_limit_combinations(path, combination):
+    temporary = f"{path}.tmp-{os.getpid()}"
+    with open(temporary, "wt", encoding="utf-8") as f:
+        json.dump({"limit_combinations": list(combination)}, f, indent=2)
+        f.write("\n")
+    os.replace(temporary, path)
 
 
 def load_vcf_ins_alt_alignment_spans(paf_path):
@@ -7163,6 +7197,11 @@ parser.add_argument("--vcf_filter_pass", nargs='+', metavar="FILTER",
                     help="Exact, case-sensitive VCF FILTER values to retain in VCF mode. "
                          "Supplying this option replaces the default PASS and . values.",
                     default=["PASS", "."])
+parser.add_argument("--limit_combinations",
+                    help="Path to a limit_combinations.json file. Use exactly that "
+                         "graph-limit combination and fail instead of trying another "
+                         "combination.",
+                    default=None)
 
 mode_group = parser.add_mutually_exclusive_group()
 mode_group.add_argument("--karyotype_mode",
@@ -7179,6 +7218,13 @@ mode_group.add_argument("--variant_mode",
 
 args = parser.parse_args()
 
+FIXED_LIMIT_COMBINATION = None
+if args.limit_combinations is not None:
+    try:
+        FIXED_LIMIT_COMBINATION = load_limit_combinations(args.limit_combinations)
+    except ValueError as exc:
+        parser.error(f"--limit_combinations: {exc}")
+
 # t = "02_Build_Breakend_Graph_Limited.py /home/hyunwoo/ACCtools-pipeline/90_skype_run/H1437/20_alignasm/H1437.ctg.aln.paf public_data/chm13v2.0.fa.fai public_data/chm13v2.0_telomere.bed public_data/chm13v2.0_repeat.m.bed public_data/chm13v2.0_censat_v2.1.m.bed /home/hyunwoo/ACCtools-pipeline/90_skype_run/H1437/01_depth/H1437_normalized.win.stat.gz 30_skype_pipe/H1437_23_00_00 /home/hyunwoo/ACCtools-pipeline/90_skype_run/H1437/01_depth/H1437.bam --alt /home/hyunwoo/ACCtools-pipeline/90_skype_run/H1437/20_alignasm/H1437.utg.aln.paf --original_paf_loc /home/hyunwoo/ACCtools-pipeline/90_skype_run/H1437/20_alignasm/H1437.ctg.paf /home/hyunwoo/ACCtools-pipeline/90_skype_run/H1437/20_alignasm/H1437.utg.paf --test --skip_bam_analysis -t 128"
 # args = parser.parse_args(t.split()[1:])
 
@@ -7194,6 +7240,10 @@ logging.info(describe_pipeline_mode(initial_pipeline_mode_config))
 logging.info("02_Build_Breakend_Graph start")
 
 os.makedirs(PREFIX, exist_ok=True)
+
+LIMIT_COMBINATIONS_OUTPUT_PATH = os.path.join(PREFIX, LIMIT_COMBINATIONS_JSON)
+if os.path.isfile(LIMIT_COMBINATIONS_OUTPUT_PATH):
+    os.remove(LIMIT_COMBINATIONS_OUTPUT_PATH)
 
 PAF_FILE_PATH = []
 if args.vcf_input is not None:
@@ -7223,6 +7273,16 @@ ORIGINAL_PAF_LOC_LIST = ORIGINAL_PAF_LOC_LIST_
 if args.test:
     logging.warning("Test mode is enabled. This mode is for debugging purposes only. The results may be inaccurate and should not be trusted.")
     CHR_CHANGE_LIMIT_ABS_MAX = 2
+
+if (
+    FIXED_LIMIT_COMBINATION is not None
+    and FIXED_LIMIT_COMBINATION[0] > max(CHR_CHANGE_LIMIT_ABS_MAX, 1)
+):
+    parser.error(
+        "--limit_combinations chromosome-change limit "
+        f"{FIXED_LIMIT_COMBINATION[0]} exceeds graph depth "
+        f"{CHR_CHANGE_LIMIT_ABS_MAX}"
+    )
 
 if args.vcf_input is None:
     if args.vcf_filter_pass != ["PASS", "."]:
@@ -7768,17 +7828,25 @@ def run_graph_pipeline():
         for j in range(i + 1, contig_data_size + 2*CHROMOSOME_COUNT):
             tar_ind_list.append((i, j))
 
-    limit_combinations = [
-        (c, DIR_CHANGE_LIMIT_ABS_MAX)
-        for c in range(CHR_CHANGE_LIMIT_ABS_MAX, 0, -1)
-    ]
-    limit_combinations.append((1, 0))
-
-    if nclose_node_count > HARD_NCLOSE_COUNT:
-        hard_start_chr = min(CHR_CHANGE_LIMIT_HARD_START, CHR_CHANGE_LIMIT_ABS_MAX)
-        idx = limit_combinations.index((hard_start_chr, DIR_CHANGE_LIMIT_ABS_MAX))
-    else:
+    if FIXED_LIMIT_COMBINATION is not None:
+        limit_combinations = [FIXED_LIMIT_COMBINATION]
         idx = 0
+        logging.info(
+            "Using fixed limit_combinations from "
+            f"{args.limit_combinations}: {FIXED_LIMIT_COMBINATION}"
+        )
+    else:
+        limit_combinations = [
+            (c, DIR_CHANGE_LIMIT_ABS_MAX)
+            for c in range(CHR_CHANGE_LIMIT_ABS_MAX, 0, -1)
+        ]
+        limit_combinations.append((1, 0))
+
+        if nclose_node_count > HARD_NCLOSE_COUNT:
+            hard_start_chr = min(CHR_CHANGE_LIMIT_HARD_START, CHR_CHANGE_LIMIT_ABS_MAX)
+            idx = limit_combinations.index((hard_start_chr, DIR_CHANGE_LIMIT_ABS_MAX))
+        else:
+            idx = 0
 
     last_success = None
 
@@ -7848,6 +7916,11 @@ def run_graph_pipeline():
             idx -= 1
         else:
             logging.info(f'FAIL at {(CHR_CHANGE_LIMIT_PREFIX, DIR_CHANGE_LIMIT_PREFIX)}')
+            if FIXED_LIMIT_COMBINATION is not None:
+                logging.info(
+                    "Fixed limit_combinations failed; fallback is disabled."
+                )
+                break
             if last_success is not None:
                 break
 
@@ -7858,7 +7931,12 @@ def run_graph_pipeline():
 last_success = run_graph_pipeline()
 if not last_success:
     logging.info('Breakend graph is too divergent.')
-    if args.vcf_input is not None or is_unitig_reduced or len(PAF_FILE_PATH) == 1:
+    if (
+        FIXED_LIMIT_COMBINATION is not None
+        or args.vcf_input is not None
+        or is_unitig_reduced
+        or len(PAF_FILE_PATH) == 1
+    ):
         logging.info('Breakend path failed.')
         sys.exit(1)
     else:
@@ -7934,6 +8012,10 @@ with open(f"{PREFIX}/ecdna_circuit_data.pkl", "wb") as f:
     pkl.dump((list(ecdna_circuit_set), ecdna_nclose_nodes), f)
 
 logging.info(f'Final success settings: {(CHR_CHANGE_LIMIT_PREFIX, DIR_CHANGE_LIMIT_PREFIX)}')
+write_limit_combinations(
+    LIMIT_COMBINATIONS_OUTPUT_PATH,
+    (CHR_CHANGE_LIMIT_PREFIX, DIR_CHANGE_LIMIT_PREFIX),
+)
 
 cancer_prefix = os.path.basename(PREPROCESSED_PAF_FILE_PATH).split('.')[0]
 

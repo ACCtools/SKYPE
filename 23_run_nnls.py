@@ -21,6 +21,10 @@ from adelie.solver import bvls
 
 from h5py._hl import selections as sel
 
+from denoised_relative_error import (
+    TV_LAMBDA_OVER_NOISE_SIGMA,
+    calculate_denoised_relative_error,
+)
 from skype_utils import *
 
 CTG_NAM = 0
@@ -1604,10 +1608,24 @@ b_norm = np.linalg.norm(B_depth)
 
 predict_suc_depth = predict_suc_B[depth_success_slice]
 error = np.linalg.norm(predict_suc_depth - B_depth)
+# This is an evaluation-only metric: keep the NNLS weights/prediction fitted to
+# the original B, and replace only the comparison target with TV-denoised B.
+denoised_error, denoised_relative_error, _ = calculate_denoised_relative_error(
+    chr_filt_st_list,
+    B_depth,
+    predict_suc_depth,
+    TV_LAMBDA_OVER_NOISE_SIGMA,
+)
 predict_B = np.concatenate((predict_suc_depth, predict_fal_B))
 
 logging.info(f'Error : {error:.4f}')
 logging.info(f'Relative error : {error/b_norm:.4f}')
+logging.info(
+    'Denoised target TV lambda/noise sigma : '
+    f'{TV_LAMBDA_OVER_NOISE_SIGMA:g}'
+)
+logging.info(f'Denoised error : {denoised_error:.4f}')
+logging.info(f'Denoised relative error : {denoised_relative_error:.4f}')
 
 np.save(f'{PREFIX}/weight.npy', final_weights_fullsize)
 np.save(f'{PREFIX}/predict_B.npy', predict_B)

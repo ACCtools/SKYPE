@@ -26,6 +26,7 @@ class VcfAddIndelGraphIntegrationTests(unittest.TestCase):
             censat_bed = root / "censat.bed"
             depth_path = root / "depth.win.stat.gz"
             vcf = root / "input.vcf"
+            native_limits = root / "limit_combinations.json"
 
             chromosomes = [f"chr{i}" for i in range(1, 23)] + ["chrX"]
             fai.write_text(
@@ -49,6 +50,10 @@ class VcfAddIndelGraphIntegrationTests(unittest.TestCase):
                 "SVTYPE=DEL;END=3000000;SVLEN=-2000000\n"
                 "chr1\t500000\tins\tN\t<INS>\t60\tPASS\t"
                 "SVTYPE=INS;SVLEN=1200000\n",
+                encoding="utf-8",
+            )
+            native_limits.write_text(
+                json.dumps({"limit_combinations": [1, 0]}),
                 encoding="utf-8",
             )
             ins_paf.write_text(
@@ -80,6 +85,8 @@ class VcfAddIndelGraphIntegrationTests(unittest.TestCase):
                 str(ins_paf),
                 "--vcf_input",
                 str(vcf),
+                "--limit_combinations",
+                str(native_limits),
                 "--add_indel_graph",
                 "--skip_bam_analysis",
                 "-t",
@@ -97,6 +104,18 @@ class VcfAddIndelGraphIntegrationTests(unittest.TestCase):
                 build_result.returncode,
                 0,
                 msg=build_result.stdout + "\n" + build_result.stderr,
+            )
+            self.assertIn(
+                "Using fixed limit_combinations",
+                build_result.stdout + build_result.stderr,
+            )
+            self.assertEqual(
+                json.loads(
+                    (output / "limit_combinations.json").read_text(
+                        encoding="utf-8"
+                    )
+                )["limit_combinations"],
+                [1, 0],
             )
 
             summary = json.loads(
