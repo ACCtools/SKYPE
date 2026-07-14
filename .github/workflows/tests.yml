@@ -29,6 +29,11 @@ jobs:
       - name: Create minimal test environment
         uses: mamba-org/setup-micromamba@v3
         with:
+          condarc: |
+            channels:
+              - conda-forge
+              - bioconda
+            channel_priority: strict
           environment-name: skype-tests
           cache-environment: true
           cache-downloads: true
@@ -39,6 +44,7 @@ jobs:
             networkx
             tqdm
             graph-tool
+            vcfpy
 
       - name: Run test suite
         run: python -m unittest discover -s tests -v
