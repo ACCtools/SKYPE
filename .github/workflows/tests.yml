@@ -37,6 +37,7 @@ jobs:
           environment-name: skype-tests
           cache-environment: true
           cache-downloads: true
+          # Avoid restoring an x86-64-v4 cache on x86-64-v3 runners.
           create-args: >-
             python=3.12
             numpy
@@ -45,6 +46,7 @@ jobs:
             tqdm
             graph-tool
             vcfpy
+            _x86_64-microarch-level=3
 
       - name: Run test suite
         run: python -m unittest discover -s tests -v
