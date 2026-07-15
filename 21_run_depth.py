@@ -1522,7 +1522,7 @@ def get_paf_run(paf_loc):
 
     retry = 0
     while retry < PANDEPTH_RETRY:
-        result = subprocess.run([args.pandepth_loc, '-w', str(int(DEPTH_WINDOW)),'-t', str(DEPTH_THREAD), '-i', paf_loc, '-o', paf_base],
+        result = subprocess.run([args.pandepth_loc, '--fast-paf-window', '-w', str(int(DEPTH_WINDOW)),'-t', str(DEPTH_THREAD), '-i', paf_loc, '-o', paf_base],
                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, capture_output=False)
         
         if result.returncode == 0:
