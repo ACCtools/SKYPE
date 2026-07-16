@@ -3,6 +3,14 @@ import sys
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from skype_utils import *
+from nclose_tracking import (
+    calculate_event_weights,
+    carrier_columns,
+    load_filter_status,
+    load_path_usage,
+    record_filter_stage,
+    save_filter_status,
+)
 
 from collections import defaultdict
 
@@ -543,6 +551,12 @@ def run_nnls_map_gram_mem_gb(task_count):
 # Get weight from 23_run_nnls.py
 weight_base = np.load(f'{PREFIX}/weight.npy')
 weight_base_jl = make_jl_weight(weight_base)
+nclose_path_usage = load_path_usage(PREFIX, expected_len=len(weight_base))
+nclose_filter_status = load_filter_status(PREFIX)
+if 'base' not in nclose_filter_status['stages']:
+    raise ValueError(
+        "Missing stage-23 NClose filter provenance. Rerun SKYPE from stage 23."
+    )
 
 final_weights_fullsize = np.zeros(len(weight_base))
 predict_suc_B_base = np.asarray(A_jl * weight_base_jl)
@@ -554,10 +568,10 @@ for i, (chrom, st) in enumerate(chr_filt_st_list):
     if abs(chrom_acc_sum_dict_base[chrom]) > chrom_acc_sum_dict_max_base[chrom]:
         chrom_acc_sum_dict_max_base[chrom] = abs(chrom_acc_sum_dict_base[chrom])
 
-nclose_total_weight_dict = defaultdict(float)
-for i, v in enumerate(weight_base):
-    for j in path_nclose_set_dict[i]:
-        nclose_total_weight_dict[j] += v
+nclose_total_weight_dict = defaultdict(
+    float,
+    calculate_event_weights(nclose_path_usage, weight_base),
+)
 
 with open(f'{PREFIX}/A_idx_list.pkl', 'rb') as f:
     A_idx_list = pkl.load(f)
@@ -633,6 +647,7 @@ def solve_idx_list(final_idx_list, warm_fullsize):
 nclose_max_error_dict = {}
 pre_tar_nclose_list = []
 pre_thread_data_jl = jl.Vector[jl.Vector[jl.Int]]()
+base_A_idx_set = set(A_idx_list)
 
 # Collect all potential candidate pairs using Tier 1 (most permissive — covers all tiers)
 for k, v in nclose_total_weight_dict.items():
@@ -644,24 +659,31 @@ for k, v in nclose_total_weight_dict.items():
                 pre_tar_nclose_list.append(k)
 
 pre_nclose_notusing_idx_dict = defaultdict(list)
+pre_solved_nclose_list = []
 for nclose_pair in pre_tar_nclose_list:
-    for path_k, path_nclose_usage in path_nclose_set_dict.items():
-        if nclose_pair not in path_nclose_usage:
+    for path_k, event_usage in enumerate(nclose_path_usage):
+        if path_k in base_A_idx_set and event_usage.get(nclose_pair, 0) == 0:
             pre_nclose_notusing_idx_dict[nclose_pair].append(path_k)
-    
+    if not pre_nclose_notusing_idx_dict[nclose_pair]:
+        nclose_max_error_dict[nclose_pair] = float('inf')
+        continue
     jl.push_b(pre_thread_data_jl, jl.Vector[jl.Int](pre_nclose_notusing_idx_dict[nclose_pair]))
+    pre_solved_nclose_list.append(nclose_pair)
 
-logging.info(f"Pre-calculating max error rate for pairs count : {len(pre_tar_nclose_list)}")
-pre_map_gram_mem_gb = run_nnls_map_gram_mem_gb(len(pre_tar_nclose_list))
+logging.info(f"Pre-calculating max error rate for pairs count : {len(pre_solved_nclose_list)}")
+pre_map_gram_mem_gb = run_nnls_map_gram_mem_gb(len(pre_solved_nclose_list))
 
-pre_weight_list = jl.run_nnls_map(
-    A_jl, B_jl, pre_thread_data_jl, False,
-    gram_mem_gb=pre_map_gram_mem_gb,
-    w_init=weight_base_jl
-)
+if pre_solved_nclose_list:
+    pre_weight_list = jl.run_nnls_map(
+        A_jl, B_jl, pre_thread_data_jl, False,
+        gram_mem_gb=pre_map_gram_mem_gb,
+        w_init=weight_base_jl
+    )
+else:
+    pre_weight_list = []
 
 # Store pre-calculated max error rates in dictionary
-for nclose_pair, (weight_jl, predict_suc_B_jl) in zip(pre_tar_nclose_list, pre_weight_list):
+for nclose_pair, (weight_jl, predict_suc_B_jl) in zip(pre_solved_nclose_list, pre_weight_list):
     predict_suc_B = np.asarray(predict_suc_B_jl)
 
     chrom_acc_sum_dict = defaultdict(int)
@@ -687,7 +709,6 @@ for nclose_pair, (weight_jl, predict_suc_B_jl) in zip(pre_tar_nclose_list, pre_w
 #   2. order candidates by their single-removal error,
 #   3. add one nclose at a time and refit,
 #   4. if the trial fails, reject the current candidate.
-base_A_idx_set = set(A_idx_list)
 nclose_notusing_idx_set_dict = {
     nclose_pair: set(pre_nclose_notusing_idx_dict[nclose_pair]) & base_A_idx_set
     for nclose_pair in pre_tar_nclose_list
@@ -794,6 +815,22 @@ logging.info(f'Filter relative error : {error/b_norm:.4f}')
 np.save(f'{PREFIX}/weight_filter.npy', final_weights_fullsize)
 np.save(f'{PREFIX}/predict_B_filter.npy', predict_B)
 
+filter_direct_reasons = {
+    event_key: 'FILTERED_24_GREEDY_DEPTH'
+    for event_key in not_essential_nclose
+}
+nclose_filter_status['stages'].pop('cluster', None)
+record_filter_stage(
+    nclose_filter_status,
+    'filter',
+    'base',
+    nclose_path_usage,
+    final_idx_list,
+    filter_direct_reasons,
+    'FILTERED_24_COFILTERED_PATH',
+)
+save_filter_status(PREFIX, nclose_filter_status)
+
 weights_sorted_data = sorted(enumerate(final_weights_fullsize), key=lambda t:t[1], reverse=True)
 
 chr_inf = max(chr_len.values())
@@ -858,7 +895,17 @@ for chrom, info in cen_fragment_list:
     side = 'right' if info["dir"] else 'left'
     tot_loc_list.append(f'{PREFIX}/12_cent_fragment/{chrom}/{side}.fragment')
 
+if len(tot_loc_list) != len(final_weights_fullsize):
+    raise ValueError(
+        "Stage-24 matrix-column metadata mismatch: "
+        f"{len(tot_loc_list)} locations for {len(final_weights_fullsize)} weights."
+    )
 loc2weight = dict(zip(tot_loc_list, final_weights_fullsize))
+filter_active_column_set = set(final_idx_list)
+filter_active_locations = {
+    tot_loc_list[col_idx]
+    for col_idx in filter_active_column_set
+}
 
 cluster_tar_path_list = []
 
@@ -870,7 +917,8 @@ loc_prefix = paf_ans_list[0][0].split('/')[:-3]
 
 for path_tuple in tar_chr_data.values():
     path = '/'.join(loc_prefix + list(path_tuple))
-    cluster_tar_path_list.append(path)
+    if path in filter_active_locations:
+        cluster_tar_path_list.append(path)
 
 for ind, w in weights_sorted_data:
     paf_loc = tot_loc_list[ind]
@@ -947,8 +995,11 @@ for ncnt, (paf_loc, w) in enumerate(loc2weight.items()):
     elif paf_loc.split('/')[-3] == '12_cent_fragment':
         using_merge_ncnt_list.append(ncnt)
 
-using_merge_ncnt_list.sort()
-using_merge_ncnt_arr = np.asarray(using_merge_ncnt_list)
+using_merge_ncnt_list = sorted(
+    set(using_merge_ncnt_list) & filter_active_column_set
+)
+if not using_merge_ncnt_list:
+    raise RuntimeError("No NNLS columns remain for stage-24 cluster selection.")
 
 # Julia run partial NNLS by using_merge_ncnt_list
 
@@ -966,7 +1017,13 @@ final_weight_jl = jl.nnls_solve(
 final_weight = np.asarray(final_weight_jl)
 final_weights_fullsize = np.zeros(jl.size(A_jl, 2))
 
-final_weight[final_weight <= CLUSTER_START_DEPTH * N] = 0
+cluster_weight_before_min = final_weight.copy()
+cluster_min_mask = (
+    (cluster_weight_before_min > 0)
+    & (cluster_weight_before_min <= CLUSTER_START_DEPTH * N)
+)
+final_weight[cluster_weight_before_min <= 0] = 0
+final_weight[cluster_min_mask] = 0
 final_weight_jl = jl.Vector[jl.eltype(final_weight_jl)](final_weight)
 
 for i, v in enumerate(final_weight):
@@ -986,3 +1043,45 @@ logging.info(f'Cluster relative error : {error/b_norm:.4f}')
 
 np.save(f'{PREFIX}/weight_cluster.npy', final_weights_fullsize)
 np.save(f'{PREFIX}/predict_B_cluster.npy', predict_B)
+
+# A true NNLS zero remains a surviving 0/PASS result.  Only a positive
+# coefficient removed by the explicit 0.1N floor is considered filtered.
+cluster_thresholded_columns = {
+    using_merge_ncnt_list[i]
+    for i, is_thresholded in enumerate(cluster_min_mask)
+    if is_thresholded
+}
+cluster_positive_columns = {
+    using_merge_ncnt_list[i]
+    for i, weight in enumerate(cluster_weight_before_min)
+    if weight > CLUSTER_START_DEPTH * N
+}
+cluster_active_columns = set(using_merge_ncnt_list) - cluster_thresholded_columns
+filter_active_columns = set(
+    nclose_filter_status['stages']['filter']['active_columns']
+)
+selected_columns = set(using_merge_ncnt_list)
+cluster_direct_reasons = {}
+for event_key in nclose_filter_status['event_keys']:
+    if event_key in nclose_filter_status['stages']['filter'].get('reasons', {}):
+        continue
+    carriers = carrier_columns(nclose_path_usage, event_key) & filter_active_columns
+    selected_carriers = carriers & selected_columns
+    if not selected_carriers:
+        cluster_direct_reasons[event_key] = 'FILTERED_24_CLUSTER_SELECTION'
+    elif not (selected_carriers & cluster_positive_columns) and (
+        selected_carriers & cluster_thresholded_columns
+    ):
+        cluster_direct_reasons[event_key] = 'FILTERED_24_CLUSTER_MIN_WEIGHT'
+
+record_filter_stage(
+    nclose_filter_status,
+    'cluster',
+    'filter',
+    nclose_path_usage,
+    cluster_active_columns,
+    cluster_direct_reasons,
+    'FILTERED_24_CLUSTER_COFILTERED_PATH',
+    forced_reasons=cluster_direct_reasons,
+)
+save_filter_status(PREFIX, nclose_filter_status)

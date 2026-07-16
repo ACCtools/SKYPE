@@ -4,6 +4,7 @@ import pickle as pkl
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from skype_utils import *
+from nclose_tracking import replace_catalog_indels
 
 import re
 import logging
@@ -592,6 +593,13 @@ for s1, e1, s2, e2 in type4_del:
 
 with open(f"{args.prefix}/{VCF_TYPE4_OUTLIER_INDEX_PKL}", "wb") as f:
     pkl.dump(vcf_type4_outlier_index, f)
+
+nclose_event_catalog = replace_catalog_indels(args.prefix)
+logging.info(
+    "NClose event catalog : %d BND, %d INDEL",
+    sum(event["kind"] == "bnd" for event in nclose_event_catalog),
+    sum(event["kind"] == "indel" for event in nclose_event_catalog),
+)
 
 logging.info(f"Forward-directed outlier contig count : {cntfj}")
 logging.info(f"Backward-directed outlier contig count : {cntbj}")

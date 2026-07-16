@@ -26,6 +26,14 @@ from denoised_relative_error import (
     calculate_denoised_relative_error,
 )
 from skype_utils import *
+from nclose_tracking import (
+    calculate_event_weights,
+    carrier_columns,
+    load_filter_status,
+    load_path_usage,
+    record_filter_stage,
+    save_filter_status,
+)
 
 CTG_NAM = 0
 CTG_LEN = 1
@@ -212,43 +220,8 @@ def collect_nclose_test_data(contig_data, nclose_nodes):
 
     return get_chr_cord_data(contig_data, nclose_nodes, type4_nclose_nodes, type4_expected_high_side)
 
-def build_path_nclose_count(weights_len, ordinary_candidate_nclose_keys, type4_candidate_nclose_keys,
-                            path_nclose_set_dict, path_list_dict, paf_sort_ans_list):
-    path_nclose_count = [Counter() for _ in range(weights_len)]
-    rpll = len(paf_sort_ans_list)
-
-    for col_idx in range(rpll):
-        paf_loc = paf_sort_ans_list[col_idx][0]
-        key = paf_loc.split('/')[-2]
-        cnt = int(paf_loc.split('/')[-1].split('.')[0]) - 1
-        idx_path = path_list_dict[key][cnt][0]
-        ctr = path_nclose_count[col_idx]
-        s = 1
-        while s < len(idx_path) - 2:
-            cand = tuple(sorted([idx_path[s][1], idx_path[s+1][1]]))
-            if cand in ordinary_candidate_nclose_keys:
-                ctr[cand] += 1
-                s += 2
-            else:
-                s += 1
-
-    for col_idx in range(weights_len):
-        ctr = Counter()
-        for nclose_key in path_nclose_set_dict.get(col_idx, set()):
-            if nclose_key in type4_candidate_nclose_keys:
-                ctr[nclose_key] += 1
-            elif col_idx >= rpll and nclose_key in ordinary_candidate_nclose_keys:
-                ctr[nclose_key] += 1
-        path_nclose_count[col_idx].update(ctr)
-
-    return path_nclose_count
-
 def calculate_nclose_depth(path_nclose_count, weight_full):
-    nclose_depth = defaultdict(float)
-    for col_idx, ctr in enumerate(path_nclose_count):
-        for nc, v in ctr.items():
-            nclose_depth[nc] += v * weight_full[col_idx]
-    return nclose_depth
+    return defaultdict(float, calculate_event_weights(path_nclose_count, weight_full))
 
 def canonical_nclose_layout(cords, expected_high_side):
     order = [0, 1]
@@ -1032,8 +1005,9 @@ with open(f'{PREFIX}/23_input.pkl', 'rb') as f:
     chr_filt_st_list, path_nclose_set_dict, amplitude, bed_data, matrix_depth_meta = pkl.load(f)
 # path_nclose_set_dict is keyed by matrix column index. Values are canonical event tags:
 # ordinary nclose: (left_contig_idx, right_contig_idx), sorted tuple of ints
-# type4/ecdna: (event_type, event_idx, type2_merge_idx)
-# cent_fragment: ('cent_fragment', chrom, direction_bool)
+# step-11 INDEL: (event_type, event_idx, type2_merge_idx)
+# ecDNA columns include compressed BND tags plus an auxiliary ecDNA identity tag;
+# cent_fragment columns carry only their auxiliary identity tag.
 
 ydf = df.query('chr == "chrY"')
 
@@ -1073,10 +1047,29 @@ if len(B_depth) != len(chr_filt_st_list):
         f"23_input has {len(chr_filt_st_list)}"
     )
 
-A = solver_matrix_from_store(A_store)
+nclose_filter_status = load_filter_status(PREFIX)
+path_nclose_count = load_path_usage(PREFIX, expected_len=A_store.shape[0])
+initial_A_idx_list = list(
+    nclose_filter_status["stages"]["initial"]["active_columns"]
+)
+if not initial_A_idx_list:
+    raise RuntimeError("No matrix columns remain after stage-02 NClose filtering.")
 
-weights_fullsize = fit_nnls_warm(A, B)
-predict_suc_B_base = A.dot(weights_fullsize)
+if len(initial_A_idx_list) == A_store.shape[0]:
+    A_initial = solver_matrix_from_store(A_store)
+else:
+    with h5py.File(f"{PREFIX}/matrix.h5", "r") as f:
+        read_selected_feature_rows_direct(f["A"], A_store, initial_A_idx_list)
+    A_initial = solver_matrix_from_store(A_store, len(initial_A_idx_list))
+
+initial_weights = fit_nnls_warm(A_initial, B)
+weights_fullsize = scatter_subset_weights(
+    initial_weights,
+    initial_A_idx_list,
+    len(path_nclose_count),
+    dtype=initial_weights.dtype,
+)
+predict_suc_B_base = A_initial.dot(initial_weights)
 
 with open(f'{PREFIX}/path_data.pkl', 'rb') as f:
     path_list_dict = pkl.load(f)
@@ -1088,20 +1081,6 @@ assert len(weights_fullsize) >= rpll
 
 nclose_test_data = collect_nclose_test_data(contig_data, nclose_nodes)
 _, base_path_tag2cord, base_path_tag2nclose_key, base_path_tag2expected_high_side = nclose_test_data
-base_candidate_nclose_keys = set(base_path_tag2nclose_key.values())
-base_ordinary_candidate_nclose_keys = {
-    nclose_key for nclose_key in base_candidate_nclose_keys
-    if len(nclose_key) == 2
-}
-base_type4_candidate_nclose_keys = {
-    nclose_key for nclose_key in base_candidate_nclose_keys
-    if len(nclose_key) == 3
-}
-path_nclose_count = build_path_nclose_count(
-    len(weights_fullsize), base_ordinary_candidate_nclose_keys, base_type4_candidate_nclose_keys,
-    path_nclose_set_dict, path_list_dict, paf_sort_ans_list
-)
-
 base_nclose_depth = calculate_nclose_depth(path_nclose_count, weights_fullsize)
 chrom_acc_sum_dict_max_base = get_chrom_acc_sum_max(chr_filt_st_list, predict_suc_B_base, B)
 
@@ -1111,6 +1090,8 @@ reciprocal_side_by_id = {}
 active_reciprocal_side_ids = set()
 reciprocal_path_drop_cols = set()
 reciprocal_transloc_nclose_set = set()
+stage23_direct_reasons = {}
+initial_A_idx_set = set(initial_A_idx_list)
 
 if ENABLE_RECIPROCAL_TRANSLOCATION_FILTER:
     reciprocal_records = load_raw_translocation_records(PREFIX)
@@ -1133,10 +1114,7 @@ if ENABLE_RECIPROCAL_TRANSLOCATION_FILTER:
         for side_id in active_reciprocal_side_ids:
             next_drop_cols.update(reciprocal_side_by_id[side_id]['crossing_cols'])
 
-        A_idx_test = [
-            col_idx for col_idx in range(len(weights_fullsize))
-            if col_idx not in next_drop_cols
-        ]
+        A_idx_test = sorted(initial_A_idx_set - next_drop_cols)
         if not A_idx_test:
             active_reciprocal_side_ids = set()
             reciprocal_path_drop_cols = set()
@@ -1196,6 +1174,14 @@ if ENABLE_RECIPROCAL_TRANSLOCATION_FILTER:
     )
 else:
     logging.info('Reciprocal translocation filter disabled')
+
+reciprocal_active_cols = initial_A_idx_set - reciprocal_path_drop_cols
+for event_key in nclose_filter_status["event_keys"]:
+    event_cols = carrier_columns(path_nclose_count, event_key) & initial_A_idx_set
+    if event_cols and not (event_cols & reciprocal_active_cols):
+        stage23_direct_reasons.setdefault(
+            event_key, 'FILTERED_23_RECIPROCAL_PATH'
+        )
 
 if ENABLE_OPPOSITE_DIRECTION_DEPTH_FILTER:
     opposite_dir_depth_drop_set, opposite_dir_depth_pair_count = find_opposite_direction_depth_drop(
@@ -1261,6 +1247,8 @@ while True:
 
     A_idx_list = []
     for k, path_nclose_list in path_nclose_set_dict.items():
+        if k not in initial_A_idx_set:
+            continue
         if k in reciprocal_path_drop_cols:
             continue
         if not path_nclose_list or len(not_using_nclose_set & set(path_nclose_list)) == 0:
@@ -1306,6 +1294,15 @@ while True:
         break
 
     prev_fail_chrom_list = fail_chrom_list[:]
+
+for event_key in opposite_dir_depth_drop_set:
+    stage23_direct_reasons.setdefault(
+        event_key, 'FILTERED_23_OPPOSITE_DIRECTION'
+    )
+for event_key in hyp_test_nclose_set:
+    stage23_direct_reasons.setdefault(
+        event_key, 'FILTERED_23_HYPOTHESIS_TEST'
+    )
 
 # === Cent_fragment greedy off-test ===
 # nclose 필터링 직후를 fail 기준점(고정 baseline)으로 잡고, weight 작은 cent_fragment
@@ -1574,6 +1571,11 @@ else:
     logging.info('BP step/depth filter disabled')
     nclose_to_drop = set()
 
+for event_key in nclose_to_drop:
+    stage23_direct_reasons.setdefault(
+        event_key, 'FILTERED_23_BP_STEP_DEPTH'
+    )
+
 drop_cols = set()
 for col_idx, ctr in enumerate(path_nclose_count):
     if any(nc in nclose_to_drop for nc in ctr):
@@ -1632,3 +1634,16 @@ np.save(f'{PREFIX}/predict_B.npy', predict_B)
 
 with open(f'{PREFIX}/A_idx_list.pkl', 'wb') as f:
     pkl.dump(A_idx_list, f)
+
+nclose_filter_status['stages'].pop('filter', None)
+nclose_filter_status['stages'].pop('cluster', None)
+record_filter_stage(
+    nclose_filter_status,
+    stage='base',
+    previous_stage='initial',
+    path_usage=path_nclose_count,
+    active_columns=A_idx_list,
+    direct_reasons=stage23_direct_reasons,
+    cofiltered_reason='FILTERED_23_COFILTERED_PATH',
+)
+save_filter_status(PREFIX, nclose_filter_status)

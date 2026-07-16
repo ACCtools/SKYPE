@@ -7,6 +7,19 @@ from skype_output_files import (
     discover_ecdna_depth_inputs,
     discover_jump_depth_inputs,
 )
+from nclose_tracking import (
+    bnd_event_keys,
+    compressed_bnd_event_keys,
+    count_ecdna_circuit_events,
+    count_index_path_events,
+    event_catalog_by_key,
+    indel_event_key,
+    initialise_filter_status,
+    load_event_catalog,
+    load_type4_edge_event_map,
+    save_filter_status,
+    save_path_usage,
+)
 
 import numpy as np
 import pandas as pd
@@ -20,7 +33,7 @@ import itertools
 import collections
 import glob
 
-from collections import defaultdict
+from collections import Counter, defaultdict
 
 from tqdm import tqdm
 from scipy.optimize import nnls
@@ -377,7 +390,18 @@ with open(f'{PREFIX}/nclose_chunk_data.pkl', 'rb') as f:
 nclose_set = set()
 for vl in nclose_nodes_pkl.values():
     for v in vl:
-        nclose_set.add(v)
+        nclose_set.add(tuple(sorted(v)))
+
+nclose_event_catalog = load_event_catalog(PREFIX)
+nclose_event_by_key = event_catalog_by_key(nclose_event_catalog)
+nclose_bnd_keys = bnd_event_keys(nclose_event_catalog)
+compressed_nclose_bnd_keys = compressed_bnd_event_keys(nclose_event_catalog)
+if nclose_set != compressed_nclose_bnd_keys:
+    raise ValueError(
+        "NClose BND catalog does not match nclose_chunk_data.pkl. "
+        "Rerun SKYPE from stage 02."
+    )
+type4_edge_to_event = load_type4_edge_event_map(PREFIX, nclose_event_catalog)
 
 with open(f'{PREFIX}/path_data.pkl', 'rb') as f:
     path_list_dict = pkl.load(f)
@@ -641,6 +665,15 @@ back_depth_inputs = discover_jump_depth_inputs(
 )
 ecdna_depth_inputs = discover_ecdna_depth_inputs(ecdna_contig_path)
 
+with open(f'{PREFIX}/ecdna_circuit_data.pkl', 'rb') as f:
+    ecdna_circuits, _ = pkl.load(f)
+if len(ecdna_circuits) != len(ecdna_depth_inputs):
+    raise ValueError(
+        "ecDNA circuit/depth-input count mismatch: "
+        f"{len(ecdna_circuits)} != {len(ecdna_depth_inputs)}. "
+        "Rerun SKYPE from stage 21."
+    )
+
 with open(f'{PREFIX}/cen_fragment_data.pkl', 'rb') as f:
     cen_fragment_meta = pkl.load(f)
 cen_fragment_list = sorted(cen_fragment_meta.items(), key=lambda kv: chr2int(kv[0]))
@@ -698,9 +731,12 @@ tmp_v = np.zeros(m, dtype=np.float32)
 ncnt = 0
 # Matrix column index -> canonical event tags.
 # ordinary nclose: (left_contig_idx, right_contig_idx), sorted tuple of ints
-# type4/ecdna: (event_type, event_idx, type2_merge_idx)
-# cent_fragment: ('cent_fragment', chrom, direction_bool)
+# step-11 INDEL: (event_type, event_idx, type2_merge_idx)
+# ecDNA columns carry their two compressed BND keys; cent/ecDNA identity tags
+# remain only in path_nclose_dict_set for existing downstream path handling.
 path_nclose_dict_set = defaultdict(set)
+path_nclose_usage = [Counter() for _ in range(n)]
+explicit_filter_reasons = {}
 for path, key_int_list in tqdm(paf_ans_list, desc='Recover depth from separated paths',
                                     disable=not sys.stdout.isatty() and not args.progress):
     ki = key_int_list[0]
@@ -710,15 +746,11 @@ for path, key_int_list in tqdm(paf_ans_list, desc='Recover depth from separated 
 
     idx_path = import_index_path(path)
 
-    path_nclose_dict_set[ncnt] = set()
-    s = 1
-    while s < len(idx_path)-2:
-        nclose_cand = tuple(sorted([idx_path[s][1], idx_path[s+1][1]]))
-        if nclose_cand in nclose_set:
-            path_nclose_dict_set[ncnt].add(nclose_cand)
-            s+=2
-        else:
-            s+=1
+    usage = count_index_path_events(
+        idx_path, compressed_nclose_bnd_keys, type4_edge_to_event
+    )
+    path_nclose_usage[ncnt].update(usage)
+    path_nclose_dict_set[ncnt] = set(usage)
 
     A_arr[ncnt, :m] = tmp_v
     ncnt += 1
@@ -738,14 +770,19 @@ for i, ov_loc, bv_loc, type2_ins_idx, type2_ins_loc in tqdm(
         ov += get_vec_from_stat_loc(type2_ins_loc)
     bv = get_vec_from_stat_loc(bv_loc)
     
+    event_key = indel_event_key('front_jump', i, type2_ins_idx)
+    if event_key not in nclose_event_by_key:
+        raise ValueError(f"Missing step-11 INDEL catalog event: {event_key}")
     if indel_idx in indel_exclude_idx_set:
         tv = tv_empty
+        explicit_filter_reasons[event_key] = 'FILTERED_02_EXCLUDE_LIST'
     else:
         tv = ov - bv
     
     A_arr[ncnt, :m] = tv
         
-    path_nclose_dict_set[ncnt].add((ov_loc.split('/')[-2], i, type2_ins_idx))
+    path_nclose_usage[ncnt][event_key] += 1
+    path_nclose_dict_set[ncnt].add(event_key)
     ncnt += 1
     indel_idx += 1
 # Process backward-directed outlier contigs
@@ -758,14 +795,19 @@ for i, ov_loc, bv_loc, type2_ins_idx, type2_ins_loc in tqdm(
         ov += get_vec_from_stat_loc(type2_ins_loc)
     bv = get_vec_from_stat_loc(bv_loc)
 
+    event_key = indel_event_key('back_jump', i, type2_ins_idx)
+    if event_key not in nclose_event_by_key:
+        raise ValueError(f"Missing step-11 INDEL catalog event: {event_key}")
     if indel_idx in indel_exclude_idx_set:
         tv = tv_empty
+        explicit_filter_reasons[event_key] = 'FILTERED_02_EXCLUDE_LIST'
     else:
         tv = ov + bv
     
     A_arr[ncnt, :m] = tv
         
-    path_nclose_dict_set[ncnt].add((ov_loc.split('/')[-2], i, type2_ins_idx))
+    path_nclose_usage[ncnt][event_key] += 1
+    path_nclose_dict_set[ncnt].add(event_key)
     ncnt += 1
     indel_idx += 1
 
@@ -775,6 +817,11 @@ for i, ov_loc in ecdna_depth_inputs:
 
     A_arr[ncnt, :m] = ov
         
+    ecdna_usage = count_ecdna_circuit_events(
+        ecdna_circuits[i - 1], nclose_bnd_keys
+    )
+    path_nclose_usage[ncnt].update(ecdna_usage)
+    path_nclose_dict_set[ncnt].update(ecdna_usage)
     path_nclose_dict_set[ncnt].add((ov_loc.split('/')[-2], i, type2_ins_idx))
     ncnt += 1
 
@@ -810,6 +857,28 @@ dep_list.extend([0] * (
 ))
 
 assert(len(dep_list) == n)
+assert ncnt == n
+
+initial_active_columns = set(range(n))
+for event_key in explicit_filter_reasons:
+    for col_idx, usage in enumerate(path_nclose_usage):
+        if usage.get(event_key, 0) > 0:
+            initial_active_columns.discard(col_idx)
+
+nclose_filter_status = initialise_filter_status(
+    nclose_event_catalog,
+    path_nclose_usage,
+    initial_active_columns,
+    explicit_filter_reasons,
+)
+save_path_usage(PREFIX, path_nclose_usage)
+save_filter_status(PREFIX, nclose_filter_status)
+logging.info(
+    "NClose path usage : %d events across %d/%d matrix columns",
+    len({key for usage in path_nclose_usage for key in usage}),
+    sum(bool(usage) for usage in path_nclose_usage),
+    len(path_nclose_usage),
+)
 
 for (i1, i2) in itertools.pairwise(dep_list):
     assert(i1 >= i2)

@@ -4,6 +4,10 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from skype_utils import *
 from parse_vcf import parse_vcf_events, select_vcf_type4_graph_events
+from nclose_tracking import (
+    build_bnd_event_catalog,
+    save_event_catalog,
+)
 
 import shutil
 import argparse
@@ -3708,7 +3712,7 @@ def contig_preprocessing_00(PAF_FILE_PATH_ : list):
     if excluded_contigs:
         logging.info(
             f"Detected {len(excluded_contigs)} multi-end-aligned contigs "
-            f"({len(excluded_rows)} PAF rows) in {PAF_FILE_PATH_[0]}"
+            f"({len(excluded_rows)} PAF rows)"
         )
 
     original_node_count += len(contig_data)
@@ -3827,7 +3831,7 @@ def contig_preprocessing_00(PAF_FILE_PATH_ : list):
         if excluded_contigs:
             logging.info(
                 f"Detected {len(excluded_contigs)} multi-end-aligned contigs "
-                f"({len(excluded_rows)} PAF rows) in {PAF_FILE_PATH_[1]}"
+                f"({len(excluded_rows)} PAF rows)"
             )
         original_node_count += len(contig_data)
         node_label = label_node(contig_data, telo_dict)
@@ -5831,7 +5835,7 @@ def build_paf_telomere_nodes(paf_path, telo_data, repeat_censat_data,
             f"Excluded {len(excluded_contigs)} multi-end-aligned contigs "
             f"({len(excluded_rows)} PAF rows, "
             f"{excluded_boundary_candidate_count} telomere boundary candidates) "
-            f"from VCF-mode telomere PAF {paf_path}"
+            "from VCF-mode telomere PAF"
         )
     selected_candidates, duplicate_contigs_removed = \
         compress_paf_telomere_candidates(
@@ -6300,6 +6304,10 @@ def build_vcf_mode_inputs():
         f"{PREFIX}/compressed_nclose_nodes_list.txt",
         compressed_nclose_type,
         contig_data,
+    )
+    save_event_catalog(
+        PREFIX,
+        build_bnd_event_catalog(compressed_nclose_type, contig_data),
     )
     nclose_node_count = write_nclose_nodes_index(
         f"{PREFIX}/nclose_nodes_index.txt",
@@ -6970,6 +6978,10 @@ def nclose_calc():
             nclose_type,
             contig_data,
             rpt_con,
+        )
+        save_event_catalog(
+            PREFIX,
+            build_bnd_event_catalog(nclose_type, contig_data),
         )
         return transloc_nclose_pair_count
 
@@ -8007,9 +8019,13 @@ for circuit in ecdna_circuit_candidate_set:
         ecdna_circuit_set.add(circuit)
 
 
+# Use a deterministic circuit order because it now participates in stable
+# SKYPE.nclose.* ID assignment.
+ecdna_circuit_list = sorted(ecdna_circuit_set)
+
 # Todo : transform into vcf format
 with open(f"{PREFIX}/ecdna_circuit_data.pkl", "wb") as f:
-    pkl.dump((list(ecdna_circuit_set), ecdna_nclose_nodes), f)
+    pkl.dump((ecdna_circuit_list, ecdna_nclose_nodes), f)
 
 logging.info(f'Final success settings: {(CHR_CHANGE_LIMIT_PREFIX, DIR_CHANGE_LIMIT_PREFIX)}')
 write_limit_combinations(
