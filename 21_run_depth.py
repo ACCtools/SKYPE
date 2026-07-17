@@ -633,11 +633,6 @@ def process_raw_contig_list(full_connected_path, key_cnt):
                 skipped_rows += 1
                 continue
             print(output_row, file=f)
-    if skipped_rows:
-        logging.info(
-            f"{output_path} : skipped {skipped_rows} "
-            "zero-length/empty-CIGAR PAF row(s)"
-        )
 
 def process_raw_contig_list_ecdna(full_connected_path):
     init_contig = form_normal_contig(contig_data[full_connected_path[0][1]])
@@ -867,11 +862,6 @@ def create_final_depth_paf_ecdna(ecdna_circuit, save_path):
         with open(output_path, 'wt') as f:
             for i in circuit_paf:
                 print(i, file=f)
-        if skipped_rows:
-            logging.info(
-                f"{output_path} : skipped {skipped_rows} "
-                "zero-length/empty-CIGAR PAF row(s)"
-            )
 
 def create_final_depth_paf_type2(type2_ins_del, PREFIX):
     type2_ins, type2_del = type2_ins_del
@@ -940,11 +930,6 @@ def create_final_depth_paf_type2(type2_ins_del, PREFIX):
         with open(output_path, 'wt') as f:
             for i in ins_paf:
                 print(i, file=f)
-        if skipped_rows:
-            logging.info(
-                f"{output_path} : skipped {skipped_rows} "
-                "zero-length/empty-CIGAR PAF row(s)"
-            )
 
 
 def rev_dir(d):
