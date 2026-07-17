@@ -2609,10 +2609,6 @@ nclose_filter_status = reconcile_filter_status_catalog(
 )
 save_filter_status(PREFIX, nclose_filter_status)
 nclose_id_by_event_key = nclose_event_id_by_key(nclose_event_catalog)
-logging.info(
-    f'NClose report ecDNA additions: {len(visible_ecdna_indices)} '
-    'Amplicons visible across base/filter/cluster BED outputs'
-)
 
 nclose_report_path = write_nclose_report(
     PREFIX,

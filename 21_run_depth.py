@@ -502,8 +502,24 @@ def adjust_paf_overlap(paf1_data, paf2_data):
 
     return new_paf1, new_paf2
 
+def format_nonzero_depth_paf_row(row, cigar):
+    """Format a PAF row, or omit alignments that have no depth-bearing span."""
+    query_start, query_end = map(int, row[2:4])
+    target_start, target_end = map(int, row[7:9])
+    alignment_block_length = int(row[10])
+    if (
+        query_start >= query_end
+        or target_start >= target_end
+        or alignment_block_length <= 0
+        or not cigar
+    ):
+        return None
+    return "\t".join(map(str, list(row) + [f"cg:Z:{cigar}"]))
+
 def process_raw_contig_list(full_connected_path, key_cnt):
-    with open(f'{output_folder}/{key_cnt}.paf', 'w') as f:
+    output_path = f'{output_folder}/{key_cnt}.paf'
+    skipped_rows = 0
+    with open(output_path, 'w') as f:
         init_contig = form_normal_contig(contig_data[full_connected_path[0][1]])
         path_contig = [init_contig]
         full_connected_path_len = len(full_connected_path)
@@ -609,11 +625,19 @@ def process_raw_contig_list(full_connected_path, key_cnt):
             else:
                 next_contig_origin = form_normal_contig(next_contig)
                 path_contig.append(next_contig_origin)
-        cnt = 0
-        for i in path_contig:
-            cnt+=1
-            cigar_str = 'cg:Z:' + cs_to_cigar(i[-1][5:])
-            print("\t".join(list(map(str, i + [cigar_str]))), file=f)
+        for row in path_contig:
+            output_row = format_nonzero_depth_paf_row(
+                row, cs_to_cigar(row[-1][5:])
+            )
+            if output_row is None:
+                skipped_rows += 1
+                continue
+            print(output_row, file=f)
+    if skipped_rows:
+        logging.info(
+            f"{output_path} : skipped {skipped_rows} "
+            "zero-length/empty-CIGAR PAF row(s)"
+        )
 
 def process_raw_contig_list_ecdna(full_connected_path):
     init_contig = form_normal_contig(contig_data[full_connected_path[0][1]])
@@ -718,15 +742,18 @@ def process_raw_contig_list_ecdna(full_connected_path):
         else:
             next_contig_origin = form_normal_contig(next_contig)
             path_contig.append(next_contig_origin)
-    cnt = 0
-
     final_output_list = []
-    for i in path_contig:
-        cnt+=1
-        cigar_str = 'cg:Z:' + cs_to_cigar(i[-1][5:])
-        final_output_list.append("\t".join(list(map(str, i + [cigar_str]))))
+    skipped_rows = 0
+    for row in path_contig:
+        output_row = format_nonzero_depth_paf_row(
+            row, cs_to_cigar(row[-1][5:])
+        )
+        if output_row is None:
+            skipped_rows += 1
+            continue
+        final_output_list.append(output_row)
     
-    return final_output_list
+    return final_output_list, skipped_rows
     
 def create_final_depth_paf(data):
     (key, key_cnt) = data
@@ -787,6 +814,7 @@ def create_final_depth_paf_ecdna(ecdna_circuit, save_path):
         data.append((CTG_IN_TYPE, ((DIR_BAK, e2), (DIR_BAK, s2))))
         data.append((BND_TYPE, ((DIR_BAK, s2), (DIR_FOR, s1))))
         circuit_paf = []
+        skipped_rows = 0
         for (key_type, key_val) in data:
             raw_contig_list = []
             if key_type == TEL_TYPE:
@@ -827,13 +855,23 @@ def create_final_depth_paf_ecdna(ecdna_circuit, save_path):
                 assert(False)
 
             if len(raw_contig_list) > 0:
-                circuit_paf += process_raw_contig_list_ecdna(raw_contig_list)
+                output_rows, skipped_count = process_raw_contig_list_ecdna(
+                    raw_contig_list
+                )
+                circuit_paf += output_rows
+                skipped_rows += skipped_count
             else:
                 # Create empty file
                     pass
-        with open(f'{save_path}/{idx+1}.paf', 'wt') as f:
+        output_path = f'{save_path}/{idx+1}.paf'
+        with open(output_path, 'wt') as f:
             for i in circuit_paf:
                 print(i, file=f)
+        if skipped_rows:
+            logging.info(
+                f"{output_path} : skipped {skipped_rows} "
+                "zero-length/empty-CIGAR PAF row(s)"
+            )
 
 def create_final_depth_paf_type2(type2_ins_del, PREFIX):
     type2_ins, type2_del = type2_ins_del
@@ -847,6 +885,7 @@ def create_final_depth_paf_type2(type2_ins_del, PREFIX):
         s1, e1, s2, e2 = circuit
         data.append((BND_TYPE, ((DIR_FOR, e1), (DIR_FOR, s2))))
         ins_paf = []
+        skipped_rows = 0
         for (key_type, key_val) in data:
             raw_contig_list = []
             if key_type == TEL_TYPE:
@@ -887,13 +926,25 @@ def create_final_depth_paf_type2(type2_ins_del, PREFIX):
                 assert(False)
 
             if len(raw_contig_list) > 0:
-                ins_paf += process_raw_contig_list_ecdna(raw_contig_list)
+                output_rows, skipped_count = process_raw_contig_list_ecdna(
+                    raw_contig_list
+                )
+                ins_paf += output_rows
+                skipped_rows += skipped_count
             else:
                 # Create empty file
                     pass
-        with open(f'{PREFIX}/11_ref_ratio_outliers/type2_ins/{idx+1}.paf', 'wt') as f:
+        output_path = (
+            f'{PREFIX}/11_ref_ratio_outliers/type2_ins/{idx+1}.paf'
+        )
+        with open(output_path, 'wt') as f:
             for i in ins_paf:
                 print(i, file=f)
+        if skipped_rows:
+            logging.info(
+                f"{output_path} : skipped {skipped_rows} "
+                "zero-length/empty-CIGAR PAF row(s)"
+            )
 
 
 def rev_dir(d):
