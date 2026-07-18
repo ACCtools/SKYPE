@@ -363,7 +363,7 @@ def get_qry_cord_data(paf_path: str, get_ori_cord: bool = False) -> tuple:
             if get_ori_cord:
                 tar_col = None
                 for col in cols:
-                    if col.startswith('xi:A:'):
+                    if col.startswith('xi:Z:'):
                         tar_col = col
                         break
 
