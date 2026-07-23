@@ -2350,8 +2350,6 @@ def draw_circos_plot(fig_prefix=''):
     inv_val_list = []
     transloc_val_list = []
     bnd_cn_data = []
-    ecdna_inv_subtracted_count = 0
-    ecdna_inv_subtracted_weight = 0.0
 
     for k in nclose_cn:
         v = adjusted_nclose_cn[k]
@@ -2368,19 +2366,11 @@ def draw_circos_plot(fig_prefix=''):
             ecdna_component = min(v, ecdna_inv_cn[k])
             if ecdna_component > 0:
                 v -= ecdna_component
-                ecdna_inv_subtracted_count += 1
-                ecdna_inv_subtracted_weight += ecdna_component
             if v > BREAKEND_REMARKABLE_CN:
                 inv_val_list.append(v / meandepth * 2)
         
         if v > BREAKEND_REMARKABLE_CN:
             bnd_cn_data.append([(chr_nam1, pos1), (chr_nam2, pos2), v, event_type])
-
-    logging.info(
-        f'{msg_prefix} circos ecDNA subtraction: '
-        f'{ecdna_inv_subtracted_count} inversion links, '
-        f'raw weight={ecdna_inv_subtracted_weight:.6g}'
-    )
 
     for split_key, v in sorted(split_bnd_weights.items()):
         (

@@ -7,6 +7,12 @@ from skype_output_files import (
     discover_ecdna_depth_inputs,
     discover_jump_depth_inputs,
 )
+from raw_translocation_prior import (
+    RAW_TRANSLOCATION_REPORT_TSV,
+    calculate_length_normalized_prior_scales,
+    load_normal_prior_excluded_chromosomes,
+    select_normal_prior_chromosome_columns,
+)
 from nclose_tracking import (
     bnd_event_keys,
     compressed_bnd_event_keys,
@@ -69,7 +75,7 @@ CTG_GLOBALIDX = 21
 
 ABS_MAX_COVERAGE_RATIO = 3
 MAX_PATH_CNT = 100
-NORMAL_PRIOR_STRENGTH = 0.01
+NORMAL_PRIOR_STRENGTH = 0.00
 
 DIR_FOR = 1
 TELOMERE_EXPANSION = 5 * K
@@ -376,6 +382,20 @@ TELO_CONNECT_NODES_INFO_PATH = PREFIX + "/telomere_connected_list.txt"
 if pipeline_mode_is_variant(pipeline_mode_config):
     logging.info("Normal chromosome prior disabled: variant mode")
     normal_prior_strength = 0.0
+
+normal_prior_excluded_chroms = set()
+if normal_prior_strength > 0:
+    raw_translocation_report_path = os.path.join(
+        PREFIX, RAW_TRANSLOCATION_REPORT_TSV
+    )
+    normal_prior_excluded_chroms = load_normal_prior_excluded_chromosomes(
+        raw_translocation_report_path
+    )
+    if normal_prior_excluded_chroms:
+        logging.info(
+            "Normal chromosome prior raw-read exclusions: %s",
+            ",".join(sorted(normal_prior_excluded_chroms)),
+        )
 
 df = pd.read_csv(main_stat_loc, compression='gzip', comment='#', sep='\t',
                  names=['chr', 'st', 'nd', 'length', 'covsite', 'totaldepth', 'cov', 'meandepth'])
@@ -709,7 +729,13 @@ if missing_init_paths:
         f"Default chromosome paths missing from NNLS columns: {missing_init_paths}"
     )
 
-prior_cols = init_cols
+prior_chrom_cols = select_normal_prior_chromosome_columns(
+    tar_chr_data,
+    tar_def_path_ind_dict,
+    normal_prior_excluded_chroms,
+)
+prior_chroms = [chrom for chrom, _ in prior_chrom_cols]
+prior_cols = [col_idx for _, col_idx in prior_chrom_cols]
 prior_row_capacity = len(prior_cols) if normal_prior_strength > 0 and prior_cols else 0
 
 use_julia_solver = pipeline_mode_is_karyotype(pipeline_mode_config)
@@ -885,12 +911,16 @@ for (i1, i2) in itertools.pairwise(dep_list):
 
 if init_cols:
     # Estimate default-chromosome targets with all cent_fragment columns present
-    # as auxiliary explanatory variables, but only keep the default-chromosome
-    # coefficients as prior targets.
+    # as auxiliary explanatory variables.  Raw-read-excluded default paths
+    # remain auxiliary only and do not receive normal-chromosome prior rows.
     prior_fit_cols = init_cols + cent_fragment_cols
     A_pri = A_arr[prior_fit_cols, :fm].T
     fit_w_pri = nnls(A_pri, B[:filter_len])[0].astype(np.float32)
-    w_pri = fit_w_pri[:len(init_cols)]
+    init_target_by_col = dict(zip(init_cols, fit_w_pri[:len(init_cols)]))
+    w_pri = np.asarray(
+        [init_target_by_col[col_idx] for col_idx in prior_cols],
+        dtype=np.float32,
+    )
 else:
     prior_fit_cols = []
     fit_w_pri = np.asarray([], dtype=np.float32)
@@ -898,23 +928,79 @@ else:
 
 normal_prior_row_count = 0
 normal_prior_scale = 0.0
+normal_prior_scales = np.asarray([], dtype=np.float32)
+normal_prior_base_row_count = len(init_cols)
+normal_prior_base_col_norm_squares = np.asarray([], dtype=np.float64)
+normal_prior_col_norm_squares = np.asarray([], dtype=np.float64)
+normal_prior_length_normalization_factor = 0.0
+normal_prior_total_scale_squared = 0.0
 B_prior = np.asarray([], dtype=B.dtype)
 
 if normal_prior_strength > 0 and prior_cols:
-    # The prior rows encode scale * w_j ~= scale * w_pri_j for default
-    # chromosome columns.  Multiplying by sqrt(fm / n_prior) keeps the total
-    # prior contribution comparable across samples.
-    normal_prior_row_count = len(prior_cols)
-    normal_prior_scale = float(np.sqrt(normal_prior_strength * fm / normal_prior_row_count))
-    for row_idx, col_idx in enumerate(prior_cols):
-        A_arr[col_idx, prior_col_start + row_idx] = normal_prior_scale
+    if len(init_cols) != len(set(init_cols)):
+        raise ValueError("Default chromosome prior columns must be unique")
+    if len(prior_cols) != len(set(prior_cols)):
+        raise ValueError("Eligible normal chromosome prior columns must be unique")
 
-    B_prior = (normal_prior_scale * w_pri).astype(B.dtype, copy=False)
+    # The prior rows encode scale_j * w_j ~= scale_j * w_pri_j.  Normalize
+    # scale_j^2 by each default column's clean-depth squared norm so the prior
+    # has the same relative curvature across chromosome lengths.  The full
+    # pre-exclusion init_cols set defines the denominator: excluding one
+    # chromosome removes its prior mass without strengthening the survivors.
+    base_depth_vectors = A_arr[np.asarray(init_cols), :fm]
+    normal_prior_base_col_norm_squares = np.sum(
+        np.square(base_depth_vectors, dtype=np.float64),
+        axis=1,
+        dtype=np.float64,
+    )
+    base_norm_square_by_col = dict(
+        zip(init_cols, normal_prior_base_col_norm_squares)
+    )
+    normal_prior_col_norm_squares = np.asarray(
+        [base_norm_square_by_col[col_idx] for col_idx in prior_cols],
+        dtype=np.float64,
+    )
+    (
+        normal_prior_scales_list,
+        normal_prior_scale,
+        normal_prior_length_normalization_factor,
+    ) = calculate_length_normalized_prior_scales(
+        normal_prior_base_col_norm_squares,
+        normal_prior_col_norm_squares,
+        fm,
+        normal_prior_strength,
+    )
+    normal_prior_scales = np.asarray(
+        normal_prior_scales_list,
+        dtype=np.float32,
+    )
+    normal_prior_total_scale_squared = float(
+        np.sum(
+            np.square(normal_prior_scales, dtype=np.float64),
+            dtype=np.float64,
+        )
+    )
+
+    normal_prior_row_count = len(prior_cols)
+    for row_idx, (col_idx, prior_scale) in enumerate(
+        zip(prior_cols, normal_prior_scales)
+    ):
+        A_arr[col_idx, prior_col_start + row_idx] = prior_scale
+
+    B_prior = (normal_prior_scales * w_pri).astype(B.dtype, copy=False)
     logging.info(
         "Normal chromosome prior enabled: "
         f"strength={normal_prior_strength}, rows={normal_prior_row_count}, "
-        f"default_rows={len(init_cols)}, cent_fragment_rows={len(cent_fragment_cols)}, "
-        f"scale={normal_prior_scale:.6g}, target_weight_median={float(np.median(w_pri)):.6g}"
+        f"base_rows={normal_prior_base_row_count}, "
+        f"default_rows={len(init_cols)}, excluded_rows={len(init_cols) - len(prior_cols)}, "
+        f"cent_fragment_rows={len(cent_fragment_cols)}, "
+        f"reference_scale={normal_prior_scale:.6g}, "
+        f"scale_min={float(np.min(normal_prior_scales)):.6g}, "
+        f"scale_median={float(np.median(normal_prior_scales)):.6g}, "
+        f"scale_max={float(np.max(normal_prior_scales)):.6g}, "
+        f"active_total_scale_squared={normal_prior_total_scale_squared:.6g}, "
+        f"base_total_scale_squared={normal_prior_strength * fm:.6g}, "
+        f"target_weight_median={float(np.median(w_pri)):.6g}"
     )
 else:
     logging.info("Normal chromosome prior disabled.")
@@ -947,7 +1033,19 @@ with h5py.File(f'{PREFIX}/matrix.h5', 'w') as hf:
     hf.create_dataset('B_depth_end', data=fm)
     hf.create_dataset('normal_prior_strength', data=normal_prior_strength)
     hf.create_dataset('normal_prior_row_count', data=normal_prior_row_count)
+    hf.create_dataset('normal_prior_base_row_count', data=normal_prior_base_row_count)
+    # Backward-compatible scalar summary (RMS over the fixed base set).
+    # The actual augmented rows use normal_prior_scales.
     hf.create_dataset('normal_prior_scale', data=normal_prior_scale)
+    hf.create_dataset('normal_prior_scales', data=normal_prior_scales)
+    hf.create_dataset(
+        'normal_prior_total_scale_squared',
+        data=normal_prior_total_scale_squared,
+    )
+    hf.create_dataset(
+        'normal_prior_length_normalization_factor',
+        data=normal_prior_length_normalization_factor,
+    )
 
 with open(f"{PREFIX}/23_input.pkl", "wb") as f:
     pkl.dump((
@@ -967,12 +1065,22 @@ with open(f"{PREFIX}/tar_chr_data.pkl", "wb") as f:
 with open(f"{PREFIX}/normal_prior_data.pkl", "wb") as f:
     pkl.dump({
         "strength": normal_prior_strength,
+        "normalization": "column_norm_fixed_base_total",
+        # Backward-compatible scalar summary; use "scales" for actual rows.
         "scale": normal_prior_scale,
+        "scales": normal_prior_scales,
+        "total_scale_squared": normal_prior_total_scale_squared,
         "row_count": normal_prior_row_count,
+        "base_row_count": normal_prior_base_row_count,
+        "base_col_norm_squares": normal_prior_base_col_norm_squares,
+        "prior_col_norm_squares": normal_prior_col_norm_squares,
+        "length_normalization_factor": normal_prior_length_normalization_factor,
+        "prior_chroms": prior_chroms,
         "prior_cols": prior_cols,
         "prior_fit_cols": prior_fit_cols,
         "init_cols": init_cols,
         "cent_fragment_cols": cent_fragment_cols,
+        "excluded_chroms": sorted(normal_prior_excluded_chroms),
         "targets": w_pri,
         "fit_targets": fit_w_pri,
         "tar_chr_data": tar_chr_data,

@@ -1098,6 +1098,13 @@ if ENABLE_RECIPROCAL_TRANSLOCATION_FILTER:
     reciprocal_side_by_id = assign_reciprocal_crossing_path_cols(
         reciprocal_records, PREFIX, paf_sort_ans_list
     )
+    reciprocal_pair_id_by_side_id = {
+        side['side_id']: record['pair_id']
+        for record in reciprocal_records
+        for side in record.get('side_records', [])
+    }
+    reciprocal_failed_chroms = set()
+    reciprocal_failed_pair_ids = set()
 
     active_reciprocal_side_ids = {
         side['side_id']
@@ -1107,9 +1114,7 @@ if ENABLE_RECIPROCAL_TRANSLOCATION_FILTER:
         if side_is_forbidden_by_raw_read(side)
     }
 
-    reciprocal_retry_iter = 0
     while active_reciprocal_side_ids:
-        reciprocal_retry_iter += 1
         next_drop_cols = set()
         for side_id in active_reciprocal_side_ids:
             next_drop_cols.update(reciprocal_side_by_id[side_id]['crossing_cols'])
@@ -1141,21 +1146,33 @@ if ENABLE_RECIPROCAL_TRANSLOCATION_FILTER:
             break
 
         fail_chrom_set = set(reciprocal_fail_chrom_list)
+        reciprocal_failed_chroms.update(fail_chrom_set)
         remove_side_ids = {
             side_id for side_id in active_reciprocal_side_ids
             if reciprocal_side_by_id[side_id]['chrom'] in fail_chrom_set
         }
         if not remove_side_ids:
-            logging.warning(
-                'Reciprocal translocation retry failed on chromosomes without matching '
-                f'candidate intervals: {",".join(sorted(fail_chrom_set))}'
+            reciprocal_failed_pair_ids.update(
+                reciprocal_pair_id_by_side_id[side_id]
+                for side_id in active_reciprocal_side_ids
             )
             active_reciprocal_side_ids = set()
             reciprocal_path_drop_cols = set()
             break
 
+        reciprocal_failed_pair_ids.update(
+            reciprocal_pair_id_by_side_id[side_id]
+            for side_id in remove_side_ids
+        )
         active_reciprocal_side_ids -= remove_side_ids
         reciprocal_path_drop_cols = set()
+
+    if reciprocal_failed_chroms:
+        logging.warning(
+            'Reciprocal normal-chromosome path removal failed: '
+            f'fail_chroms={",".join(sorted(reciprocal_failed_chroms))}; '
+            f'failed_pair_ids={",".join(map(str, sorted(reciprocal_failed_pair_ids)))}'
+        )
 
     for side_id in active_reciprocal_side_ids:
         reciprocal_side_by_id[side_id]['accepted_forbid'] = True
