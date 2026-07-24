@@ -643,7 +643,7 @@ def trim_alt_simple_terminal_indices(chunks: list, telo_labels: list, repeat_lab
         right -= 1
     return list(range(left, right + 1))
 
-def select_alt_simple_major_chroms(indexed_chunks: list) -> set:
+def select_alt_simple_major_chroms(indexed_chunks: list, required_chroms=()) -> set:
     chrom_len = Counter()
     total_len = 0
     for _, node in indexed_chunks:
@@ -654,7 +654,7 @@ def select_alt_simple_major_chroms(indexed_chunks: list) -> set:
         total_len += node_len
 
     if total_len == 0:
-        return set()
+        return set(required_chroms)
 
     selected = set()
     acc_len = 0
@@ -663,7 +663,60 @@ def select_alt_simple_major_chroms(indexed_chunks: list) -> set:
         acc_len += chrom_span
         if acc_len / total_len >= ALT_SIMPLE_MAJOR_CHR_RATIO:
             break
+    selected.update(required_chroms)
     return selected
+
+def alt_simple_alignment_state(node) -> tuple:
+    return (node[CHR_NAM], node[CTG_DIR])
+
+def find_alt_simple_inward_bounds(indexed_chunks: list, selected_chroms: set):
+    """
+    Narrow both ends while preserving the chromosome/strand states observed
+    immediately after terminal telomere/repeat trimming.
+
+    Short (<=10 kb) and non-major-chromosome chunks are invisible to boundary
+    discovery.  They are not deleted: the caller keeps every original chunk
+    between the returned inclusive indices.
+    """
+    if len(indexed_chunks) < 2:
+        return None
+
+    left_terminal = indexed_chunks[0]
+    right_terminal = indexed_chunks[-1]
+    left_state = alt_simple_alignment_state(left_terminal[1])
+    right_state = alt_simple_alignment_state(right_terminal[1])
+    if left_state[0] == right_state[0]:
+        return None
+
+    left_bound = left_terminal
+    for curr in indexed_chunks[1:]:
+        node = curr[1]
+        if alt_simple_ref_len(node) <= ALT_SIMPLE_MIN_SEGMENT_LEN:
+            continue
+        if node[CHR_NAM] not in selected_chroms:
+            continue
+        if alt_simple_alignment_state(node) != left_state:
+            break
+        left_bound = curr
+
+    right_bound = right_terminal
+    for curr in reversed(indexed_chunks[:-1]):
+        node = curr[1]
+        if alt_simple_ref_len(node) <= ALT_SIMPLE_MIN_SEGMENT_LEN:
+            continue
+        if node[CHR_NAM] not in selected_chroms:
+            continue
+        if alt_simple_alignment_state(node) != right_state:
+            break
+        right_bound = curr
+
+    if left_bound[0] >= right_bound[0]:
+        return None
+    if alt_simple_alignment_state(left_bound[1]) != left_state:
+        return None
+    if alt_simple_alignment_state(right_bound[1]) != right_state:
+        return None
+    return left_bound, right_bound
 
 def find_alt_simple_transition_candidates(indexed_chunks: list, selected_chroms: set) -> tuple:
     same_dir_candidates = []
@@ -2712,6 +2765,22 @@ def extract_nclose_node(contig_data : list, bnd_contig : set, repeat_contig_name
                             fake_bnd[contig_data[s][CTG_NAM]] = (st+1, e)
                         ed = st+1
 
+                # The synthetic simple_ctg_alt boundaries were chosen using
+                # the chromosome/strand states observed after terminal
+                # telomere/repeat trimming.  Any later inward trim may change
+                # coordinates, but it must never change either terminal state.
+                if is_simple_ctg_alt and (
+                    st >= ed
+                    or [contig_data[st][CTG_DIR], contig_data[st][CHR_NAM]] != st_chr
+                    or [contig_data[ed][CTG_DIR], contig_data[ed][CHR_NAM]] != ed_chr
+                ):
+                    logging.warning(
+                        f"Skipping {contig_data[s][CTG_NAM]} because nclose trimming "
+                        "changed a terminal chromosome/strand state"
+                    )
+                    s = e + 1
+                    continue
+
                 all_nclose_compress[(st_chr[1], ed_chr[1])].append((st, ed))
                 
                 if contig_data[s][CTG_NAM] in div_repeat_paf_name \
@@ -4138,10 +4207,12 @@ def contig_preprocessing_00(PAF_FILE_PATH_ : list):
     logging.info(f"Number of virtual contigs added on preprocessing : {add_node_count}")
 
     # Simple ctg-as-alt (enabled by default; disabled with --disable_alt_ctg_simple):
-    # primary contig PAF에서 아직 채택되지 않은 contig를 보되, telomere-like terminal chunk와
-    # 10kb 이하 fragment를 빼고 90% major chromosome set에서 chr-change 후보를 뽑는다.
-    # 같은 방향 chr-change만 기존 nclose와 비교해 10kb 이내면 중복으로 보고 제외하고,
-    # 방향이 바뀌는 chr-change는 필터링하지 않고 그대로 유지한다.
+    # terminal telomere/repeat trim 직후 서로 다른 양끝 chromosome/strand를 고정한다.
+    # >10kb이면서 (90% major chromosome U 양끝 chromosome)에 속한 chunk만 보며 양쪽에서
+    # 같은 terminal state가 이어지는 만큼 안쪽으로 경계를 좁힌다. 경계 탐색에서 무시한
+    # short/minor-chromosome chunk도 확정된 두 경계 사이에 있으면 모두 보존하며, 원본
+    # contig당 하나의 simple_ctg_alt만 만든다. 같은 방향 양끝은 기존 nclose와 10kb 이내면
+    # 중복으로 제외하고, 서로 다른 방향 양끝은 기존 동작대로 중복 필터를 우회한다.
     if not args.disable_alt_ctg_simple:
         primary_kept_set = set(final_using_contig)
         existing_names = {c[CTG_NAM] for c in real_final_contig}
@@ -4194,65 +4265,66 @@ def contig_preprocessing_00(PAF_FILE_PATH_ : list):
                 continue
 
             indexed_chunks = [(chunk_i, chunks[chunk_i]) for chunk_i in trimmed_indices]
-            selected_chroms = select_alt_simple_major_chroms(indexed_chunks)
-            if len(selected_chroms) < 2:
+            terminal_left = indexed_chunks[0][1]
+            terminal_right = indexed_chunks[-1][1]
+            if terminal_left[CHR_NAM] == terminal_right[CHR_NAM]:
                 continue
 
-            same_dir_candidates, diff_dir_transitions = find_alt_simple_transition_candidates(indexed_chunks, selected_chroms)
-            candidates_to_add = []
-            for candidate in same_dir_candidates:
+            selected_chroms = select_alt_simple_major_chroms(
+                indexed_chunks,
+                required_chroms=(terminal_left[CHR_NAM], terminal_right[CHR_NAM]),
+            )
+            candidate = find_alt_simple_inward_bounds(indexed_chunks, selected_chroms)
+            if candidate is None:
+                continue
+
+            same_terminal_dir = candidate[0][1][CTG_DIR] == candidate[1][1][CTG_DIR]
+            if same_terminal_dir:
                 if alt_simple_candidate_near_existing(candidate, existing_nclose_loci, ALT_SIMPLE_EXISTING_NCLOSE_DIST):
                     simple_alt_skip_existing_count += 1
                     continue
-                candidates_to_add.append(candidate)
-            candidates_to_add.extend(diff_dir_transitions)
-            simple_alt_keep_diff_dir_count += len(diff_dir_transitions)
+            else:
+                simple_alt_keep_diff_dir_count += 1
 
-            if not candidates_to_add:
-                continue
-
-            candidate_serial = 1
             syn_name_base = f"simple_ctg_alt_{ctg_name}"
-            for candidate in candidates_to_add:
-                syn_name = syn_name_base if candidate_serial == 1 else f"{syn_name_base}_nclose{candidate_serial}"
-                while syn_name in existing_names:
-                    candidate_serial += 1
-                    syn_name = f"{syn_name_base}_nclose{candidate_serial}"
-                existing_names.add(syn_name)
-                candidate_serial += 1
+            if syn_name_base in existing_names:
+                continue
+            existing_names.add(syn_name_base)
 
-                sv_type = 1 if candidate[0][1][CHR_NAM] != candidate[1][1][CHR_NAM] else 2
-                s_idx = len(real_final_contig)
-                e_idx = s_idx + 1
-                for chunk_i, raw in candidate:
-                    line_idx = raw[10]                       # tracked when parsing primary PAF
-                    syn_chunk = list(raw[:10]) + [
-                        sv_type,                             # 10 CTG_TYP
-                        s_idx,                               # 11 CTG_STRND
-                        e_idx,                               # 12 CTG_ENDND
-                        telo_labels[chunk_i][0],             # 13 CTG_TELCHR
-                        telo_labels[chunk_i][1],             # 14 CTG_TELDIR
-                        '0',                                 # 15 CTG_TELCON (telcon_set 미참여)
-                        repeat_labels[chunk_i][0],           # 16 CTG_RPTCHR
-                        repeat_labels[chunk_i][1],           # 17 CTG_RPTCASE
-                        censat_labels[chunk_i][1],           # 18 CTG_CENSAT
-                        '0',                                 # 19 CTG_MAINFLOWDIR (find_mainflow가 덮어씀)
-                        '0',                                 # 20 CTG_MAINFLOWCHR (find_mainflow가 덮어씀)
-                        f'0.{line_idx}',                     # 21 CTG_GLOBALIDX (paf_file[0][line_idx]로 11번이 lookup)
-                    ]
-                    syn_chunk[CTG_NAM] = syn_name
-                    real_final_contig.append(syn_chunk)
+            left_chunk_i = candidate[0][0]
+            right_chunk_i = candidate[1][0]
+            s_idx = len(real_final_contig)
+            e_idx = s_idx + right_chunk_i - left_chunk_i
+            for chunk_i in range(left_chunk_i, right_chunk_i + 1):
+                raw = chunks[chunk_i]
+                line_idx = raw[10]                       # tracked when parsing primary PAF
+                syn_chunk = list(raw[:10]) + [
+                    1,                                   # 10 CTG_TYP (terminal chromosomes differ)
+                    s_idx,                               # 11 CTG_STRND
+                    e_idx,                               # 12 CTG_ENDND
+                    telo_labels[chunk_i][0],             # 13 CTG_TELCHR
+                    telo_labels[chunk_i][1],             # 14 CTG_TELDIR
+                    '0',                                 # 15 CTG_TELCON (telcon_set 미참여)
+                    repeat_labels[chunk_i][0],           # 16 CTG_RPTCHR
+                    repeat_labels[chunk_i][1],           # 17 CTG_RPTCASE
+                    censat_labels[chunk_i][1],           # 18 CTG_CENSAT
+                    '0',                                 # 19 CTG_MAINFLOWDIR (find_mainflow가 덮어씀)
+                    '0',                                 # 20 CTG_MAINFLOWCHR (find_mainflow가 덮어씀)
+                    f'0.{line_idx}',                     # 21 CTG_GLOBALIDX (paf_file[0][line_idx]로 11번이 lookup)
+                ]
+                syn_chunk[CTG_NAM] = syn_name_base
+                real_final_contig.append(syn_chunk)
 
-                if candidate[0][1][CTG_DIR] == candidate[1][1][CTG_DIR]:
-                    existing_nclose_loci.append(alt_simple_pair_loci(candidate))
-                simple_alt_count += 1
+            if same_terminal_dir:
+                existing_nclose_loci.append(alt_simple_pair_loci(candidate))
+            simple_alt_count += 1
 
         if simple_alt_count > 0:
-            logging.info(f"Number of simple ctg alt nclose candidates added : {simple_alt_count}")
+            logging.info(f"Number of simple ctg alt contigs added : {simple_alt_count}")
         if simple_alt_skip_existing_count > 0:
             logging.info(f"Number of simple ctg alt candidates skipped as existing nclose : {simple_alt_skip_existing_count}")
         if simple_alt_keep_diff_dir_count > 0:
-            logging.info(f"Number of simple ctg alt direction-changing transitions kept unfiltered : {simple_alt_keep_diff_dir_count}")
+            logging.info(f"Number of simple ctg alt contigs with different terminal directions kept unfiltered : {simple_alt_keep_diff_dir_count}")
 
     adjacency = initial_graph_build(real_final_contig, telo_bound_dict)
 
@@ -7191,10 +7263,12 @@ parser.add_argument("--nclose_count_vaf_threshold",
                     type=float, default=NCLOSE_COUNT_DEFAULT_VAF_THRESHOLD)
 parser.add_argument("--disable_alt_ctg_simple",
                     help="Disable the default primary-contig rescue that trims telomere-like "
-                         "terminal chunks, ignores <=10kb fragments, selects chromosomes covering "
-                         "90%% of the remaining span, skips same-direction chromosome-change "
-                         "break candidates only when they are within 10kb of an existing nclose "
-                         "candidate, and keeps direction-changing chromosome changes unfiltered.",
+                         "terminal chunks, fixes the resulting terminal chromosome/strand states, "
+                         "adds those terminal chromosomes to the chromosomes covering 90%% of the "
+                         ">10kb alignment span, narrows both boundaries using only that major set, "
+                         "keeps every raw chunk between the boundaries in one rescued contig, "
+                         "skips same-direction candidates within 10kb of an existing nclose, and "
+                         "keeps different-direction candidates unfiltered.",
                     action='store_true')
 
 parser.add_argument("--add_indel_graph",
