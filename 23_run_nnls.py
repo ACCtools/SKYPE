@@ -796,15 +796,32 @@ def get_censet_count(censat_intervals, c1, i1, c2, i2):
 
     return cnt
 
-def collect_censat_nclose_chroms(path_tag2cord, path_tag2nclose_key, censat_intervals,
-                                 active_nclose_keys=None):
+def cen_fragment_expected_high_side(cen_fragment_meta, chrom):
+    info = cen_fragment_meta.get(chrom)
+    if info is None:
+        return None
+    # dir=True is the higher-coordinate (q/right) fragment.
+    return 'right' if info['dir'] else 'left'
+
+def collect_direction_matched_censat_nclose_chroms(
+    path_tag2cord,
+    path_tag2expected_high_side,
+    censat_intervals,
+    cen_fragment_meta,
+):
     chroms = set()
     for path_tag, cords in path_tag2cord.items():
-        nclose_key = path_tag2nclose_key[path_tag]
-        if active_nclose_keys is not None and nclose_key not in active_nclose_keys:
-            continue
-        for chrom, cord in cords:
-            if overlaps_censat(censat_intervals, chrom, cord, cord + 1):
+        expected_high_sides = path_tag2expected_high_side.get(path_tag, [])
+        for side_idx, (chrom, cord) in enumerate(cords):
+            if not overlaps_censat(censat_intervals, chrom, cord, cord + 1):
+                continue
+            expected_high_side = (
+                expected_high_sides[side_idx]
+                if side_idx < len(expected_high_sides)
+                else None
+            )
+            target_high_side = cen_fragment_expected_high_side(cen_fragment_meta, chrom)
+            if target_high_side is not None and expected_high_side == target_high_side:
                 chroms.add(chrom)
 
     return chroms
@@ -1330,36 +1347,30 @@ CF_GREEDY_MIN_WEIGHT = CF_GREEDY_MIN_WEIGHT_N * N
 
 cent_fragment_col2chrom = {}
 if ENABLE_CENT_FRAGMENT_FILTER:
-    nclose_filter_weight_fullsize = scatter_subset_weights(
-        filter_weights, A_idx_list, len(weights_fullsize), dtype=weights_fullsize.dtype
+    censat_nclose_chroms = collect_direction_matched_censat_nclose_chroms(
+        path_tag2cord,
+        path_tag2expected_high_side,
+        censat_intervals,
+        cen_fragment_meta,
     )
-    nclose_filter_nclose_depth = calculate_nclose_depth(
-        path_nclose_count, nclose_filter_weight_fullsize
-    )
-    active_nclose_keys = {
-        nclose_key
-        for nclose_key, depth in nclose_filter_nclose_depth.items()
-        if depth >= 1e-6
-    }
-    censat_nclose_chroms = collect_censat_nclose_chroms(
-        path_tag2cord, path_tag2nclose_key, censat_intervals,
-        active_nclose_keys=active_nclose_keys
-    )
-    skipped_no_censat_nclose = []
+    skipped_no_direction_matched_nclose = []
     for k, tags in path_nclose_set_dict.items():
         for tag in tags:
             if isinstance(tag, tuple) and len(tag) > 0 and tag[0] == 'cent_fragment':
                 chrom = tag[1]
                 if chrom not in censat_nclose_chroms:
-                    skipped_no_censat_nclose.append((k, chrom))
+                    skipped_no_direction_matched_nclose.append((k, chrom))
                     break
                 cent_fragment_col2chrom[k] = chrom
                 break
-    if skipped_no_censat_nclose:
-        skipped_chroms = sorted({chrom for _, chrom in skipped_no_censat_nclose}, key=chr2int)
+    if skipped_no_direction_matched_nclose:
+        skipped_chroms = sorted(
+            {chrom for _, chrom in skipped_no_direction_matched_nclose},
+            key=chr2int,
+        )
         logging.info(
-            f'CF greedy prefilter: skipped {len(skipped_no_censat_nclose)} cent_fragment cols '
-            f'without positive-depth active censat nclose ({", ".join(skipped_chroms)})'
+            f'CF greedy prefilter: skipped {len(skipped_no_direction_matched_nclose)} cent_fragment cols '
+            f'without direction-matched censat-overlapping nclose ({", ".join(skipped_chroms)})'
         )
 else:
     logging.info('CF greedy filter disabled')
@@ -1512,10 +1523,7 @@ def in_censat(chrom, cord):
 def censat_expected_high_side(chrom, cord):
     if not in_censat(chrom, cord):
         return None
-    info = cen_fragment_meta.get(chrom)
-    if info is None:
-        return None
-    return 'right' if info['dir'] else 'left'
+    return cen_fragment_expected_high_side(cen_fragment_meta, chrom)
 
 def censat_is_droppable_by_ratio(chrom, cord, depth_val, expected_high_side):
     if expected_high_side is None:

@@ -8,6 +8,7 @@ from collections import Counter as _Counter
 # logger 가 설정되어 이 레벨이 전체에 적용된다(자체 basicConfig 는 핸들러가 이미 있어 무시됨).
 # 디버그 출력(logging.debug)을 보려면 logging.DEBUG 로 바꾼다.
 LOG_LEVEL = logging.INFO
+# LOG_LEVEL = logging.DEBUG
 logging.basicConfig(
     format='%(asctime)s %(levelname)s:%(message)s',
     level=LOG_LEVEL,
