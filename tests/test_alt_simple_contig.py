@@ -16,6 +16,7 @@ def load_alt_simple_helpers():
     function_names = {
         "alt_simple_ref_len",
         "alt_simple_chr_sort_key",
+        "alt_simple_terminal_censat_included",
         "select_alt_simple_major_chroms",
         "alt_simple_alignment_state",
         "find_alt_simple_inward_bounds",
@@ -45,6 +46,9 @@ def load_alt_simple_helpers():
 HELPERS = load_alt_simple_helpers()
 select_alt_simple_major_chroms = HELPERS["select_alt_simple_major_chroms"]
 find_alt_simple_inward_bounds = HELPERS["find_alt_simple_inward_bounds"]
+alt_simple_terminal_censat_included = HELPERS[
+    "alt_simple_terminal_censat_included"
+]
 
 
 def chunk(
@@ -70,6 +74,30 @@ def chunk(
 
 
 class AltSimpleContigTests(unittest.TestCase):
+    def test_only_post_trim_terminal_censat_inclusion_is_rejected(self) -> None:
+        censat_labels = [
+            ("chr1", "rin"),
+            ("0", "0"),
+            ("chr7", "r"),
+            ("chr8", "rin"),
+            ("0", "0"),
+        ]
+
+        # The trimmed endpoints are indices 1 and 4.  An internal rin and a
+        # partial terminal overlap (r) do not reject the candidate.
+        self.assertFalse(
+            alt_simple_terminal_censat_included([1, 2, 3, 4], censat_labels)
+        )
+        self.assertFalse(
+            alt_simple_terminal_censat_included([1, 2], censat_labels)
+        )
+        self.assertTrue(
+            alt_simple_terminal_censat_included([1, 2, 3], censat_labels)
+        )
+        self.assertTrue(
+            alt_simple_terminal_censat_included([0, 1, 2], censat_labels)
+        )
+
     def test_terminal_chromosomes_are_union_with_90_percent_set(self) -> None:
         indexed = [
             (0, chunk(0, 950_000, "+", "chr6", 950_000)),

@@ -643,6 +643,12 @@ def trim_alt_simple_terminal_indices(chunks: list, telo_labels: list, repeat_lab
         right -= 1
     return list(range(left, right + 1))
 
+def alt_simple_terminal_censat_included(trimmed_indices: list, censat_labels: list) -> bool:
+    if not trimmed_indices:
+        return False
+    terminal_indices = (trimmed_indices[0], trimmed_indices[-1])
+    return any(censat_labels[idx][1] == "rin" for idx in terminal_indices)
+
 def select_alt_simple_major_chroms(indexed_chunks: list, required_chroms=()) -> set:
     chrom_len = Counter()
     total_len = 0
@@ -4207,7 +4213,8 @@ def contig_preprocessing_00(PAF_FILE_PATH_ : list):
     logging.info(f"Number of virtual contigs added on preprocessing : {add_node_count}")
 
     # Simple ctg-as-alt (enabled by default; disabled with --disable_alt_ctg_simple):
-    # terminal telomere/repeat trim 직후 서로 다른 양끝 chromosome/strand를 고정한다.
+    # terminal telomere/repeat trim 직후 양끝 중 하나라도 censat에 완전히 포함(rin)되면
+    # 제외하고, 서로 다른 양끝 chromosome/strand를 고정한다.
     # >10kb이면서 (90% major chromosome U 양끝 chromosome)에 속한 chunk만 보며 양쪽에서
     # 같은 terminal state가 이어지는 만큼 안쪽으로 경계를 좁힌다. 경계 탐색에서 무시한
     # short/minor-chromosome chunk도 확정된 두 경계 사이에 있으면 모두 보존하며, 원본
@@ -4248,6 +4255,7 @@ def contig_preprocessing_00(PAF_FILE_PATH_ : list):
 
         simple_alt_count = 0
         simple_alt_skip_existing_count = 0
+        simple_alt_skip_terminal_censat_count = 0
         simple_alt_keep_diff_dir_count = 0
         for ctg_name, chunks in sorted(chunks_per_contig.items()):
             if len(chunks) < 2:
@@ -4268,6 +4276,9 @@ def contig_preprocessing_00(PAF_FILE_PATH_ : list):
             terminal_left = indexed_chunks[0][1]
             terminal_right = indexed_chunks[-1][1]
             if terminal_left[CHR_NAM] == terminal_right[CHR_NAM]:
+                continue
+            if alt_simple_terminal_censat_included(trimmed_indices, censat_labels):
+                simple_alt_skip_terminal_censat_count += 1
                 continue
 
             selected_chroms = select_alt_simple_major_chroms(
@@ -4323,6 +4334,11 @@ def contig_preprocessing_00(PAF_FILE_PATH_ : list):
             logging.info(f"Number of simple ctg alt contigs added : {simple_alt_count}")
         if simple_alt_skip_existing_count > 0:
             logging.info(f"Number of simple ctg alt candidates skipped as existing nclose : {simple_alt_skip_existing_count}")
+        if simple_alt_skip_terminal_censat_count > 0:
+            logging.info(
+                "Number of simple ctg alt contigs skipped because a post-terminal-trim "
+                f"endpoint is included in censat : {simple_alt_skip_terminal_censat_count}"
+            )
         if simple_alt_keep_diff_dir_count > 0:
             logging.info(f"Number of simple ctg alt contigs with different terminal directions kept unfiltered : {simple_alt_keep_diff_dir_count}")
 
@@ -7263,7 +7279,8 @@ parser.add_argument("--nclose_count_vaf_threshold",
                     type=float, default=NCLOSE_COUNT_DEFAULT_VAF_THRESHOLD)
 parser.add_argument("--disable_alt_ctg_simple",
                     help="Disable the default primary-contig rescue that trims telomere-like "
-                         "terminal chunks, fixes the resulting terminal chromosome/strand states, "
+                         "terminal chunks, rejects candidates when either resulting endpoint is "
+                         "fully included in censat, fixes the terminal chromosome/strand states, "
                          "adds those terminal chromosomes to the chromosomes covering 90%% of the "
                          ">10kb alignment span, narrows both boundaries using only that major set, "
                          "keeps every raw chunk between the boundaries in one rescued contig, "
