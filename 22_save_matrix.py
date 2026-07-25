@@ -26,6 +26,10 @@ from nclose_tracking import (
     save_filter_status,
     save_path_usage,
 )
+from censat_pair_rescue import (
+    load_rescue_artifact,
+    validate_rescue_path_prefix,
+)
 
 import numpy as np
 import pandas as pd
@@ -35,7 +39,6 @@ import ast
 import h5py
 import logging
 import argparse
-import itertools
 import collections
 import glob
 
@@ -75,7 +78,7 @@ CTG_GLOBALIDX = 21
 
 ABS_MAX_COVERAGE_RATIO = 3
 MAX_PATH_CNT = 100
-NORMAL_PRIOR_STRENGTH = 0.00
+NORMAL_PRIOR_STRENGTH = 0.01
 
 DIR_FOR = 1
 TELOMERE_EXPANSION = 5 * K
@@ -885,11 +888,31 @@ dep_list.extend([0] * (
 assert(len(dep_list) == n)
 assert ncnt == n
 
+# INDEL_INDEX_* exclusions are resolved completely while constructing the
+# matrix. Any matrix column carrying an explicitly excluded event becomes a
+# zero column, so stage 23 can start from one contiguous suffix without an
+# initial active-index gather.
+explicit_excluded_columns = {
+    col_idx
+    for event_key in explicit_filter_reasons
+    for col_idx, usage in enumerate(path_nclose_usage)
+    if usage.get(event_key, 0) > 0
+}
+if explicit_excluded_columns:
+    A_arr[np.asarray(sorted(explicit_excluded_columns)), :] = 0.0
+    logging.info(
+        "Zeroed %d matrix columns carrying explicitly excluded INDEL events",
+        len(explicit_excluded_columns),
+    )
+
+censat_pair_rescue_records = load_rescue_artifact(PREFIX)["records"]
+censat_pair_rescue_path_prefix_count = validate_rescue_path_prefix(
+    path_nclose_usage,
+    censat_pair_rescue_records,
+    len(paf_ans_list),
+)
+
 initial_active_columns = set(range(n))
-for event_key in explicit_filter_reasons:
-    for col_idx, usage in enumerate(path_nclose_usage):
-        if usage.get(event_key, 0) > 0:
-            initial_active_columns.discard(col_idx)
 
 nclose_filter_status = initialise_filter_status(
     nclose_event_catalog,
@@ -905,9 +928,6 @@ logging.info(
     sum(bool(usage) for usage in path_nclose_usage),
     len(path_nclose_usage),
 )
-
-for (i1, i2) in itertools.pairwise(dep_list):
-    assert(i1 >= i2)
 
 if init_cols:
     # Estimate default-chromosome targets with all cent_fragment columns present
@@ -1056,6 +1076,8 @@ with open(f"{PREFIX}/23_input.pkl", "wb") as f:
         {
             "B_depth_start": 0,
             "B_depth_end": fm,
+            "censat_pair_rescue_path_prefix_count":
+                censat_pair_rescue_path_prefix_count,
         },
     ), f)
 

@@ -8,6 +8,11 @@ from nclose_tracking import (
     build_bnd_event_catalog,
     save_event_catalog,
 )
+from censat_pair_rescue import (
+    rescue_record,
+    save_rescue_artifact,
+    select_rescue_candidates,
+)
 
 import shutil
 import argparse
@@ -4776,6 +4781,116 @@ def append_ppc_rows(ppc_path, rows):
                 print(value, end="\t", file=f)
             print("", file=f)
 
+
+def add_censat_pair_rescue_ncloses(
+    contig_data,
+    nclose_nodes,
+    bnd_contig,
+    rpt_con,
+    rpt_censat_con,
+    repeat_data,
+    repeat_censat_data,
+    chr_len,
+    cen_fragment_meta,
+    aligned_unitig_paf,
+    original_unitig_paf,
+    censat_bed,
+    ppc_path,
+):
+    """Append trusted karyotype unitig pairs after ordinary censat filtering."""
+
+    candidates = select_rescue_candidates(
+        aligned_unitig_paf,
+        original_unitig_paf,
+        censat_bed,
+        cen_fragment_meta,
+        min_censat_length=CENSAT_COMPRESSABLE_THRESHOLD,
+    )
+    rows_to_append = []
+    records = []
+    existing_names = {row[CTG_NAM] for row in contig_data}
+
+    for candidate in candidates:
+        new_name = f"censat_pair_rescue_{candidate.query_name}"
+        if new_name in existing_names:
+            raise ValueError(
+                f"Duplicate censat-pair rescue contig name: {new_name}"
+            )
+        existing_names.add(new_name)
+
+        terminal_rows = []
+        for alignment in (candidate.left, candidate.right):
+            terminal_rows.append([
+                new_name,
+                alignment.query_length,
+                alignment.query_start,
+                alignment.query_end,
+                alignment.strand,
+                alignment.target_name,
+                alignment.target_length,
+                alignment.target_start,
+                alignment.target_end,
+                alignment.mapq,
+            ])
+
+        repeat_labels = label_repeat_node(
+            terminal_rows, repeat_data, chr_len
+        )
+        censat_labels = label_repeat_node(
+            terminal_rows, repeat_censat_data, chr_len
+        )
+        if any(label[1] == '0' for label in censat_labels):
+            raise ValueError(
+                "Selected censat-pair rescue endpoint lost its censat label: "
+                f"{candidate.query_name}"
+            )
+
+        start_idx = len(contig_data)
+        end_idx = start_idx + 1
+        synthetic_rows = []
+        for alignment, repeat_label, censat_label in zip(
+            (candidate.left, candidate.right),
+            repeat_labels,
+            censat_labels,
+        ):
+            synthetic_rows.append([
+                new_name,
+                alignment.query_length,
+                alignment.query_start,
+                alignment.query_end,
+                alignment.strand,
+                alignment.target_name,
+                alignment.target_length,
+                alignment.target_start,
+                alignment.target_end,
+                alignment.mapq,
+                1,
+                start_idx,
+                end_idx,
+                '0',
+                '0',
+                '0',
+                repeat_label[0],
+                repeat_label[1],
+                censat_label[1],
+                alignment.strand,
+                alignment.target_name,
+                f'1.{alignment.source_order}',
+            ])
+
+        contig_data.extend(tuple(row) for row in synthetic_rows)
+        rows_to_append.extend(synthetic_rows)
+        pair = (start_idx, end_idx)
+        nclose_nodes[new_name].append(pair)
+        bnd_contig.add(new_name)
+        rpt_con.add(new_name)
+        rpt_censat_con.add(new_name)
+        records.append(rescue_record(candidate, pair))
+
+    append_ppc_rows(ppc_path, rows_to_append)
+    return records
+
+
 def collect_missing_cen_fragment_dir_censat_noncensat(
     contig_data,
     nclose_nodes,
@@ -7035,6 +7150,43 @@ def nclose_calc():
     else:
         logging.info('Skipped offset-direction-mismatched censat-noncensat nclose filtering')
 
+    censat_pair_rescue_records = []
+    if (
+        REQUESTED_PIPELINE_MODE == PIPELINE_MODE_KARYOTYPE
+        and args.vcf_input is None
+        and args.alt is not None
+        and not is_unitig_reduced
+        and len(PAF_FILE_PATH) > 1
+        and len(ORIGINAL_PAF_LOC_LIST) > 1
+    ):
+        censat_pair_rescue_records = add_censat_pair_rescue_ncloses(
+            contig_data,
+            nclose_nodes,
+            bnd_contig,
+            rpt_con,
+            rpt_censat_con,
+            repeat_data,
+            repeat_censat_data,
+            chr_len,
+            cen_fragment_meta_for_filter,
+            PAF_FILE_PATH[1],
+            ORIGINAL_PAF_LOC_LIST[1],
+            CENSAT_PATH,
+            PREPROCESSED_PAF_FILE_PATH,
+        )
+        logging.info(
+            "Added %d trusted censat-pair rescue NClose events",
+            len(censat_pair_rescue_records),
+        )
+    else:
+        logging.info(
+            "Censat-pair rescue disabled outside karyotype unitig PAF mode"
+        )
+
+    if censat_pair_rescue_records:
+        contig_data_size = len(contig_data)
+        chr_corr, chr_rev_corr = chr_correlation_maker(contig_data)
+
     def write_compressed_nclose_nodes_list(current_nclose_nodes):
         nclose_type = group_nclose_nodes_by_chrom(contig_data, current_nclose_nodes)
 
@@ -7194,6 +7346,24 @@ def nclose_calc():
     with open(f'{PREFIX}/indel_exclude_idx_set.pkl', 'wb') as f:
         pkl.dump(indel_exclude_idx_set, f)
 
+    surviving_nclose_keys = {
+        tuple(sorted(map(int, pair)))
+        for pair_list in nclose_nodes.values()
+        for pair in pair_list
+    }
+    final_censat_pair_rescue_records = [
+        record
+        for record in censat_pair_rescue_records
+        if tuple(record["event_key"]) in surviving_nclose_keys
+    ]
+    save_rescue_artifact(PREFIX, final_censat_pair_rescue_records)
+    if len(final_censat_pair_rescue_records) != len(censat_pair_rescue_records):
+        logging.info(
+            "Censat-pair rescue post-filter survival: %d/%d events",
+            len(final_censat_pair_rescue_records),
+            len(censat_pair_rescue_records),
+        )
+
     transloc_nclose_pair_count = write_compressed_nclose_nodes_list(nclose_nodes)
 
     nclose_node_count = write_nclose_nodes_index(
@@ -7343,6 +7513,7 @@ logging.info(describe_pipeline_mode(initial_pipeline_mode_config))
 logging.info("02_Build_Breakend_Graph start")
 
 os.makedirs(PREFIX, exist_ok=True)
+save_rescue_artifact(PREFIX, [])
 
 LIMIT_COMBINATIONS_OUTPUT_PATH = os.path.join(PREFIX, LIMIT_COMBINATIONS_JSON)
 if os.path.isfile(LIMIT_COMBINATIONS_OUTPUT_PATH):

@@ -34,6 +34,15 @@ from nclose_tracking import (
     record_filter_stage,
     save_filter_status,
 )
+from censat_pair_rescue import (
+    allowed_rescue_reactivation_columns,
+    classify_rescue_cf_swap_failures,
+    load_rescue_artifact,
+    plan_rescue_cf_swap,
+    prepare_reactivation_warm_start,
+    rescue_event_keys,
+    select_rescue_reactivation_columns,
+)
 
 CTG_NAM = 0
 CTG_LEN = 1
@@ -1066,27 +1075,6 @@ if len(B_depth) != len(chr_filt_st_list):
 
 nclose_filter_status = load_filter_status(PREFIX)
 path_nclose_count = load_path_usage(PREFIX, expected_len=A_store.shape[0])
-initial_A_idx_list = list(
-    nclose_filter_status["stages"]["initial"]["active_columns"]
-)
-if not initial_A_idx_list:
-    raise RuntimeError("No matrix columns remain after stage-02 NClose filtering.")
-
-if len(initial_A_idx_list) == A_store.shape[0]:
-    A_initial = solver_matrix_from_store(A_store)
-else:
-    with h5py.File(f"{PREFIX}/matrix.h5", "r") as f:
-        read_selected_feature_rows_direct(f["A"], A_store, initial_A_idx_list)
-    A_initial = solver_matrix_from_store(A_store, len(initial_A_idx_list))
-
-initial_weights = fit_nnls_warm(A_initial, B)
-weights_fullsize = scatter_subset_weights(
-    initial_weights,
-    initial_A_idx_list,
-    len(path_nclose_count),
-    dtype=initial_weights.dtype,
-)
-predict_suc_B_base = A_initial.dot(initial_weights)
 
 with open(f'{PREFIX}/path_data.pkl', 'rb') as f:
     path_list_dict = pkl.load(f)
@@ -1094,6 +1082,64 @@ with open(f'{PREFIX}/contig_pat_vec_data.pkl', 'rb') as f:
     paf_sort_ans_list, _, _, _ = pkl.load(f)
 
 rpll = len(paf_sort_ans_list)
+if len(path_nclose_count) < rpll:
+    raise ValueError(
+        "Matrix/path column count mismatch: "
+        f"{len(path_nclose_count)} matrix columns for {rpll} paths"
+    )
+
+censat_pair_rescue_records = load_rescue_artifact(PREFIX)["records"]
+censat_pair_rescue_keys = rescue_event_keys(censat_pair_rescue_records)
+rescue_prefix_meta_key = "censat_pair_rescue_path_prefix_count"
+if (
+    censat_pair_rescue_records
+    and rescue_prefix_meta_key not in matrix_depth_meta
+):
+    raise ValueError(
+        "Censat-pair rescue records exist, but stage 22 did not pass the "
+        "rescue path-prefix count. Rerun the pipeline from stage 22."
+    )
+censat_pair_rescue_path_prefix_count = int(
+    matrix_depth_meta.get(rescue_prefix_meta_key, 0)
+)
+if not 0 <= censat_pair_rescue_path_prefix_count <= rpll:
+    raise ValueError(
+        "Invalid censat-pair rescue path-prefix count: "
+        f"{censat_pair_rescue_path_prefix_count} for {rpll} path columns"
+    )
+if censat_pair_rescue_path_prefix_count and not censat_pair_rescue_records:
+    raise ValueError(
+        "Stage 22 reported a censat-pair rescue path prefix, but the rescue "
+        "artifact is missing or empty. Rerun the pipeline from stage 02."
+    )
+
+if ENABLE_CENT_FRAGMENT_FILTER and censat_pair_rescue_records:
+    num_rescue_paths = censat_pair_rescue_path_prefix_count
+else:
+    num_rescue_paths = 0
+deferred_censat_pair_rescue_cols = set(range(num_rescue_paths))
+initial_feature_count = len(path_nclose_count) - num_rescue_paths
+if initial_feature_count <= 0:
+    raise RuntimeError(
+        "No matrix columns remain after deferring censat-pair rescue paths."
+    )
+if deferred_censat_pair_rescue_cols:
+    logging.debug(
+        "Initial NNLS uses zero-copy matrix suffix after deferring %d "
+        "censat-pair rescue path-prefix columns until CF filtering ends",
+        num_rescue_paths,
+    )
+
+A_initial = A_store[num_rescue_paths:, :].T
+
+initial_weights = fit_nnls_warm(A_initial, B)
+weights_fullsize = np.zeros(
+    len(path_nclose_count),
+    dtype=initial_weights.dtype,
+)
+weights_fullsize[num_rescue_paths:] = initial_weights
+predict_suc_B_base = A_initial.dot(initial_weights)
+
 assert len(weights_fullsize) >= rpll
 
 nclose_test_data = collect_nclose_test_data(contig_data, nclose_nodes)
@@ -1108,7 +1154,9 @@ active_reciprocal_side_ids = set()
 reciprocal_path_drop_cols = set()
 reciprocal_transloc_nclose_set = set()
 stage23_direct_reasons = {}
-initial_A_idx_set = set(initial_A_idx_list)
+initial_A_idx_set = set(
+    range(num_rescue_paths, len(path_nclose_count))
+)
 
 if ENABLE_RECIPROCAL_TRANSLOCATION_FILTER:
     reciprocal_records = load_raw_translocation_records(PREFIX)
@@ -1330,12 +1378,33 @@ while True:
     prev_fail_chrom_list = fail_chrom_list[:]
 
 for event_key in opposite_dir_depth_drop_set:
+    if event_key in censat_pair_rescue_keys:
+        continue
     stage23_direct_reasons.setdefault(
         event_key, 'FILTERED_23_OPPOSITE_DIRECTION'
     )
 for event_key in hyp_test_nclose_set:
+    if event_key in censat_pair_rescue_keys:
+        continue
     stage23_direct_reasons.setdefault(
         event_key, 'FILTERED_23_HYPOTHESIS_TEST'
+    )
+
+allowed_deferred_censat_pair_rescue_cols = (
+    allowed_rescue_reactivation_columns(
+        deferred_censat_pair_rescue_cols,
+        path_nclose_count,
+        censat_pair_rescue_keys,
+        blocked_columns=reciprocal_path_drop_cols,
+        blocked_events=not_using_nclose_set,
+    )
+)
+if deferred_censat_pair_rescue_cols:
+    logging.debug(
+        "Censat-pair rescue columns eligible for post-CF consideration: "
+        "%d/%d after unrelated NClose filters",
+        len(allowed_deferred_censat_pair_rescue_cols),
+        len(deferred_censat_pair_rescue_cols),
     )
 
 # === Cent_fragment greedy off-test ===
@@ -1344,6 +1413,17 @@ for event_key in hyp_test_nclose_set:
 # baseline 은 항상 nclose 필터링 직후로 고정 — 누적 drift 도 base 대비 한도 안이면 OK.
 CF_GREEDY_MIN_WEIGHT_N = 0
 CF_GREEDY_MIN_WEIGHT = CF_GREEDY_MIN_WEIGHT_N * N
+
+all_cent_fragment_col2chrom = {}
+for col_idx, tags in path_nclose_set_dict.items():
+    for tag in tags:
+        if (
+            isinstance(tag, tuple)
+            and len(tag) > 0
+            and tag[0] == 'cent_fragment'
+        ):
+            all_cent_fragment_col2chrom[col_idx] = tag[1]
+            break
 
 cent_fragment_col2chrom = {}
 if ENABLE_CENT_FRAGMENT_FILTER:
@@ -1354,15 +1434,11 @@ if ENABLE_CENT_FRAGMENT_FILTER:
         cen_fragment_meta,
     )
     skipped_no_direction_matched_nclose = []
-    for k, tags in path_nclose_set_dict.items():
-        for tag in tags:
-            if isinstance(tag, tuple) and len(tag) > 0 and tag[0] == 'cent_fragment':
-                chrom = tag[1]
-                if chrom not in censat_nclose_chroms:
-                    skipped_no_direction_matched_nclose.append((k, chrom))
-                    break
-                cent_fragment_col2chrom[k] = chrom
-                break
+    for k, chrom in all_cent_fragment_col2chrom.items():
+        if chrom not in censat_nclose_chroms:
+            skipped_no_direction_matched_nclose.append((k, chrom))
+            continue
+        cent_fragment_col2chrom[k] = chrom
     if skipped_no_direction_matched_nclose:
         skipped_chroms = sorted(
             {chrom for _, chrom in skipped_no_direction_matched_nclose},
@@ -1387,6 +1463,32 @@ def _compute_acc_max(predict_a, predict_b):
 # 고정 baseline (nclose-filter 직후) — 누적 제거 후 비교 대상
 predict_suc_B_post = predict_suc_B.copy()
 cf_acc_max_base_fixed = _compute_acc_max(predict_suc_B_post, B)
+
+def _evaluate_cf_prediction(predict_suc_B_test):
+    """Apply the CF error test against the fixed post-NClose baseline."""
+
+    acc_max_diff = _compute_acc_max(
+        predict_suc_B_test, predict_suc_B_post
+    )
+    ok = True
+    worst_chrom = None
+    worst_ratio = 0.0
+    failed_chrom_ratios = {}
+    for chk, max_diff in acc_max_diff.items():
+        if chk == 'chrY' and no_chrY:
+            continue
+        base_max = cf_acc_max_base_fixed.get(chk, 0.0)
+        if base_max == 0:
+            continue
+        ratio = max_diff / base_max
+        if ratio > CHROM_ERROR_FAIL_RATE:
+            ok = False
+            failed_chrom_ratios[chk] = ratio
+            if ratio > worst_ratio:
+                worst_ratio = ratio
+                worst_chrom = chk
+    return ok, worst_chrom, worst_ratio, failed_chrom_ratios
+
 
 # 누적 상태 (PASS마다 갱신)
 A_idx_list_curr = sorted(A_idx_list)
@@ -1435,23 +1537,12 @@ while True:
         predict_fal_B_test = A_fail_test.dot(weights_test)
 
         # numerator: 누적 제거된 test prediction vs FIXED baseline (nclose-filter 직후)
-        acc_max_diff = _compute_acc_max(predict_suc_B_test, predict_suc_B_post)
-
-        ok = True
-        worst_chrom = None
-        worst_ratio = 0.0
-        for chk, max_diff in acc_max_diff.items():
-            if chk == 'chrY' and no_chrY:
-                continue
-            base_max = cf_acc_max_base_fixed.get(chk, 0.0)
-            if base_max == 0:
-                continue
-            ratio = max_diff / base_max
-            if ratio > CHROM_ERROR_FAIL_RATE:
-                ok = False
-                if ratio > worst_ratio:
-                    worst_ratio = ratio
-                    worst_chrom = chk
+        (
+            ok,
+            worst_chrom,
+            worst_ratio,
+            _,
+        ) = _evaluate_cf_prediction(predict_suc_B_test)
 
         if ok:
             logging.debug(f'CF PASS: drop col {col} chrom={chrom} w={w:.4f}')
@@ -1472,6 +1563,189 @@ while True:
 if removed_cf:
     removed_cf_chroms = sorted((chrom for _, chrom in removed_cf), key=chr2int)
     logging.info(f'CF greedy removed cent_fragment chromosomes: {", ".join(removed_cf_chroms)}')
+
+retained_cf_column_set = set(A_idx_list_curr)
+retained_cent_fragment_chroms = {
+    chrom
+    for col_idx, chrom in all_cent_fragment_col2chrom.items()
+    if col_idx in retained_cf_column_set
+}
+reactivated_censat_pair_rescue_cols = []
+eligible_censat_pair_rescue_keys = set()
+added_rescue_chrom_pairs = []
+if ENABLE_CENT_FRAGMENT_FILTER and censat_pair_rescue_records:
+    (
+        reactivated_censat_pair_rescue_cols,
+        eligible_censat_pair_rescue_keys,
+    ) = select_rescue_reactivation_columns(
+        censat_pair_rescue_records,
+        path_nclose_count,
+        retained_cent_fragment_chroms,
+        allowed_deferred_censat_pair_rescue_cols,
+    )
+    logging.debug(
+        "Censat-pair rescue post-CF candidates: retained CF chromosomes=%s, "
+        "eligible events=%d, rescue columns=%d",
+        ",".join(sorted(retained_cent_fragment_chroms)) or "none",
+        len(eligible_censat_pair_rescue_keys),
+        len(reactivated_censat_pair_rescue_cols),
+    )
+
+if reactivated_censat_pair_rescue_cols:
+    base_A_idx_list = list(A_idx_list_curr)
+    base_filter_weights = filter_weights_curr.copy()
+    initial_swap_plan = plan_rescue_cf_swap(
+        censat_pair_rescue_records,
+        path_nclose_count,
+        eligible_censat_pair_rescue_keys,
+        reactivated_censat_pair_rescue_cols,
+        all_cent_fragment_col2chrom,
+        base_A_idx_list,
+    )
+    candidate_rescue_event_keys = set(initial_swap_plan.event_keys)
+    rejected_rescue_event_keys = set()
+    swap_committed = False
+    swap_attempt = 0
+
+    while candidate_rescue_event_keys - rejected_rescue_event_keys:
+        swap_plan = plan_rescue_cf_swap(
+            censat_pair_rescue_records,
+            path_nclose_count,
+            candidate_rescue_event_keys,
+            reactivated_censat_pair_rescue_cols,
+            all_cent_fragment_col2chrom,
+            base_A_idx_list,
+            rejected_event_keys=rejected_rescue_event_keys,
+        )
+        swap_attempt += 1
+        (
+            swap_A_idx_list,
+            swap_warm_start,
+            _,
+        ) = prepare_reactivation_warm_start(
+            base_filter_weights,
+            base_A_idx_list,
+            swap_plan.rescue_columns,
+            len(weights_fullsize),
+            deactivated_global_indices=swap_plan.disabled_cf_columns,
+        )
+        logging.debug(
+            "Censat-pair rescue CF swap attempt %d: events=%d, "
+            "rescue columns=%d, disabled CF chromosomes=%s, "
+            "restored CF chromosomes=%s",
+            swap_attempt,
+            len(swap_plan.event_keys),
+            len(swap_plan.rescue_columns),
+            ",".join(sorted(swap_plan.disabled_cf_chroms)) or "none",
+            ",".join(sorted(swap_plan.restored_cf_chroms)) or "none",
+        )
+
+        with h5py.File(f"{PREFIX}/matrix.h5", "r") as f:
+            read_selected_feature_rows_direct(
+                f["A"], A_store, swap_A_idx_list
+            )
+            read_selected_feature_rows_direct(
+                f["A_fail"], A_fail_store, swap_A_idx_list
+            )
+
+        A_swap = solver_matrix_from_store(
+            A_store, len(swap_A_idx_list)
+        )
+        A_fail_swap = solver_matrix_from_store(
+            A_fail_store, len(swap_A_idx_list)
+        )
+        swap_weights = fit_nnls_warm(
+            A_swap,
+            B,
+            warm_start=swap_warm_start,
+        )
+        predict_suc_B_swap = A_swap.dot(swap_weights)
+        predict_fal_B_swap = A_fail_swap.dot(swap_weights)
+        (
+            swap_ok,
+            worst_chrom,
+            worst_ratio,
+            failed_chrom_ratios,
+        ) = _evaluate_cf_prediction(predict_suc_B_swap)
+
+        if swap_ok:
+            A_idx_list_curr = swap_A_idx_list
+            filter_weights_curr = swap_weights
+            predict_suc_B_curr = predict_suc_B_swap
+            predict_fal_B_curr = predict_fal_B_swap
+            swap_committed = True
+            added_rescue_chrom_pairs = sorted(
+                {
+                    tuple(map(str, record["chroms"]))
+                    for record in censat_pair_rescue_records
+                    if tuple(sorted(map(int, record["event_key"])))
+                    in swap_plan.event_keys
+                },
+                key=lambda chrom_pair: tuple(
+                    chr2int(chrom) for chrom in chrom_pair
+                ),
+            )
+            logging.debug(
+                "Censat-pair rescue CF swap PASS on attempt %d: committed "
+                "%d rescue events across %d columns",
+                swap_attempt,
+                len(swap_plan.event_keys),
+                len(swap_plan.rescue_columns),
+            )
+            break
+
+        newly_rejected_events, unrelated_failed_chroms = (
+            classify_rescue_cf_swap_failures(
+                censat_pair_rescue_records,
+                swap_plan.event_keys,
+                failed_chrom_ratios,
+            )
+        )
+        if unrelated_failed_chroms:
+            logging.debug(
+                "Censat-pair rescue CF swap FAIL on unrelated chromosomes "
+                "%s: cancelled the entire rescue swap "
+                "(worst chrom=%s ratio=%.3f)",
+                ",".join(sorted(unrelated_failed_chroms)),
+                worst_chrom,
+                worst_ratio,
+            )
+            break
+        if not newly_rejected_events:
+            raise RuntimeError(
+                "Censat-pair rescue swap failed without a related rescue "
+                "event or an unrelated failure chromosome."
+            )
+
+        rejected_rescue_event_keys.update(newly_rejected_events)
+        logging.debug(
+            "Censat-pair rescue CF swap FAIL on rescue chromosomes %s: "
+            "rejecting %d related events and retrying "
+            "(rejected total=%d/%d)",
+            ",".join(sorted(failed_chrom_ratios)),
+            len(newly_rejected_events),
+            len(rejected_rescue_event_keys),
+            len(candidate_rescue_event_keys),
+        )
+
+    if (
+        not swap_committed
+        and candidate_rescue_event_keys
+        and candidate_rescue_event_keys <= rejected_rescue_event_keys
+    ):
+        logging.debug(
+            "Censat-pair rescue CF swap rejected every candidate event: "
+            "restored the complete post-CF greedy state"
+        )
+
+if added_rescue_chrom_pairs:
+    logging.info(
+        "Censat-pair rescue added: %s",
+        ", ".join(
+            f"({left_chrom}, {right_chrom})"
+            for left_chrom, right_chrom in added_rescue_chrom_pairs
+        ),
+    )
 
 A_idx_list = A_idx_list_curr
 filter_weights = filter_weights_curr

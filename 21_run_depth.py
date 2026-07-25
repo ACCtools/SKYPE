@@ -3,6 +3,12 @@ import sys
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from skype_utils import *
+from censat_pair_rescue import (
+    load_rescue_artifact,
+    rescue_event_keys,
+    stable_rescue_prefix_permutation,
+)
+from nclose_tracking import count_index_path_events
 
 import re
 import ast
@@ -1547,11 +1553,23 @@ with ProcessPoolExecutor(max_workers=THREAD) as executor:
         future.result()
 
 paf_ans_list = []
+rescue_records = load_rescue_artifact(PREFIX)["records"]
+rescue_keys = rescue_event_keys(rescue_records)
+rescue_path_flags = []
 for index_file_path, key_list in index_data_list:
     final_paf_path = get_final_paf_name_from_index(index_file_path)
 
     key_list = [key2int[k] for k in key_list]
     paf_ans_list.append((final_paf_path, key_list))
+    rescue_path_flags.append(
+        bool(
+            rescue_keys
+            and count_index_path_events(
+                import_index_path(index_file_path),
+                rescue_keys,
+            )
+        )
+    )
 
 def get_paf_run(paf_loc):
     paf_base = os.path.splitext(paf_loc)[0]
@@ -1603,6 +1621,28 @@ paf_sort_ans_list = []
 for sort_ind in dep_sort_ind_list:
     dep_sort_list.append(dep_list[sort_ind])
     paf_sort_ans_list.append(paf_ans_list[sort_ind])
+
+sorted_rescue_flags = [
+    rescue_path_flags[sort_ind]
+    for sort_ind in dep_sort_ind_list
+]
+rescue_prefix_permutation = stable_rescue_prefix_permutation(
+    sorted_rescue_flags
+)
+dep_sort_list = [
+    dep_sort_list[index]
+    for index in rescue_prefix_permutation
+]
+paf_sort_ans_list = [
+    paf_sort_ans_list[index]
+    for index in rescue_prefix_permutation
+]
+rescue_prefix_count = sum(sorted_rescue_flags)
+if rescue_prefix_count:
+    logging.info(
+        "Moved %d censat-pair rescue carrier paths to a contiguous prefix",
+        rescue_prefix_count,
+    )
 
 with open(f'{PREFIX}/contig_pat_vec_data.pkl', 'wb') as f:
     pkl.dump((paf_sort_ans_list, list(key2int.values()), int2key, dep_sort_list), f)
