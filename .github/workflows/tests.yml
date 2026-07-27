@@ -41,6 +41,7 @@ jobs:
           create-args: >-
             python=3.12
             numpy
+            h5py
             pandas
             networkx
             tqdm
