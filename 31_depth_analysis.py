@@ -3,6 +3,7 @@ import sys
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from skype_utils import *
+from circos_plotting import render_total_coverage_circos
 from skype_vcf_writer import write_vcf_record_with_fallback
 from nclose_tracking import (
     bnd_event_keys,
@@ -25,9 +26,6 @@ from nclose_tracking import (
 
 import numpy as np
 import pandas as pd
-import seaborn as sns
-import matplotlib.pyplot as plt
-import matplotlib as mpl
 import pickle as pkl
 
 import csv
@@ -43,10 +41,6 @@ import re
 
 
 from scipy.signal import butter, filtfilt
-from pycirclize import Circos
-from matplotlib.lines import Line2D
-from matplotlib.projections.polar import PolarAxes
-from pycirclize.track import Track
 from collections import defaultdict
 from collections import Counter
 
@@ -167,162 +161,6 @@ def extract_groups(lst):
             seen.add(num)
             current = num
     return result
-
-def line_track_plot(
-    line_track: Track,
-    x: list[float] | np.ndarray,
-    y: list[float] | np.ndarray,
-    *,
-    vmin: float = 0,
-    vmax: float | None = None,
-    arc: bool = True,
-    **kwargs,) -> None:
-    # Check x, y list length
-    if len(x) != len(y):
-        err_msg = f"List length is not match ({len(x)=}, {len(y)=})"
-        raise ValueError(err_msg)
-
-    # Convert (x, y) to (rad, r)
-    rad = list(map(line_track.x_to_rad, x))
-    vmax = max(y) if vmax is None else vmax
-    # line_track._check_value_min_max(y, vmin, vmax)
-    r = [line_track._y_to_r(v, vmin, vmax) for v in y]
-
-    if arc:
-        # Convert linear line to arc line (rad, r) points
-        plot_rad, plot_r = line_track._to_arc_radr(rad, r)
-    else:
-        plot_rad, plot_r = rad, r
-
-    def plot_line(ax: PolarAxes) -> None:
-        line, = ax.plot(plot_rad, plot_r, **kwargs)
-        clip_patch = plt.Circle((0, 0), max(line_track.r_plot_lim), transform=ax.transProjectionAffine + ax.transAxes)
-
-        clip_patch.set_visible(False)
-        ax.add_patch(clip_patch)
-        line.set_clip_path(clip_patch)
-
-    line_track._plot_funcs.append(plot_line)
-
-def line_track_circos(
-    line_track: Track,
-    x: list[float] | np.ndarray,
-    y1: list[float] | np.ndarray,
-    *,
-    vmin: float = 0,
-    vmax: float | None = None,
-    arc: bool = True,
-    **kwargs,
-) -> None:
-    y2 = 0
-    rad = list(map(line_track.x_to_rad, x))
-    if isinstance(y2, (list, tuple, np.ndarray)):
-        y_all = list(y1) + list(y2)
-    else:
-        y_all = list(y1) + [y2]
-        y2 = [float(y2)] * len(x)
-    vmin = min(y_all) if vmin is None else vmin
-    vmax = max(y_all) if vmax is None else vmax
-    # line_track._check_value_min_max(y_all, vmin, vmax)
-
-    r2 = [line_track._y_to_r(v, vmin, vmax) for v in y2]
-    r = [line_track._y_to_r(v, vmin, vmax) for v in y1]
-    if arc:
-        plot_rad, plot_r2 = line_track._to_arc_radr(rad, r2)
-        _, plot_r = line_track._to_arc_radr(rad, r)
-    else:
-        plot_rad, plot_r, plot_r2 = rad, r, r2
-
-    def plot_fill_between(ax: PolarAxes) -> None:
-        line = ax.fill_between(plot_rad, plot_r, plot_r2, **kwargs)  # type: ignore
-
-        clip_patch = plt.Circle((0, 0), max(line_track.r_plot_lim), transform=ax.transProjectionAffine + ax.transAxes)
-
-        clip_patch.set_visible(False)
-        ax.add_patch(clip_patch)
-        line.set_clip_path(clip_patch)
-
-    line_track._plot_funcs.append(plot_fill_between)
-
-def line_track_circos_color(
-    line_track: Track,
-    x: list[float] | np.ndarray,
-    y1: list[float] | np.ndarray,
-    *,
-    vmin: float = 0,
-    vmax: float | None = None,
-    target_value: list[float],
-    target_color: list[str],
-    **kwargs,
-) -> None:
-    y2 = 0
-    arc = False
-
-    # Verify that target_value is sorted in ascending order
-    if any(np.diff(target_value) < 0):
-        raise ValueError("target_value must be sorted in ascending order")
-
-    # Verify that the number of target_color is exactly one more than the number of target_value boundaries
-    if len(target_color) != len(target_value) + 1:
-        raise ValueError("The number of target_color must be equal to len(target_value) + 1")
-
-    rad = list(map(line_track.x_to_rad, x))
-    if isinstance(y2, (list, tuple, np.ndarray)):
-        y_all = list(y1) + list(y2)
-    else:
-        y_all = list(y1) + [y2]
-        y2 = [float(y2)] * len(x)
-    vmin = min(y_all) if vmin is None else vmin
-    vmax = max(y_all) if vmax is None else vmax
-    # line_track._check_value_min_max(y_all, vmin, vmax)
-
-    r2 = [line_track._y_to_r(v, vmin, vmax) for v in y2]
-    r = [line_track._y_to_r(v, vmin, vmax) for v in y1]
-    if arc:
-        plot_rad, plot_r2 = line_track._to_arc_radr(rad, r2)
-        _, plot_r = line_track._to_arc_radr(rad, r)
-    else:
-        plot_rad, plot_r, plot_r2 = rad, r, r2
-
-    plot_r = np.asarray(plot_r)
-    plot_r2 = np.asarray(plot_r2)
-    def plot_fill_between(ax: PolarAxes) -> None:
-        # Convert y1 to a numpy array for element-wise operations
-        y1_arr = np.array(y1)
-
-        # Define segments based on target_value boundaries:
-        # Segment 0: y1 < target_value[0]
-        # Segment i: target_value[i-1] <= y1 < target_value[i] for i = 1,...,len(target_value)-1
-        # Segment last: y1 >= target_value[-1]
-        segments = []
-        segments.append((None, target_value[0]))  # lower segment (no lower bound)
-        for i in range(1, len(target_value)):
-            segments.append((target_value[i-1], target_value[i]))
-        segments.append((target_value[-1], None))  # upper segment (no upper bound)
-
-        for (seg_lower, seg_upper), color in zip(segments, target_color):
-            if seg_lower is None:
-                mask = y1_arr < seg_upper
-            elif seg_upper is None:
-                mask = y1_arr >= seg_lower
-            else:
-                mask = (y1_arr >= seg_lower) & (y1_arr < seg_upper)
-            
-            # mask 경계에 한 칸씩 확장하여 gap을 없앰 (dilation)
-            mask[1:] = mask[1:] | mask[:-1]
-            # 채우기 영역 그리기
-            line = ax.fill_between(plot_rad, plot_r, plot_r2, where=mask, color=color, **kwargs)  # type: ignore
-
-            # 채우기 영역 제한을 위한 보이지 않는 클리핑 패치 생성
-            clip_patch = plt.Circle(
-                (0, 0),
-                max(line_track.r_plot_lim),
-                transform=ax.transProjectionAffine + ax.transAxes
-            )
-            clip_patch.set_visible(False)
-            ax.add_patch(clip_patch)
-            line.set_clip_path(clip_patch)
-    line_track._plot_funcs.append(plot_fill_between)
 
 def find_chr_len(file_path : str) -> dict:
     chr_data_file = open(file_path, "r")
@@ -2271,77 +2109,6 @@ def draw_circos_plot(fig_prefix=''):
             side = paf_loc.split('/')[-1].split('.')[0]
             fragment_depth_per_chrom[chrom] = (side, float(weights[i]))
 
-    circos = Circos(chr_len, space=3)
-    circos.add_cytoband_tracks((95, 100), args.reference_cytobands_path)
-
-    target_color = ['blue', 'red', 'gray']
-
-    for sector in circos.sectors:
-        sector.text(sector.name, r=107, size=8)
-        sector.get_track("cytoband").xticks_by_interval(
-            25 * M,
-            label_size=6,
-            tick_length=1,
-            label_orientation="vertical",
-            label_formatter=lambda v: f"{int(v / M)}",
-        )
-
-        sector.get_track("cytoband").xticks_by_interval(
-            5 * M,
-            tick_length=0.5,
-            label_formatter=lambda v: "",
-        )
-
-        tdf = rdf.query(f'chr == "{sector.name}"')
-
-        tchr_st_list = []
-        tchr_idx_list = []
-        for i, v in enumerate(chr_filt_st_list + chr_no_filt_st_list):
-            if v[0] == sector.name:
-                tchr_st_list.append(v[1])
-                tchr_idx_list.append(i)
-        
-        tchr_st_list = np.array(tchr_st_list)
-        tchr_idx_list = np.array(tchr_idx_list)
-
-        sort_ind = np.argsort(tchr_st_list)
-        tchr_st_list = tchr_st_list[sort_ind]
-        tchr_idx_list = tchr_idx_list[sort_ind]
-
-        cn_track = sector.add_track((60, 93))
-        cn_track.axis()
-        cn_track.grid(y_grid_num=7, zorder=-2)
-        cn_track.line([0, max(tdf['st'])], [0.5 * meandepth] * 2, color='blue', vmax=ABS_MAX_COVERAGE_RATIO * meandepth, zorder=-1, alpha=0.5)
-        cn_track.line([0, max(tdf['st'])], [2 * meandepth] * 2, color='red', vmax=ABS_MAX_COVERAGE_RATIO * meandepth, zorder=-1, alpha=0.5)
-        line_track_plot(cn_track, x=tchr_st_list, y=predicted_B[tchr_idx_list], vmax=ABS_MAX_COVERAGE_RATIO * meandepth, color='green', linewidth=0.5, zorder=10)
-        line_track_plot(cn_track, x=tdf['st'].to_list(), y=tdf['meandepth'].to_list(), vmax=ABS_MAX_COVERAGE_RATIO * meandepth, color='black', linewidth=0.2)
-        line_track_circos_color(cn_track, x=tdf['st'].to_list(), y1=tdf['meandepth'].to_list(), vmax=ABS_MAX_COVERAGE_RATIO * meandepth,
-                                target_color=['#6baed6', '#969696', '#fb6a4a'],
-                                target_value=[0.5 * meandepth, 2 * meandepth])
-
-        if sector.name in fragment_depth_per_chrom:
-            side, frag_w = fragment_depth_per_chrom[sector.name]
-            info = cen_fragment_meta[sector.name]
-            if side == 'right':
-                st_lo, st_hi = info['mid'], info['chr_len']
-            else:
-                st_lo, st_hi = 0, info['mid']
-            cn_track.line(
-                [st_lo, st_lo, st_hi, st_hi],
-                [0, frag_w, frag_w, 0],
-                color='purple',
-                linestyle='--',
-                linewidth=0.7,
-                vmax=ABS_MAX_COVERAGE_RATIO * meandepth,
-                zorder=11,
-            )
-
-        color_track = sector.add_track((53, 58))
-        color_track.axis()
-        line_track_circos_color(color_track, x=tchr_st_list, y1=color_label[tchr_idx_list], vmax=0.5,
-                                target_color=target_color,
-                                target_value=[2, 4])  
-
     telo_cn = defaultdict(float)
     for i, ctr in enumerate(path_telo_usage):
         for j, v in ctr.items():
@@ -2420,38 +2187,6 @@ def draw_circos_plot(fig_prefix=''):
     for i, v in enumerate(a):
         telo_zorder_dict[v[0]] = i
 
-    off = 0.03
-    lower = 0
-    upper = meandepth * 2
-
-    cmap = sns.color_palette("rocket_r", as_cmap=True)
-
-    bnd_cn_data = sorted(bnd_cn_data, key=lambda t: t[2])
-
-    line_style_by_event = {
-        'breakend': '-',
-        'inversion': '-.',
-        'indel': '--',
-        'amplicon': (0, (5, 2)),
-        'virtual_inv': (0, (2, 2)),
-    }
-
-    for i, (bnd_loc1, bnd_loc2, cn, event_type) in enumerate(bnd_cn_data):
-        norm_cn = np.clip((cn - lower) / (upper - lower), 0, 1)
-
-        color = cmap(norm_cn)
-        linestyle = line_style_by_event[event_type]
-        
-        if cn >= 0:
-            circos.link_line(bnd_loc1, bnd_loc2, color=color, linestyle=linestyle, lw=1, zorder=i)
-
-    circos.colorbar(vmin=0, vmax=2, bounds=(1.01 + off, 0.825, 0.02, 0.1), cmap=cmap,
-                    label='Breakend CN', orientation='vertical',
-                    colorbar_kws=dict(format=mpl.ticker.FixedFormatter(['0', '2N', '4N']),
-                                    ticks=mpl.ticker.FixedLocator([0, 1, 2])),
-                    label_kws=dict(fontsize=9,),
-                    tick_kws=dict(labelsize=8,))
-
     telo_data = import_telo_data(TELOMERE_INFO_FILE_PATH, chr_len)
     telo_dict = defaultdict(list)
     for _ in telo_data:
@@ -2481,82 +2216,43 @@ def draw_circos_plot(fig_prefix=''):
         need_label[chr_dir[:-1]].append((node_id, chr_dir[-1]))
 
     new_telo_val_list = []
-    for sector in circos.sectors:
-        track1 = sector.add_track((58.2, 59.8))
-        for j in need_label[sector.name]:
-            cn = telo_cn[j[0]]
-            norm_cn = np.clip((cn - lower) / (upper - lower), 0, 1)
-
+    telomere_arrows = []
+    for chrom, labels in need_label.items():
+        for node_id, direction in labels:
+            cn = telo_cn[node_id]
             new_telo_val_list.append(cn / meandepth * 2)
-            color = cmap(norm_cn)
-            if j[1]=='f':
-                # Prevent out of range
-                try:
-                    track1.arrow(contig_data[j[0]][CHR_STR], contig_data[j[0]][CHR_STR] + 15*M, fc=color, zorder=telo_zorder_dict[j[0]])
-                except:
-                    pass
+            # The original renderer evaluated this lookup inside the
+            # out-of-range try/except and therefore skipped absent nodes.
+            if node_id not in telo_zorder_dict:
+                continue
+            if direction == 'f':
+                start = contig_data[node_id][CHR_STR]
+                end = start + 15 * M
             else:
-                try:
-                    track1.arrow(contig_data[j[0]][CHR_END], contig_data[j[0]][CHR_END] - 15*M, fc=color, zorder=telo_zorder_dict[j[0]])
-                except:
-                    pass
+                start = contig_data[node_id][CHR_END]
+                end = start - 15 * M
+            telomere_arrows.append(
+                (chrom, start, end, cn, telo_zorder_dict[node_id])
+            )
 
     with open(f'{PREFIX}/cn_data.pkl', 'wb') as f:
         pkl.dump((inv_val_list, transloc_val_list, indel_val_list, new_telo_val_list), f)
 
-    fig = circos.plotfig(figsize=(10, 10), dpi=500)
-
-    loc = 'upper left'
-
-    breakend_line_handles = [
-        Line2D([], [], color="black", label="Real CN", linestyle = '-'),
-        Line2D([], [], color="green", label="SKYPE CN", linestyle = '-'),
-    ]
-
-    breakend_line_legend = circos.ax.legend(
-        handles=breakend_line_handles,
-        loc=loc,
-        bbox_to_anchor=(0.85 + off, 1.03),
-        fontsize=8,
-        title="CN lines",
-        handlelength=2,
+    return render_total_coverage_circos(
+        output_prefix=PREFIX,
+        fig_prefix=fig_prefix,
+        chromosome_lengths=chr_len,
+        cytobands_path=args.reference_cytobands_path,
+        observed_depth=rdf,
+        prediction_coords=chr_filt_st_list + chr_no_filt_st_list,
+        predicted_depth=predicted_B,
+        prediction_labels=color_label,
+        mean_depth=meandepth,
+        fragment_depth_per_chrom=fragment_depth_per_chrom,
+        centromere_fragment_meta=cen_fragment_meta,
+        breakend_links=bnd_cn_data,
+        telomere_arrows=telomere_arrows,
     )
-    circos.ax.add_artist(breakend_line_legend)
-
-    scatter_handles = []
-    for color, label in zip(target_color, ['Sucess', 'Failed', 'Ignored']):
-        scatter_handles.append(mpl.patches.Patch(color=color, label=label))
-
-    scatter_legend = circos.ax.legend(
-        loc=loc,
-        handles=scatter_handles,
-        bbox_to_anchor=(0.97 + off, 1.03),
-        fontsize=8,
-        title="Predict label",
-        handlelength=2,
-    )
-    circos.ax.add_artist(scatter_legend)
-
-    cn_line_handles = [
-        Line2D([], [], color="black", label="Breakend", linestyle = '-'),
-        Line2D([], [], color="black", label="Inversion", linestyle = '-.'),
-        Line2D([], [], color="black", label="Indel", linestyle = '--'),
-        Line2D([], [], color="black", label="Amplicon", linestyle = (0, (5, 2))),
-        Line2D([], [], color="black", label="Virtual inversion", linestyle = (0, (2, 2))),
-    ]
-
-    cn_line_legend = circos.ax.legend(
-        loc=loc,
-        handles=cn_line_handles,
-        bbox_to_anchor=(0.85 + off, 0.94),
-        fontsize=8,
-        title="Breakend lines",
-        handlelength=2,
-    )
-    circos.ax.add_artist(cn_line_legend)
-
-    fig.savefig(f'{PREFIX}/total_cov{fig_prefix}.pdf')
-    fig.savefig(f"{PREFIX}/total_cov{fig_prefix}.png")
 
 weights = np.load(f'{PREFIX}/weight.npy')
 

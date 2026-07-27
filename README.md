@@ -37,3 +37,10 @@ The unsuffixed result files are always generated. Karyotype mode also generates 
 ## Running SKYPE
 
 Run SKYPE through the **[ACCtools pipeline](https://github.com/ACCtools/ACCtools-pipeline)**, which prepares the assembly, alignments, depth data, reference resources, and stage arguments required by SKYPE.
+
+For complete-assembly input, ACCtools runs minimap2 followed by alignasm and
+invokes `full_assembly_pipeline.py` once with the resulting `*.aln.paf`. That
+entrypoint owns depth splitting, matrix construction, NNLS, Virtual SKY, and
+coverage rendering; the numbered stage scripts are not entered. The normal and
+full-assembly routes call the same reusable stage-30 and stage-31 renderers, so
+their figure layout and styling stay consistent.

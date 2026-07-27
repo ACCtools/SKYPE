@@ -26,6 +26,7 @@ CHROMOSOME_COUNT = 23
 
 PIPELINE_MODE_KARYOTYPE = "karyotype"
 PIPELINE_MODE_VARIANT = "variant"
+PIPELINE_MODE_FULL_ASSEMBLY = "full_assembly"
 PIPELINE_MODE_PKL = "pipeline_mode.pkl"
 PIPELINE_MODE_NCLOSE_LIMIT = 1000
 TYPE4_INDEL_GRAPH_EDGE_PKL = "type4_indel_graph_edges.pkl"
@@ -109,9 +110,20 @@ def make_pipeline_mode_config(
     nclose_limit=PIPELINE_MODE_NCLOSE_LIMIT,
     vcf_input=False,
     vcf_input_path=None,
+    full_assembly_input=False,
+    full_assembly_path=None,
+    full_assembly_paf_path=None,
+    reference=None,
 ):
     vcf_input = bool(vcf_input)
-    if requested_mode not in {PIPELINE_MODE_KARYOTYPE, PIPELINE_MODE_VARIANT}:
+    full_assembly_input = bool(full_assembly_input)
+    if vcf_input and full_assembly_input:
+        raise ValueError("VCF input and full-assembly input are mutually exclusive")
+    if requested_mode not in {
+        PIPELINE_MODE_KARYOTYPE,
+        PIPELINE_MODE_VARIANT,
+        PIPELINE_MODE_FULL_ASSEMBLY,
+    }:
         raise ValueError(f"Unknown pipeline mode: {requested_mode}")
 
     forced_variant = (
@@ -119,7 +131,12 @@ def make_pipeline_mode_config(
         and nclose_node_count is not None
         and nclose_node_count > nclose_limit
     )
-    effective_mode = PIPELINE_MODE_VARIANT if vcf_input or forced_variant else requested_mode
+    if full_assembly_input or requested_mode == PIPELINE_MODE_FULL_ASSEMBLY:
+        effective_mode = PIPELINE_MODE_FULL_ASSEMBLY
+        full_assembly_input = True
+        forced_variant = False
+    else:
+        effective_mode = PIPELINE_MODE_VARIANT if vcf_input or forced_variant else requested_mode
 
     return {
         "requested_mode": requested_mode,
@@ -131,6 +148,10 @@ def make_pipeline_mode_config(
         "nclose_limit": nclose_limit,
         "vcf_input": vcf_input,
         "vcf_input_path": vcf_input_path,
+        "full_assembly_input": full_assembly_input,
+        "full_assembly_path": full_assembly_path,
+        "full_assembly_paf_path": full_assembly_paf_path,
+        "reference": reference,
     }
 
 
@@ -141,6 +162,10 @@ def save_pipeline_mode(
     nclose_limit=PIPELINE_MODE_NCLOSE_LIMIT,
     vcf_input=False,
     vcf_input_path=None,
+    full_assembly_input=False,
+    full_assembly_path=None,
+    full_assembly_paf_path=None,
+    reference=None,
 ):
     config = make_pipeline_mode_config(
         requested_mode=requested_mode,
@@ -148,6 +173,10 @@ def save_pipeline_mode(
         nclose_limit=nclose_limit,
         vcf_input=vcf_input,
         vcf_input_path=vcf_input_path,
+        full_assembly_input=full_assembly_input,
+        full_assembly_path=full_assembly_path,
+        full_assembly_paf_path=full_assembly_paf_path,
+        reference=reference,
     )
     with open(_os.path.join(prefix, PIPELINE_MODE_PKL), "wb") as f:
         _pickle.dump(config, f)
@@ -165,12 +194,19 @@ def load_pipeline_mode(prefix):
 
     mode = config.get("mode", config.get("requested_mode", PIPELINE_MODE_KARYOTYPE))
     vcf_input = bool(config.get("vcf_input", False)) or _os.path.isfile(vcf_summary_path)
+    full_assembly_input = bool(config.get("full_assembly_input", False)) or (
+        mode == PIPELINE_MODE_FULL_ASSEMBLY
+    )
     loaded_config = make_pipeline_mode_config(
         requested_mode=mode,
         nclose_node_count=config.get("nclose_node_count"),
         nclose_limit=config.get("nclose_limit", PIPELINE_MODE_NCLOSE_LIMIT),
         vcf_input=vcf_input,
         vcf_input_path=config.get("vcf_input_path"),
+        full_assembly_input=full_assembly_input,
+        full_assembly_path=config.get("full_assembly_path"),
+        full_assembly_paf_path=config.get("full_assembly_paf_path"),
+        reference=config.get("reference"),
     )
     loaded_config.update({
         "requested_mode": config.get("requested_mode", mode),
@@ -185,6 +221,10 @@ def pipeline_mode_is_karyotype(config):
 
 def pipeline_mode_is_variant(config):
     return config.get("mode") == PIPELINE_MODE_VARIANT
+
+
+def pipeline_mode_is_full_assembly(config):
+    return config.get("mode") == PIPELINE_MODE_FULL_ASSEMBLY
 
 
 def pipeline_mode_is_vcf_input(config):
@@ -203,6 +243,8 @@ def describe_pipeline_mode(config):
         )
     if config.get("vcf_input"):
         text += " (input=vcf)"
+    if config.get("full_assembly_input"):
+        text += " (input=full_assembly)"
     return text
 
 

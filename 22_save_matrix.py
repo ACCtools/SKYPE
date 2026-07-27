@@ -1011,16 +1011,16 @@ if normal_prior_strength > 0 and prior_cols:
     logging.info(
         "Normal chromosome prior enabled: "
         f"strength={normal_prior_strength}, rows={normal_prior_row_count}, "
-        f"base_rows={normal_prior_base_row_count}, "
-        f"default_rows={len(init_cols)}, excluded_rows={len(init_cols) - len(prior_cols)}, "
-        f"cent_fragment_rows={len(cent_fragment_cols)}, "
-        f"reference_scale={normal_prior_scale:.6g}, "
-        f"scale_min={float(np.min(normal_prior_scales)):.6g}, "
-        f"scale_median={float(np.median(normal_prior_scales)):.6g}, "
-        f"scale_max={float(np.max(normal_prior_scales)):.6g}, "
-        f"active_total_scale_squared={normal_prior_total_scale_squared:.6g}, "
-        f"base_total_scale_squared={normal_prior_strength * fm:.6g}, "
-        f"target_weight_median={float(np.median(w_pri)):.6g}"
+        # f"base_rows={normal_prior_base_row_count}, "
+        # f"default_rows={len(init_cols)}, excluded_rows={len(init_cols) - len(prior_cols)}, "
+        # f"cent_fragment_rows={len(cent_fragment_cols)}, "
+        # f"reference_scale={normal_prior_scale:.6g}, "
+        # f"scale_min={float(np.min(normal_prior_scales)):.6g}, "
+        # f"scale_median={float(np.median(normal_prior_scales)):.6g}, "
+        # f"scale_max={float(np.max(normal_prior_scales)):.6g}, "
+        # f"active_total_scale_squared={normal_prior_total_scale_squared:.6g}, "
+        # f"base_total_scale_squared={normal_prior_strength * fm:.6g}, "
+        # f"target_weight_median={float(np.median(w_pri)):.6g}"
     )
 else:
     logging.info("Normal chromosome prior disabled.")

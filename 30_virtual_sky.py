@@ -7,9 +7,8 @@ from skype_utils import *
 
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
+from virtual_sky_plotting import render_karyotype_diagram as render_virtual_sky
 import pickle as pkl
-import matplotlib.patches as patches
 
 import csv
 import re
@@ -18,7 +17,6 @@ import glob
 import logging
 import argparse
 
-from matplotlib.ticker import MultipleLocator
 from collections import defaultdict
 from collections import Counter
 
@@ -88,33 +86,6 @@ CTG_INTYPE_INSERT_MIN_RATIO = 0.2
 NODE_NAME = 1
 CHR_CHANGE_IDX = 2
 DIR_CHANGE_IDX = 3
-
-CHR_COLORS = {
-    "chr1":  "#FFC000",
-    "chr2":  "#FF0000",
-    "chr3":  "#00B050",
-    "chr4":  "#0070C0",
-    "chr5":  "#7030A0",
-    "chr6":  "#92D050",
-    "chr7":  "#C00000",
-    "chr8":  "#00B0F0",
-    "chr9":  "#FFFF00",
-    "chr10": "#F08080",
-    "chr11": "#48D1CC",
-    "chr12": "#D2B48C",
-    "chr13": "#B0C4DE",
-    "chr14": "#FFA07A",
-    "chr15": "#CD5C5C",
-    "chr16": "#E9967A",
-    "chr17": "#BDB76B",
-    "chr18": "#D8BFD8",
-    "chr19": "#BC8F8F",
-    "chr20": "#FFD700",
-    "chr21": "#7FFFD4",
-    "chr22": "#ADFF2F",
-    "chrX":  "#6495ED",
-    "chrY":  "#EE82EE",
-}
 
 def similar_check(v1, v2, ratio):
     try:
@@ -279,354 +250,6 @@ def telo_condition(node : list, need_label_index : dict) -> bool:
 
 def virtual_event_label(event_type : str) -> str:
     return {'d': 'del', 'i': 'ins', 'v': 'inv'}[event_type]
-
-# SKY Figure
-def plot_virtual_chromosome(ax, segments_data, maxh, cell_col, def_cell_col,
-                            label=None, karyotype_str=None, event_labels=None):
-    """
-    주어진 segments 리스트로 가상 염색체를 그립니다.
-    """
-    path, segments = segments_data
-
-    x_center = 0  # 좌우 중앙값 (필요에 따라 조정)
-    width = 10     # 염색체 폭
-
-    # 전체 가상 염색체 길이 계산
-    total_length = sum(seg_length for (_, seg_length) in segments)
-    radius = width / 2.0
-    round_radius = min(radius, total_length / 4)
-
-    # 전체 영역을 둥근 모서리로 클리핑할 패치 생성
-    clip_patch = patches.FancyBboxPatch(
-        (x_center - radius, 0),
-        width,
-        total_length,
-        boxstyle=f"round,pad=0,rounding_size={round_radius}",
-        facecolor='none',
-        edgecolor='none'
-    )
-    ax.add_patch(clip_patch)
-
-    # 각 segment를 누적해서 그리며, 경계가 바뀔 때마다 텍스트 추가
-    current_y = 0
-    text_obj_list = []
-    text_x = x_center + radius * 2
-    decoration_args = {
-        'ha': 'left',
-        'va': 'center',
-        'fontsize': 10,
-        'color': 'black'
-    }
-    event_labels = event_labels or []
-    event_label_y_positions = [event_y for event_y, _event_label in event_labels]
-
-    for i, (real_chr, seg_length) in enumerate(segments):
-        color = CHR_COLORS.get(real_chr[0], "gray")
-        rect = patches.Rectangle(
-            (x_center - radius, current_y),
-            width,
-            seg_length,
-            facecolor=color,
-            edgecolor='none'
-        )
-        rect.set_clip_path(clip_patch)
-        ax.add_patch(rect)
-
-        is_annotated_event_boundary = any(
-            abs(current_y - event_y) < 1e-6 for event_y in event_label_y_positions
-        )
-        if 0 < i and i < len(segments) and not is_annotated_event_boundary:
-            last_chr = segments[i-1][0]
-            if real_chr[0] != last_chr[0]:
-                text_label = f"t({last_chr[0][3:]};{real_chr[0][3:]})"
-            else:
-                text_label = f"t({last_chr[0][3:]+str(last_chr[1])};{real_chr[0][3:] + str(real_chr[1])})"
-            text_obj = ax.text(text_x, current_y, text_label, **decoration_args)
-            text_obj_list.append(text_obj)
-
-        current_y += seg_length
-        
-    for event_y, event_label in event_labels:
-        event_y = max(0, min(100, event_y))
-        text_obj = ax.text(text_x, event_y, event_label, **decoration_args)
-        text_obj_list.append(text_obj)
-
-    mark_overlapping_texts_with_arrows(ax, text_obj_list, min_gap=5)
-    outline_patch = patches.FancyBboxPatch(
-        (x_center - radius, 0),
-        width,
-        total_length,
-        boxstyle=f"round,pad=0,rounding_size={round_radius}",
-        facecolor='none',
-        edgecolor='black',
-        linewidth=1.2,
-        clip_on=False
-    )
-    ax.add_patch(outline_patch)
-
-
-    # 가상 염색체 라벨 (옵션)
-    if label:
-        ax.text(x_center, -5, label, ha='center', va='top', fontsize=10)
-    # 경로(path) 대신 karyotype ISCN 표기를 표시
-    if karyotype_str:
-        ax.text(x_center, -10, karyotype_str, ha='center', va='top', fontsize=10)
-
-    ax.set_xlim(0, 60 * cell_col / def_cell_col)
-    ax.set_ylim(0, 100)
-    ax.axis('off')
-
-def plot_indel(ax, indel, maxh, cell_col, def_cell_col, chr_len, label=None):
-
-    x_center = 0  # 좌우 중앙값 (필요에 따라 조정)
-    width = 10     # 염색체 
-    real_chr = indel[4]
-    total_length = chr_len
-    radius = width / 2.0
-    round_radius = min(radius, total_length / 4)
-    chr_color = CHR_COLORS.get(real_chr, "gray")
-    background_color = 'white' if indel[0] in {'i', 'v'} else chr_color
-    face_color = chr_color if indel[0] in {'i', 'v'} else 'white'
-
-    clip_patch = patches.FancyBboxPatch(
-        (x_center - radius, 0),
-        width,
-        total_length,
-        boxstyle=f"round,pad=0,rounding_size={round_radius}",
-        facecolor='none',
-        edgecolor='none'
-    )
-    ax.add_patch(clip_patch)
-
-    outline_patch = patches.FancyBboxPatch(
-        (x_center - radius, 0),
-        width,
-        total_length,
-        boxstyle=f"round,pad=0,rounding_size={round_radius}",
-        facecolor=background_color,
-        edgecolor='black',
-        linestyle='dashed',
-        linewidth=1.2,
-        clip_on=False
-    )
-    ax.add_patch(outline_patch)
-
-
-    current_y = indel[1] / maxh * 100
-    y1 = indel[1] / maxh * 100
-    y2 = indel[2] / maxh * 100
-    midy = (y1+y2)/2
-    seg_length = (indel[2] - indel[1]) / maxh * 100
-
-    indel_rect = patches.Rectangle(
-                (x_center - radius, current_y),
-                width,
-                seg_length,
-                facecolor = face_color,
-                edgecolor='none'
-            )
-    
-    indel_rect.set_clip_path(clip_patch)
-    ax.add_patch(indel_rect)
-        
-    x_start = x_center + radius
-    x_end   = x_center + 2 * radius
-
-    # 위쪽 선
-    ax.plot([x_start, x_end],
-            [y1,     midy],
-            linewidth=1,
-            color='black')
-
-    # 아래쪽 선
-    ax.plot([x_start, x_end],
-            [y2,     midy],
-            linewidth=1,
-            color='black')
-    
-    event_label = virtual_event_label(indel[0])
-    text_obj = ax.text(x_end+radius/5, midy, f"{event_label}({indel[-2][3:]})", ha='left', va='center', fontsize=10, color='black')
-
-    mark_overlapping_texts_with_arrows(ax, [text_obj], min_gap=5)
-
-    if label:
-        ax.text(x_center, -5, label, ha='center', va='top', fontsize=10)
-    # 아래: 다른 염색체와 동일하게 ISCN indel 표기
-    ax.text(x_center, -10, f"{event_label}({chrom_to_iscn(indel[4])})", ha='center', va='top', fontsize=10)
-
-    ax.set_xlim(0, 60 * cell_col / def_cell_col)
-    ax.set_ylim(0, 100)
-    ax.axis('off')
-
-def plot_centromere_fragment(ax, frag, maxh, cell_col, def_cell_col, chr_len_norm, label=None):
-    """frag = (chrom, side, mid_bp, chr_len_bp).
-    점선 outline 으로 reference 염색체 윤곽을 그리고, centromere mid 를 기준으로
-    한쪽 arm fragment 만 색칠한다.
-    """
-    chrom, side, mid_bp, chr_len_bp = frag
-    x_center = 0
-    width = 10
-    radius = width / 2.0
-    total_length = chr_len_norm
-    round_radius = min(radius, total_length / 4) if total_length > 0 else radius
-    chr_color = CHR_COLORS.get(chrom, "gray")
-
-    clip_patch = patches.FancyBboxPatch(
-        (x_center - radius, 0),
-        width,
-        total_length,
-        boxstyle=f"round,pad=0,rounding_size={round_radius}",
-        facecolor='none',
-        edgecolor='none'
-    )
-    ax.add_patch(clip_patch)
-
-    outline_patch = patches.FancyBboxPatch(
-        (x_center - radius, 0),
-        width,
-        total_length,
-        boxstyle=f"round,pad=0,rounding_size={round_radius}",
-        facecolor='white',
-        edgecolor='black',
-        linestyle='dashed',
-        linewidth=1.2,
-        clip_on=False
-    )
-    ax.add_patch(outline_patch)
-
-    mid_norm = mid_bp / chr_len_bp * total_length
-    if side == 'right':
-        y1, y2 = mid_norm, total_length
-    else:
-        y1, y2 = 0, mid_norm
-    seg_length = y2 - y1
-
-    frag_rect = patches.Rectangle(
-        (x_center - radius, y1),
-        width,
-        seg_length,
-        facecolor=chr_color,
-        edgecolor='none'
-    )
-    frag_rect.set_clip_path(clip_patch)
-    ax.add_patch(frag_rect)
-
-    midy = (y1 + y2) / 2
-    x_start = x_center + radius
-    x_end = x_center + 2 * radius
-    ax.plot([x_start, x_end], [y1, midy], linewidth=1, color='black')
-    ax.plot([x_start, x_end], [y2, midy], linewidth=1, color='black')
-
-    arm = 'q' if side == 'right' else 'p'  # right=q arm, left=p arm
-    text_obj = ax.text(
-        x_end + radius / 5, midy,
-        f"{chrom}{arm}",   # 옆 라벨: chr13q / chr13p (한쪽 arm 이름)
-        ha='left', va='center', fontsize=10, color='black'
-    )
-    mark_overlapping_texts_with_arrows(ax, [text_obj], min_gap=5)
-
-    if label:
-        ax.text(x_center, -5, label, ha='center', va='top', fontsize=10)
-    # 아래: 다른 염색체와 동일하게 ISCN isochromosome 표기
-    ax.text(x_center, -10, f"i({chrom_to_iscn(chrom)})({arm}10)", ha='center', va='top', fontsize=10)
-
-    ax.set_xlim(0, 60 * cell_col / def_cell_col)
-    ax.set_ylim(0, 100)
-    ax.axis('off')
-
-def plot_ecdna(ax, chr_name, cell_col, def_cell_col, label = None):
-    axis_xlim = 60
-    axis_ylim = 100
-    x_center = 30 * cell_col / def_cell_col  # 좌우 중앙값 (필요에 따라 조정)
-    width = 10     # 염색체 
-    radius = width / 1.3
-    chr_color = CHR_COLORS.get(chr_name[0])
-
-    ax.set_xlim(0, axis_xlim * cell_col / def_cell_col)
-    ax.set_ylim(0, axis_ylim)
-    ax.axis('off')
-
-    outline_circle = patches.Ellipse(
-        (x_center, 50),
-        radius*2*1.2, # Todo : 이 상수가 뭔지 이해하기 (일단 ylim/xlim은 아님)
-        radius*2,
-        facecolor=chr_color,
-        edgecolor='black',
-        linewidth=1.2
-    )
-    ax.add_patch(outline_circle)
-    hole_circle = patches.Ellipse(
-        (x_center, 50),
-        radius*1.2,
-        radius,
-        facecolor='white',
-        edgecolor='black',
-        linewidth=1.2
-    )
-    ax.add_patch(hole_circle)
-    if label:
-        ax.text(x_center, -5, label, ha='center', va='top', fontsize=10)
-
-def plot_scale_bar(ax, chr_name, maxh):
-    ax.set_xlim(-5, 5)
-    ax.axis(True)
-
-    ax.set_ylim(0, maxh / M)
-    ax.set_ylabel("Scale bar (Mb)", rotation=90)
-
-    ax.yaxis.set_major_locator(MultipleLocator(25))  # Major ticks every 25 Mb
-    ax.yaxis.set_minor_locator(MultipleLocator(5))   # Minor ticks every 5 Mb
-    ax.tick_params(axis='y', which='major', length=5)
-    ax.tick_params(axis='y', which='minor', length=3)
-
-    ax.spines["top"].set_visible(False)
-    ax.spines["right"].set_visible(False)
-    ax.spines["bottom"].set_visible(False)
-    ax.spines["left"].set_visible(True)
-    ax.spines['left'].set_position(('data', 0))
-    ax.xaxis.set_visible(False)
-
-    if chr_name in chr_len:
-        chrom_length = chr_len[chr_name] / M
-        line = ax.vlines(x=0.5, ymin=0, ymax=chrom_length, colors=CHR_COLORS[chr_name], linewidth=4, alpha=0.6)
-
-def plot_chr_name(ax, chr_name):
-    # ax.axis('on')
-    ax.text(0, 0.5, chr_name,
-            transform=ax.transAxes,  # 축 비율 기준
-            ha='center', va='center',  # 수평/수직 정렬
-            fontsize=15, rotation=90)
-    
-def mark_overlapping_texts_with_arrows(ax, texts, min_gap=5):
-    """
-    Adjust positions of overlapping text labels on the given axis and draw arrows from the original
-    position to the new position if an adjustment is made.
-    
-    Parameters:
-    - ax: matplotlib Axes object where texts are drawn.
-    - texts: list of matplotlib.text.Text objects.
-    - min_gap: float, minimum vertical gap (in data coordinates) required between texts.
-    """
-    # texts를 y 좌표 기준으로 정렬 (대부분 동일한 x 좌표라 가정)
-    texts_sorted = sorted(texts, key=lambda t: t.get_position()[1])
-    
-    # 첫 번째 텍스트는 그대로 두고, 이후 text들과 비교하여 겹치는 경우 위치 조정
-    for i in range(1, len(texts_sorted)):
-        prev_text = texts_sorted[i-1]
-        curr_text = texts_sorted[i]
-        x, prev_y = prev_text.get_position()
-        x, curr_y = curr_text.get_position()
-        
-        # 만약 이전 text와의 y 간격이 min_gap보다 작으면 조정
-        if curr_y - prev_y < min_gap:
-            new_y = prev_y + min_gap  # 충분한 간격 확보
-            original_y = curr_y       # 원래 위치 저장
-            curr_text.set_position((x, new_y))
-            # 원래 위치에서 새 위치로 화살표 표시
-            ax.annotate("",
-                        xy=(x, new_y), xycoords='data',
-                        xytext=(5, original_y), textcoords='data',
-                        arrowprops=dict(arrowstyle="-|>", color="black", lw=0.5))
 
 def parse_chromosome_labels(s):
     """
@@ -1569,6 +1192,7 @@ def karyotype_path_to_iscn(pieces : list, type4_indel_events=None):
         return ''.join(extra_labels)
     return base_iscn
 
+
 def build_karyotype_diagram(fig_prefix : str = '', filter_depth_N : float = TARGET_DEPTH):
     weights = np.load(f'{PREFIX}/weight{fig_prefix}.npy')
     loc2weight = dict(zip(tot_loc_list, weights))
@@ -1679,184 +1303,36 @@ def build_karyotype_diagram(fig_prefix : str = '', filter_depth_N : float = TARG
                 info = cen_fragment_meta[chrom]
                 fragment_display.append((chrom, side, info["mid"], info["chr_len"], w / meandepth * 2))
 
-    cols = 10
-    display_chroms = sorted(
-        set(grouped_norm_data.keys()) | set(display_indel.keys()),
-        key=chr2int,
+    path_depth_n = {
+        path: float(loc2weight[path] / meandepth * 2)
+        for path in karyotypes_data
+    }
+    path_karyotype = {}
+    path_event_labels = {}
+    for path, pieces in karyotypes_data.items():
+        path_type4_events = get_path_type4_indel_events(
+            path, type4_event_by_key, type4_path_event_usage
+        )
+        path_karyotype[path] = karyotype_path_to_iscn(pieces, path_type4_events)
+        path_event_labels[path] = get_type4_indel_boundary_labels(
+            path, type4_edge_to_event_key, type4_event_by_key, maxh
+        )
+
+    return render_virtual_sky(
+        output_prefix=PREFIX,
+        cell_line=CELL_LINE,
+        chromosome_lengths=chr_len,
+        grouped_norm_data=grouped_norm_data,
+        display_indel=display_indel,
+        virtual_inv_display=virtual_inv_display,
+        fragment_display=fragment_display,
+        maxh=maxh,
+        path_depth_n=path_depth_n,
+        path_karyotype=path_karyotype,
+        path_event_labels=path_event_labels,
+        fig_prefix=fig_prefix,
     )
 
-    rows = 0
-    for chr_name in display_chroms:
-        data_list = grouped_norm_data.get(chr_name, [])
-        chr_indel = display_indel.get(chr_name, [])
-        indel_len = len(chr_indel)
-
-        rows += ((len(data_list) + indel_len - 1) // cols + 1) if len(data_list) + indel_len > 0 else 0
-
-    if len(fragment_display) > 0:
-        rows += (len(fragment_display) - 1) // cols + 1
-
-    if len(virtual_inv_display) > 0:
-        rows += (len(virtual_inv_display) - 1) // cols + 1
-
-    # if len(long_ecdna_path) > 0:
-    #     rows += ((len(long_ecdna_path)-1) // cols + 1)
-
-    cell_col = 3
-    cell_row = 4.5
-    def_cell_col = 1.8
-
-    prefix_ratios = [0.5, 1]
-    ratio_ratios = prefix_ratios + [cell_col] * cols
-    height_ratios = [1.5] + [cell_row] * rows
-
-    fig, ax_array = plt.subplots(len(height_ratios), len(ratio_ratios), figsize=(sum(ratio_ratios), sum(height_ratios)), 
-                                 gridspec_kw={"width_ratios" : ratio_ratios,
-                                            "height_ratios" : height_ratios,
-                                            "wspace": 0,
-                                            "hspace": 0.2})
-                                            
-    for ax_list in ax_array:
-        for ax in ax_list:
-            ax.axis('off')
-
-    sorted_grouped_norm_data_items = [
-        (chr_name, grouped_norm_data.get(chr_name, []))
-        for chr_name in display_chroms
-    ]
-
-    now_col = 1
-    for chr_name, data_list in sorted_grouped_norm_data_items:
-        chr_indel = display_indel.get(chr_name, [])
-        indel_len = len(chr_indel)
-
-        bef_now_col = now_col
-        plot_chr_name(ax_array[now_col][0], chr_name)
-        for i, data in enumerate(data_list):
-            path_type4_events = get_path_type4_indel_events(
-                data[0], type4_event_by_key, type4_path_event_usage
-            )
-            iscn = karyotype_path_to_iscn(karyotypes_data[data[0]], path_type4_events)
-            event_labels = get_type4_indel_boundary_labels(
-                data[0], type4_edge_to_event_key, type4_event_by_key, maxh
-            )
-            plot_virtual_chromosome(ax_array[i // cols + now_col][i % cols + len(prefix_ratios)], data, maxh,
-                                    cell_col, def_cell_col,
-                                    label=f"{round(float(loc2weight[data[0]] / meandepth * 2), 2)}N",
-                                    karyotype_str=iscn if iscn is not None else '',
-                                    event_labels=event_labels)
-        for j, data in enumerate(chr_indel):
-            i = j + len(data_list)
-            plot_indel(ax_array[i // cols + now_col][i % cols + len(prefix_ratios)], data, maxh,
-                                    cell_col, def_cell_col, chr_len[chr_name] / maxh * 100,
-                                    label=f"{round(data[3], 2)}N")
-
-        now_col += ((len(data_list) + indel_len - 1) // cols + 1) if len(data_list) + indel_len > 0 else 0
-        for col in range(bef_now_col, now_col):
-            plot_scale_bar(ax_array[col][len(prefix_ratios) - 1], chr_name, maxh)
-
-    if len(virtual_inv_display) > 0:
-        bef_now_col = now_col
-        plot_chr_name(ax_array[now_col][0], 'virtual inv')
-        for i, data in enumerate(virtual_inv_display):
-            chrom = data[4]
-            plot_indel(
-                ax_array[i // cols + now_col][i % cols + len(prefix_ratios)],
-                data,
-                maxh,
-                cell_col,
-                def_cell_col,
-                chr_len[chrom] / maxh * 100,
-                label=f"{round(data[3], 2)}N",
-            )
-        now_col += (len(virtual_inv_display) - 1) // cols + 1
-        for col in range(bef_now_col, now_col):
-            plot_scale_bar(ax_array[col][len(prefix_ratios) - 1], 'virtual inv', maxh)
-
-    if len(fragment_display) > 0:
-        bef_now_col = now_col
-        plot_chr_name(ax_array[now_col][0], 'cen frag')
-        for i, frag in enumerate(fragment_display):
-            chrom, side, mid_bp, chr_len_bp, depth_N = frag
-            chr_len_norm = chr_len_bp / maxh * 100
-            plot_centromere_fragment(
-                ax_array[i // cols + now_col][i % cols + len(prefix_ratios)],
-                (chrom, side, mid_bp, chr_len_bp),
-                maxh, cell_col, def_cell_col, chr_len_norm,
-                label=f"{round(depth_N, 2)}N"
-            )
-        now_col += (len(fragment_display) - 1) // cols + 1
-        for col in range(bef_now_col, now_col):
-            plot_scale_bar(ax_array[col][len(prefix_ratios) - 1], 'cen', maxh)
-
-    # if len(long_ecdna_path) > 0:
-    #     plot_chr_name(ax_array[now_col][0], 'ecDNA')
-    #     for i, data in enumerate(long_ecdna_path.values()):
-    #         plot_ecdna(ax_array[i // cols + now_col][i % cols + len(prefix_ratios)], data[0], cell_col, def_cell_col, label=f"{data[0]} : {ecdna_format(data[1])}-{ecdna_format(data[2])}\n({round(data[3], 2)}N)")
-
-
-
-    legend_handles = []
-    sorted_chr_items = sorted(CHR_COLORS.items(), key=lambda item: chr2int(item[0]))
-
-    for chr_name, color in sorted_chr_items:
-        patch = patches.Patch(facecolor=color, edgecolor='black', linewidth=0.5, label=chr_name)
-        legend_handles.append(patch)
-
-    # 범례 생성 및 배치
-    gs = ax_array[0, 0].get_gridspec()
-    for ax in ax_array[0]:
-        ax.remove()
-
-    label_ncol = 8
-    reorder = lambda l, nc: sum((l[i::nc] for i in range(nc)), [])
-    legend_ax = fig.add_subplot(gs[0, :])
-    legend_ax.legend(handles=reorder(legend_handles, label_ncol),
-                    labels=reorder([h.get_label() for h in legend_handles], label_ncol),
-                    ncol=label_ncol,
-                    loc='center',
-                    fontsize=9,
-                    frameon=True,       # 범례 테두리
-                    handlelength=1.0,    # 핸들(색상 패치) 길이
-                    handleheight=1.0,    # 핸들(색상 패치) 높이
-                    labelspacing=0.8)    # 라벨 간 수직 간격
-
-    legend_ax.set_title(f'{CELL_LINE} Virtual SKY result', fontsize=15)
-    legend_ax.axis('off')
-
-    fig.savefig(f'{PREFIX}/virtual_sky{fig_prefix}.pdf')
-    fig.savefig(f'{PREFIX}/virtual_sky{fig_prefix}.png')
-
-    # ----- ISCN karyotype 텍스트 출력: 그림에 그린 breakend 를 표기법으로 정리 -----
-    # 그림과 동일한 순서(염색체 그룹별 path -> 같은 염색체 indel -> centromere fragment).
-    karyotype_rows = []  # (iscn_str, depth_N)
-    for chr_name, data_list in sorted_grouped_norm_data_items:
-        for path, _norm in data_list:
-            path_type4_events = get_path_type4_indel_events(
-                path, type4_event_by_key, type4_path_event_usage
-            )
-            iscn = karyotype_path_to_iscn(karyotypes_data[path], path_type4_events)
-            if iscn is not None:
-                karyotype_rows.append((iscn, loc2weight[path] / meandepth * 2))
-        for indel in display_indel.get(chr_name, []):
-            typ, pos1, pos2, depth_N, chrom, _path = indel
-            if abs(pos2 - pos1) < KARYOTYPE_MIN_SEGMENT_LENGTH:
-                continue
-            name = chrom_to_iscn(chrom)
-            karyotype_rows.append((f"{virtual_event_label(typ)}({name})", depth_N))
-    for inv_event in virtual_inv_display:
-        typ, pos1, pos2, depth_N, chrom, _name = inv_event
-        if abs(pos2 - pos1) < KARYOTYPE_MIN_SEGMENT_LENGTH:
-            continue
-        karyotype_rows.append((f"{virtual_event_label(typ)}({chrom_to_iscn(chrom)})", depth_N))
-    for chrom, side, mid_bp, chr_len_bp, depth_N in fragment_display:
-        arm = 'q' if side == 'right' else 'p'  # right=q arm, left=p arm
-        karyotype_rows.append((f"i({chrom_to_iscn(chrom)})({arm}10)", depth_N))
-
-    with open(f'{PREFIX}/karyotype{fig_prefix}.txt', 'w') as kf:
-        kf.write("karyotype\tdepth\n")
-        for iscn, depth_N in karyotype_rows:
-            kf.write(f"{iscn}\t{round(float(depth_N), 2)}N\n")
 
 parser = argparse.ArgumentParser(description="SKYPE depth analysis")
 
@@ -1893,6 +1369,11 @@ PREPROCESSED_PAF_FILE_PATH = args.ppc_paf_file_path
 CELL_LINE = args.cell_line_name
 pipeline_mode_config = load_pipeline_mode(PREFIX)
 
+df = pd.read_csv(main_stat_loc, compression='gzip', comment='#', sep='\t', names=['chr', 'st', 'nd', 'length', 'covsite', 'totaldepth', 'cov', 'meandepth'])
+df = df.query('chr != "chrM"')
+meandepth = np.median(df['meandepth'])
+chr_len = find_chr_len(CHROMOSOME_INFO_FILE_PATH)
+
 RATIO_OUTLIER_FOLDER = f"{PREFIX}/11_ref_ratio_outliers/"
 front_contig_path = RATIO_OUTLIER_FOLDER+"front_jump/"
 back_contig_path = RATIO_OUTLIER_FOLDER+"back_jump/"
@@ -1905,12 +1386,6 @@ ppc_data = import_ppc_data(PREPROCESSED_PAF_FILE_PATH)
 
 with open(f'{PREFIX}/path_data.pkl', 'rb') as f:
     path_list_dict = pkl.load(f)
-
-df = pd.read_csv(main_stat_loc, compression='gzip', comment='#', sep='\t', names=['chr', 'st', 'nd', 'length', 'covsite', 'totaldepth', 'cov', 'meandepth'])
-df = df.query('chr != "chrM"')
-
-meandepth = np.median(df['meandepth'])
-chr_len = find_chr_len(CHROMOSOME_INFO_FILE_PATH)
 
 fclen = len(glob.glob(front_contig_path+"*"))
 bclen = len(glob.glob(back_contig_path+"*"))
