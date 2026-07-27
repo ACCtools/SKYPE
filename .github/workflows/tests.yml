@@ -41,8 +41,12 @@ jobs:
           create-args: >-
             python=3.12
             numpy
+            scipy
             h5py
             pandas
+            matplotlib
+            seaborn
+            pycirclize
             networkx
             tqdm
             graph-tool
