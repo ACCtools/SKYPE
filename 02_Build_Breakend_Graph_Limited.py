@@ -88,13 +88,13 @@ TOT_PATH_LIMIT = 3*M
 PAT_PATH_LIMIT = 10*K
 
 DIR_CHANGE_LIMIT_ABS_MAX = 1
-CENSAT_VISIT_LIMIT = 2
+CENSAT_VISIT_LIMIT = 3
 
 CHR_CHANGE_LIMIT_HARD_START = 2
 HARD_NCLOSE_COUNT = PIPELINE_MODE_NCLOSE_LIMIT
 FAIL_NCLOSE_COUNT = 10000
 
-BND_OVERUSE_CNT = 2
+BND_OVERUSE_CNT = 3
 PATH_MAJOR_COMPONENT = 3
 NCLOSE_COMPRESS_LIMIT = 100*K
 NCLOSE_MERGE_LIMIT = 1*K
@@ -105,6 +105,8 @@ OFFSET_DIR_GROUP_LIMIT = 100*K
 
 PIPELINE_02_FILTER = True
 ENABLE_CENSAT_NONCENSAT_OFFSET_DIR_FILTER = PIPELINE_02_FILTER
+# Set to False to keep graph paths regardless of per-chromosome length distribution.
+ENABLE_PATH_CHROMOSOME_LENGTH_FILTER = True
 
 PATH_COMPRESS_LIMIT = 50*K
 IGNORE_PATH_LIMIT = 50*K
@@ -151,6 +153,30 @@ TYPE4_INDEL_GRAPH_EDGE_PKL = 'type4_indel_graph_edges.pkl'
 TYPE4_INDEL_GRAPH_MIN_SPAN = 1 * M
 TYPE4_INDEL_GRAPH_DEPTH_WINDOW = 500 * K
 TYPE4_INDEL_GRAPH_DEPTH_DIFF_RATIO = 0.2
+TYPE4_INDEL_GRAPH_DIMENSION_INCREMENT = 1
+
+
+def should_add_indel_graph(pipeline_mode, explicitly_enabled=False):
+    """Enable type4 indel graph edges by default for karyotype runs."""
+    return bool(
+        explicitly_enabled or pipeline_mode == PIPELINE_MODE_KARYOTYPE
+    )
+
+
+def get_graph_dimension_increment(contig_s, contig_e,
+                                  is_type4_indel_edge=False):
+    """Return the graph-depth and direction-depth increments for an edge."""
+    if is_type4_indel_edge:
+        return TYPE4_INDEL_GRAPH_DIMENSION_INCREMENT, 0
+    if contig_s[CHR_NAM] != contig_e[CHR_NAM]:
+        return 1, 0
+    if (
+        contig_s[CTG_DIR] != contig_e[CTG_DIR]
+        and contig_s[CTG_NAM] == contig_e[CTG_NAM]
+    ):
+        return 0, 1
+    return 0, 0
+
 
 RAW_TRANSLOCATION_CANDIDATE_PKL = 'raw_translocation_candidates.pkl'
 RAW_TRANSLOCATION_RESULT_PKL = 'raw_translocation_result.pkl'
@@ -466,7 +492,12 @@ def div_repeat_paf(original_paf_path_list: list, aln_paf_path_list: list, contig
                 ori_aln_intervals.append((st, nd))
             else:
                 ori_alt_intervals.append((st, nd))
-        
+
+        # Original PAF records are not guaranteed to be in query-coordinate
+        # order.  The strong-chain test describes the query layout, so make
+        # that order explicit instead of depending on physical file order.
+        ori_aln_intervals.sort(key=lambda interval: (interval[0], interval[1]))
+
         if is_stepwise_nonoverlapping(ori_aln_intervals):
             is_strong_paf = is_alt_contained_in_segments(ori_aln_intervals, ori_alt_intervals)
 
@@ -2002,14 +2033,19 @@ def preprocess_repeat(contig_data : list) -> list:
                   and contig_data[front_repeat_bound][CTG_MAPQ] < MAPQ_BOUND:
                 front_repeat_bound+=1
             if front_repeat_bound <= curr_contig_ed and front_repeat_bound > front_telo_bound:
-                if contig_data[front_repeat_bound][CTG_RPTCHR] == '0':
+                # A high-MAPQ repeat is a trusted anchor just like a
+                # non-repeat node.  Keep the adjacent low-MAPQ terminal
+                # repeat as the one-repeat boundary context in both cases.
+                if contig_data[front_repeat_bound][CTG_RPTCHR] == '0' \
+                   or contig_data[front_repeat_bound][CTG_MAPQ] >= MAPQ_BOUND:
                     front_repeat_bound-=1
             while end_repeat_bound>=curr_contig_st \
                   and contig_data[end_repeat_bound][CTG_RPTCHR] != '0' \
                   and contig_data[end_repeat_bound][CTG_MAPQ] < MAPQ_BOUND:
                 end_repeat_bound-=1
             if end_repeat_bound >= curr_contig_st and end_repeat_bound < end_telo_bound:
-                if contig_data[end_repeat_bound][CTG_RPTCHR] == '0':
+                if contig_data[end_repeat_bound][CTG_RPTCHR] == '0' \
+                   or contig_data[end_repeat_bound][CTG_MAPQ] >= MAPQ_BOUND:
                     end_repeat_bound+=1
             if front_repeat_bound >= front_telo_bound:
                 st = front_repeat_bound
@@ -5502,9 +5538,9 @@ def type4_indel_expected_high_sides(indel_kind):
 
 def type4_indel_depth_supported(depth_by_chrom, censat_dict, chrom, span_st, span_nd,
                                 indel_kind, normal_haploid_depth):
-    if point_overlaps_censat(censat_dict, chrom, span_st) or \
+    if point_overlaps_censat(censat_dict, chrom, span_st) and \
        point_overlaps_censat(censat_dict, chrom, span_nd):
-        return False, None, 'endpoint_censat'
+        return False, None, 'both_endpoints_censat'
 
     expected_high_sides = type4_indel_expected_high_sides(indel_kind)
     steps = [
@@ -5621,6 +5657,7 @@ def select_type4_indel_graph_edges(contig_data, nclose_nodes, type4_indel_candid
                 'src': src,
                 'dst': dst,
                 'dist': get_graph_edge_weight(contig_data, src[1], dst[1]),
+                'graph_dimension_increment': TYPE4_INDEL_GRAPH_DIMENSION_INCREMENT,
                 'indel_kind': candidate['indel_kind'],
                 'chrom': chrom,
                 'base_chrom': candidate['base_chrom'],
@@ -5659,14 +5696,23 @@ def augment_nclose_nodes_with_type4_indels(nclose_nodes, selected_edges):
 
     return augmented_nclose_nodes
 
-def get_type4_indel_zero_dim_edge_set(selected_edges):
-    zero_dim_edge_set = set()
+def get_type4_indel_dimension_edge_set(selected_edges):
+    dimension_edge_set = set()
     for edge in selected_edges:
         src = tuple(edge['src'])
         dst = tuple(edge['dst'])
-        zero_dim_edge_set.add((src, dst))
+        dimension_increment = int(edge.get(
+            'graph_dimension_increment',
+            TYPE4_INDEL_GRAPH_DIMENSION_INCREMENT,
+        ))
+        if dimension_increment != TYPE4_INDEL_GRAPH_DIMENSION_INCREMENT:
+            raise ValueError(
+                'Type4 indel graph edges must increase graph depth by exactly '
+                f'{TYPE4_INDEL_GRAPH_DIMENSION_INCREMENT}: {edge}'
+            )
+        dimension_edge_set.add((src, dst))
 
-    return zero_dim_edge_set
+    return dimension_edge_set
 
 
 VCF_SYNTHETIC_FLANK = 1 * K
@@ -6381,7 +6427,9 @@ def build_vcf_mode_inputs():
         if args.add_indel_graph
         else []
     )
+    vcf_type4_graph_event_by_contig_name = {}
     for event_index, event in enumerate(vcf_type4_graph_events):
+        node_start = len(contig_data)
         global_idx = add_vcf_type4_graph_pair(
             contig_data,
             event,
@@ -6389,6 +6437,8 @@ def build_vcf_mode_inputs():
             chr_len,
             global_idx,
         )
+        contig_name = str(contig_data[node_start][CTG_NAM])
+        vcf_type4_graph_event_by_contig_name[contig_name] = dict(event)
     if args.add_indel_graph:
         invalid_graph_svtypes = sorted({
             str(event.get("svtype", "")).upper()
@@ -6619,6 +6669,9 @@ def build_vcf_mode_inputs():
         ),
         "indel_exclude_idx_set": set(),
         "telo_coverage": Counter(),
+        "vcf_type4_graph_event_by_contig_name": (
+            vcf_type4_graph_event_by_contig_name
+        ),
     }
 
 
@@ -7427,7 +7480,8 @@ parser.add_argument("--original_paf_loc", nargs='+',
 parser.add_argument("-t", "--thread", 
                     help="Number of thread", type=int)
 parser.add_argument("-d", "--graph_depth", 
-                    help="Depth of breakend graph", type=int, default=4)
+                    help="Graph-depth budget shared by chromosome changes and type4 indel edges.",
+                    type=int, default=4)
 parser.add_argument("--progress", 
                     help="Show progress bar", action='store_true')
 parser.add_argument("--verbose", 
@@ -7460,8 +7514,10 @@ parser.add_argument("--disable_alt_ctg_simple",
 
 parser.add_argument("--add_indel_graph",
                     dest="add_indel_graph",
-                    help="Add selected type4 indel rescue edges to the breakend graph without increasing graph dimensions. "
-                         "In VCF mode, DEL/DUP/Indel-like BND events are eligible and INS is excluded.",
+                    help="Add selected type4 indel rescue edges to the breakend graph; each traversal increases graph "
+                         "depth by one. "
+                         "This is enabled automatically in karyotype mode. In VCF mode, DEL/DUP/Indel-like BND "
+                         "events are eligible and INS is excluded.",
                     action='store_true')
 parser.add_argument("--vcf_input",
                     help="VCF input for benchmark mode; bypass PAF-derived nclose discovery and use VCF calls instead.",
@@ -7472,7 +7528,7 @@ parser.add_argument("--vcf_filter_pass", nargs='+', metavar="FILTER",
                     default=["PASS", "."])
 parser.add_argument("--limit_combinations",
                     help="Path to a limit_combinations.json file. Use exactly that "
-                         "graph-limit combination and fail instead of trying another "
+                         "graph-depth/direction-depth combination and fail instead of trying another "
                          "combination.",
                     default=None)
 
@@ -7503,6 +7559,14 @@ if args.limit_combinations is not None:
 
 PREFIX = args.prefix
 REQUESTED_PIPELINE_MODE = PIPELINE_MODE_VARIANT if args.vcf_input is not None else args.pipeline_mode
+indel_graph_auto_enabled = (
+    REQUESTED_PIPELINE_MODE == PIPELINE_MODE_KARYOTYPE
+    and not args.add_indel_graph
+)
+args.add_indel_graph = should_add_indel_graph(
+    REQUESTED_PIPELINE_MODE,
+    explicitly_enabled=args.add_indel_graph,
+)
 
 initial_pipeline_mode_config = make_pipeline_mode_config(
     requested_mode=REQUESTED_PIPELINE_MODE,
@@ -7511,6 +7575,10 @@ initial_pipeline_mode_config = make_pipeline_mode_config(
 logging.info('SKYPE pipeline start')
 logging.info(describe_pipeline_mode(initial_pipeline_mode_config))
 logging.info("02_Build_Breakend_Graph start")
+if indel_graph_auto_enabled:
+    logging.info("Karyotype mode: automatically enabled type4 indel graph edges")
+if not ENABLE_PATH_CHROMOSOME_LENGTH_FILTER:
+    logging.info("Path chromosome-length distribution filter is disabled")
 
 os.makedirs(PREFIX, exist_ok=True)
 save_rescue_artifact(PREFIX, [])
@@ -7553,7 +7621,7 @@ if (
     and FIXED_LIMIT_COMBINATION[0] > max(CHR_CHANGE_LIMIT_ABS_MAX, 1)
 ):
     parser.error(
-        "--limit_combinations chromosome-change limit "
+        "--limit_combinations graph-depth limit "
         f"{FIXED_LIMIT_COMBINATION[0]} exceeds graph depth "
         f"{CHR_CHANGE_LIMIT_ABS_MAX}"
     )
@@ -7633,7 +7701,7 @@ if args.vcf_input is None and nclose_node_count > FAIL_NCLOSE_COUNT:
             sys.exit(1)
 
 selected_type4_indel_graph_edges = []
-type4_indel_zero_dim_edge_set = set()
+type4_indel_dimension_edge_set = set()
 graph_nclose_nodes = nclose_nodes
 canonical_nclose_before_indel_graph = canonical_nclose_snapshot(nclose_nodes)
 if args.add_indel_graph:
@@ -7643,10 +7711,17 @@ if args.add_indel_graph:
     selected_type4_indel_graph_edges = select_type4_indel_graph_edges(
         contig_data, nclose_nodes, type4_indel_graph_candidates
     )
+    if args.vcf_input is not None:
+        for edge in selected_type4_indel_graph_edges:
+            metadata = vcf_type4_graph_event_by_contig_name.get(
+                edge['contig_name']
+            )
+            if metadata is not None:
+                edge['vcf_event_metadata'] = copy.deepcopy(metadata)
     graph_nclose_nodes = augment_nclose_nodes_with_type4_indels(
         nclose_nodes, selected_type4_indel_graph_edges
     )
-    type4_indel_zero_dim_edge_set = get_type4_indel_zero_dim_edge_set(
+    type4_indel_dimension_edge_set = get_type4_indel_dimension_edge_set(
         selected_type4_indel_graph_edges
     )
     selected_type4_indel_kind_by_tuple = {
@@ -7658,11 +7733,12 @@ if args.add_indel_graph:
         candidate['indel_kind'] for candidate in type4_indel_graph_candidates
     )
     logging.info(
-        f'Added {len(type4_indel_zero_dim_edge_set)} type4 indel graph edges '
+        f'Added {len(type4_indel_dimension_edge_set)} type4 indel graph edges '
         f'from {len(selected_type4_indel_kind_by_tuple)} selected type4 indel events '
         f'({dict(selected_type4_indel_kind_count)} selected; '
         f'{len(type4_indel_graph_candidates)} depth-supported candidates '
-        f'{dict(type4_indel_candidate_kind_count)} >= {TYPE4_INDEL_GRAPH_MIN_SPAN} bp)'
+        f'{dict(type4_indel_candidate_kind_count)} >= {TYPE4_INDEL_GRAPH_MIN_SPAN} bp; '
+        f'each edge consumes {TYPE4_INDEL_GRAPH_DIMENSION_INCREMENT} graph-depth dimension)'
     )
 
 if canonical_nclose_snapshot(nclose_nodes) != canonical_nclose_before_indel_graph:
@@ -7741,33 +7817,32 @@ def make_graph(CHR_CHANGE_LIMIT, DIR_CHANGE_LIMIT):
                         d = ds + de - overlap_calculator(contig_s, contig_e)
                     else:  
                         d = distance_checker(contig_s, contig_e) + ds + de 
-                is_type4_indel_zero_dim_edge = (
-                    (tuple(node), tuple(edge[:2])) in type4_indel_zero_dim_edge_set
+                is_type4_indel_dimension_edge = (
+                    (tuple(node), tuple(edge[:2]))
+                    in type4_indel_dimension_edge_set
                 )
-                if is_type4_indel_zero_dim_edge:
-                    for j in range(0, CHR_CHANGE_LIMIT+1):
-                        for k in range(0, DIR_CHANGE_LIMIT+1):
-                            node_limit = tuple(list(node)+[j, k])
-                            edge_limit = tuple(list(edge)+[j, k])
-                            G.add_weighted_edges_from([(node_limit, edge_limit, d)])
-                elif contig_s[CHR_NAM] != contig_e[CHR_NAM]:
-                    for j in range(0, CHR_CHANGE_LIMIT):
-                        for k in range(0, DIR_CHANGE_LIMIT+1):
-                            node_limit = tuple(list(node)+[j, k])
-                            edge_limit = tuple(list(edge)+[j+1, k])
-                            G.add_weighted_edges_from([(node_limit, edge_limit, d)])
-                elif contig_s[CTG_DIR] != contig_e[CTG_DIR] and contig_s[CTG_NAM] == contig_e[CTG_NAM]:
-                    for j in range(0, CHR_CHANGE_LIMIT+1):
-                        for k in range(0, DIR_CHANGE_LIMIT):
-                            node_limit = tuple(list(node)+[j, k])
-                            edge_limit = tuple(list(edge)+[j, k+1])
-                            G.add_weighted_edges_from([(node_limit, edge_limit, d)])
-                else:
-                    for j in range(0, CHR_CHANGE_LIMIT+1):
-                        for k in range(0, DIR_CHANGE_LIMIT+1):
-                            node_limit = tuple(list(node)+[j, k])
-                            edge_limit = tuple(list(edge)+[j, k])
-                            G.add_weighted_edges_from([(node_limit, edge_limit, d)])
+                graph_depth_increment, direction_depth_increment = \
+                    get_graph_dimension_increment(
+                        contig_s,
+                        contig_e,
+                        is_type4_indel_edge=is_type4_indel_dimension_edge,
+                    )
+                for j in range(
+                    0,
+                    CHR_CHANGE_LIMIT - graph_depth_increment + 1,
+                ):
+                    for k in range(
+                        0,
+                        DIR_CHANGE_LIMIT - direction_depth_increment + 1,
+                    ):
+                        node_limit = tuple(list(node) + [j, k])
+                        edge_limit = tuple(list(edge) + [
+                            j + graph_depth_increment,
+                            k + direction_depth_increment,
+                        ])
+                        G.add_weighted_edges_from([
+                            (node_limit, edge_limit, d)
+                        ])
 
     return G
 
@@ -8011,54 +8086,62 @@ def run_graph(data, nonzero_telo_set, CHR_CHANGE_LIMIT, DIR_CHANGE_LIMIT):
                 if contig_overuse_flag or censat_overuse_flag:
                     continue
 
+                flag = True
                 total_path_ref_len = sum(path_counter.values())
-                ig_k_list = [k for k, v in path_counter.items() if v < IGNORE_PATH_LIMIT]
-                for k in ig_k_list:
-                    del path_counter[k]
-                if len(path_counter) == 0:
-                    continue
+                if ENABLE_PATH_CHROMOSOME_LENGTH_FILTER:
+                    ig_k_list = [
+                        k for k, v in path_counter.items()
+                        if v < IGNORE_PATH_LIMIT
+                    ]
+                    for k in ig_k_list:
+                        del path_counter[k]
+                    if len(path_counter) == 0:
+                        continue
 
                 ack = sorted(path_counter.items(), key=lambda x: -x[1])
-                longest_chr = ack[0]
-                second_chr = ack[1] if len(ack) > 1 else ack[0]
 
-                flag = True
-                flagflag = False
-                rank = []
-                _rank_norm = lambda c: 'chrX' if c == 'chrY' else c
-                for i in range(min(PATH_MAJOR_COMPONENT, len(ack))):
-                    if _rank_norm(ack[i][0]) in (_rank_norm(src[0][:-1]), _rank_norm(tar[:-1])):
-                        rank.append(i)
-                if len(rank) == 2:
-                    flagflag = True
-                elif len(rank) == 1:
-                    if rank[0] <= 1:
+                if ENABLE_PATH_CHROMOSOME_LENGTH_FILTER:
+                    longest_chr = ack[0]
+                    second_chr = ack[1] if len(ack) > 1 else ack[0]
+
+                    rank = []
+                    _rank_norm = lambda c: 'chrX' if c == 'chrY' else c
+                    for i in range(min(PATH_MAJOR_COMPONENT, len(ack))):
+                        if _rank_norm(ack[i][0]) in (
+                            _rank_norm(src[0][:-1]),
+                            _rank_norm(tar[:-1]),
+                        ):
+                            rank.append(i)
+                    if len(rank) == 2:
                         flagflag = True
+                    elif len(rank) == 1:
+                        flagflag = rank[0] <= 1
                     else:
                         flagflag = False
-                else:
-                    flagflag = False
-                flag = flagflag
-                if (longest_chr[1] + second_chr[1]) / total_path_ref_len < 0.5:
-                    flag = False
-                if chr_len[longest_chr[0]] + chr_len[second_chr[0]] < total_path_ref_len:
-                    flag = False
-                if total_path_ref_len < MIN_PATH_REF_LEN:
-                    flag = False
+                    flag = flagflag
+                    if (longest_chr[1] + second_chr[1]) / total_path_ref_len < 0.5:
+                        flag = False
+                    if chr_len[longest_chr[0]] + chr_len[second_chr[0]] < total_path_ref_len:
+                        flag = False
+                    if total_path_ref_len < MIN_PATH_REF_LEN:
+                        flag = False
+
                 if flag:
                     key = tuple(sorted(path_counter.keys()))
                     flagflag = True
-                    for curr_path_counter in path_compress[key]:
-                        check = all(
-                            abs(curr_path_counter[chr_name] - path_counter[chr_name]) <= PATH_COMPRESS_LIMIT 
-                            for chr_name in key
-                        )
-                        
-                        if check:
-                            flagflag = False
-                            break
+                    if ENABLE_PATH_CHROMOSOME_LENGTH_FILTER:
+                        for curr_path_counter in path_compress[key]:
+                            check = all(
+                                abs(curr_path_counter[chr_name] - path_counter[chr_name]) <= PATH_COMPRESS_LIMIT
+                                for chr_name in key
+                            )
+
+                            if check:
+                                flagflag = False
+                                break
                     if flagflag:
-                        path_compress[key].append(copy.deepcopy(path_counter))
+                        if ENABLE_PATH_CHROMOSOME_LENGTH_FILTER:
+                            path_compress[key].append(copy.deepcopy(path_counter))
                         cnt += 1
 
                         if PRINT_IDX_FILE:

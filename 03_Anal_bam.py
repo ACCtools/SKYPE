@@ -13,6 +13,12 @@ import pickle as pkl
 import numpy as np
 
 from juliacall import Main as jl
+from nclose_read_geometry import (
+    aligned_depth_interval,
+    interval_weighted_mean,
+    reference_support_span_rows,
+    split_nclose_flanks,
+)
 
 # logging 설정(레벨/포맷)은 skype_utils 에서 중앙 관리한다 (LOG_LEVEL).
 logging.info("03_anal_bam start")
@@ -70,6 +76,9 @@ parser.add_argument("--skip_nclose_count",
 parser.add_argument("--nclose_count_vaf_threshold",
                     help="VAF threshold used for the pass/fail column in nclose_read_counts.tsv.",
                     type=float, default=NCLOSE_COUNT_DEFAULT_VAF_THRESHOLD)
+parser.add_argument("--nclose_count_artifact_prefix",
+                    help="Optional filename prefix for NClose count artifacts (for example, 'cluster_').",
+                    default="")
 
 args = parser.parse_args()
 
@@ -77,6 +86,22 @@ PREFIX = args.prefix
 read_bam_loc = args.read_bam_loc
 reference_fai_path = args.reference_fai_path
 depth_stat_path = args.depth_stat_path
+
+if args.nclose_count_artifact_prefix and not all(
+    char.isalnum() or char in {"_", "-", "."}
+    for char in args.nclose_count_artifact_prefix
+):
+    parser.error("--nclose_count_artifact_prefix may contain only letters, numbers, '_', '-', and '.'")
+
+nclose_count_candidate_filename = (
+    f"{args.nclose_count_artifact_prefix}{NCLOSE_COUNT_CANDIDATE_PKL}"
+)
+nclose_count_result_filename = (
+    f"{args.nclose_count_artifact_prefix}{NCLOSE_COUNT_RESULT_PKL}"
+)
+nclose_count_report_filename = (
+    f"{args.nclose_count_artifact_prefix}{NCLOSE_COUNT_REPORT_TSV}"
+)
 
 raw_translocation_candidates = []
 if not args.nclose_count_only:
@@ -87,7 +112,7 @@ if not args.nclose_count_only:
 
 nclose_count_candidates = []
 if not args.skip_nclose_count:
-    nclose_count_candidate_path = f"{PREFIX}/{NCLOSE_COUNT_CANDIDATE_PKL}"
+    nclose_count_candidate_path = f"{PREFIX}/{nclose_count_candidate_filename}"
     if os.path.isfile(nclose_count_candidate_path):
         with open(nclose_count_candidate_path, "rb") as f:
             nclose_count_candidates = pkl.load(f)
@@ -151,6 +176,22 @@ def mean_depth_around_coord(depth_by_chrom, chrom, coord, chr_len,
         return None
     return weighted_sum / weight_sum
 
+def mean_depth_on_nclose_side(depth_by_chrom, endpoint, side_index, chr_len,
+                              flank=RAW_TRANSLOCATION_DEPTH_FLANK):
+    chrom = endpoint.get('chrom')
+    if chrom not in depth_by_chrom:
+        return None
+    coord = int(endpoint['coord'])
+    chrom_length = int(chr_len.get(chrom, max(coord + int(flank), 1)))
+    interval = aligned_depth_interval(
+        coord,
+        endpoint['dir'],
+        side_index,
+        flank,
+        chrom_length,
+    )
+    return interval_weighted_mean(depth_by_chrom[chrom], interval)
+
 def format_depth(value):
     return '*' if value is None or not np.isfinite(value) else round(float(value), 6)
 
@@ -196,6 +237,25 @@ def weighted_expected_depth(*estimate_data):
             continue
         weighted_sum += expected_depth * weight
         weight_sum += weight
+    if weight_sum == 0:
+        return None
+    return weighted_sum / weight_sum
+
+def read_count_depth(local_depth, vaf):
+    if local_depth is None or vaf is None:
+        return None
+    if not np.isfinite(local_depth) or not np.isfinite(vaf):
+        return None
+    return float(local_depth) * float(vaf)
+
+def weighted_read_depth(side_data):
+    weighted_sum = 0.0
+    weight_sum = 0
+    for read_depth, weight in side_data:
+        if read_depth is None or not np.isfinite(read_depth) or int(weight) <= 0:
+            continue
+        weighted_sum += float(read_depth) * int(weight)
+        weight_sum += int(weight)
     if weight_sum == 0:
         return None
     return weighted_sum / weight_sum
@@ -269,9 +329,10 @@ def add_breakend_span_rows(span_rows, pair_id, split, chr_len):
     if query_gap is None or query_gap > RAW_TRANSLOCATION_WINDOW:
         return
 
-    remaining = RAW_TRANSLOCATION_WINDOW - query_gap
-    flank1 = remaining // 2
-    flank2 = remaining - flank1
+    flanks = split_nclose_flanks(query_gap, RAW_TRANSLOCATION_WINDOW)
+    if flanks is None:
+        return
+    flank1, flank2 = flanks
     e1, e2 = endpoints
     row1 = endpoint_span_row(
         pair_id, int(split['count_idx']), 1,
@@ -452,29 +513,42 @@ def add_nclose_count_rows(span_rows, candidate, chr_len):
         return
 
     pair_id = int(candidate['pair_id'])
+    d2_rows = []
     add_breakend_span_rows(
-        span_rows, pair_id,
+        d2_rows, pair_id,
         {'count_idx': NCLOSE_COUNT_INDEX['d2'], 'endpoints': endpoints},
         chr_len,
     )
-    add_reference_span_rows(
-        span_rows, pair_id, NCLOSE_COUNT_INDEX['d1'],
-        {
-            'chrom': endpoints[0]['chrom'],
-            'inner_st': int(endpoints[0]['coord']),
-            'inner_nd': int(endpoints[0]['coord']),
-        },
-        chr_len,
-    )
-    add_reference_span_rows(
-        span_rows, pair_id, NCLOSE_COUNT_INDEX['d3'],
-        {
-            'chrom': endpoints[1]['chrom'],
-            'inner_st': int(endpoints[1]['coord']),
-            'inner_nd': int(endpoints[1]['coord']),
-        },
-        chr_len,
-    )
+    d2_rows.sort(key=lambda row: int(row[2]))
+    if len(d2_rows) != 2 or [int(row[2]) for row in d2_rows] != [1, 2]:
+        return
+    span_rows.extend(d2_rows)
+
+    # Compare the junction and normal-reference routes at identical anchors:
+    # d1 starts at the first d2 anchor, while d3 ends at the second d2 anchor.
+    for side_index, (endpoint, shared_row, count_name) in enumerate(zip(
+        endpoints,
+        d2_rows,
+        ('d1', 'd3'),
+    )):
+        chrom = endpoint['chrom']
+        if str(shared_row[3]) != str(chrom):
+            raise ValueError(
+                f"NClose d2 anchor chromosome mismatch: {shared_row[3]} != {chrom}"
+            )
+        shared_anchor = int(shared_row[6])
+        chrom_length = int(chr_len.get(
+            chrom, max(shared_anchor + RAW_TRANSLOCATION_WINDOW, 1)
+        ))
+        span_rows.extend(reference_support_span_rows(
+            pair_id,
+            NCLOSE_COUNT_INDEX[count_name],
+            shared_row,
+            endpoint['dir'],
+            side_index,
+            RAW_TRANSLOCATION_WINDOW,
+            chrom_length,
+        ))
 
 def nclose_candidate_display_points(record):
     endpoints = nclose_query_ordered_endpoints(record)
@@ -646,6 +720,25 @@ if not args.skip_nclose_count:
         d3 = raw_translocation_counts.get((pair_id, NCLOSE_COUNT_INDEX['d3']), 0)
         chr_a_vaf = nclose_count_vaf(d2, d1)
         chr_b_vaf = nclose_count_vaf(d2, d3)
+        chrom_a, coord_a, chrom_b, coord_b = nclose_candidate_display_points(candidate)
+        endpoints = nclose_query_ordered_endpoints(candidate)
+        if len(endpoints) == 2:
+            # Use the reference-aligned side before endpoint A and after endpoint B.
+            chr_a_local_depth = mean_depth_on_nclose_side(
+                depth_by_chrom, endpoints[0], 0, chr_len
+            )
+            chr_b_local_depth = mean_depth_on_nclose_side(
+                depth_by_chrom, endpoints[1], 1, chr_len
+            )
+        else:
+            chr_a_local_depth = None
+            chr_b_local_depth = None
+        chr_a_read_depth = read_count_depth(chr_a_local_depth, chr_a_vaf)
+        chr_b_read_depth = read_count_depth(chr_b_local_depth, chr_b_vaf)
+        combined_read_depth = weighted_read_depth((
+            (chr_a_read_depth, d2 + d1),
+            (chr_b_read_depth, d2 + d3),
+        ))
         query_gap = nclose_candidate_query_gap(candidate)
         overlaps_censat = bool(candidate.get('overlaps_censat', False))
         filter_eligible = (
@@ -665,26 +758,37 @@ if not args.skip_nclose_count:
         record['overlaps_censat'] = overlaps_censat
         record['filter_eligible'] = filter_eligible
         record['vaf'] = {'chr_a': chr_a_vaf, 'chr_b': chr_b_vaf}
+        record['read_count_depth_estimate'] = {
+            'chr_a_local_depth': chr_a_local_depth,
+            'chr_b_local_depth': chr_b_local_depth,
+            'chr_a_read_depth': chr_a_read_depth,
+            'chr_b_read_depth': chr_b_read_depth,
+            'weighted_read_depth': combined_read_depth,
+        }
         record['keep_by_vaf'] = keep_by_vaf
         record['keep_nclose'] = keep_nclose
         nclose_count_records.append(record)
 
-    with open(f"{PREFIX}/{NCLOSE_COUNT_RESULT_PKL}", "wb") as f:
+    with open(f"{PREFIX}/{nclose_count_result_filename}", "wb") as f:
         pkl.dump(nclose_count_records, f)
 
-    with open(f"{PREFIX}/{NCLOSE_COUNT_REPORT_TSV}", "wt") as f:
+    with open(f"{PREFIX}/{nclose_count_report_filename}", "wt") as f:
         print(*[
             'chrom_a', 'point_a', 'chrom_b', 'point_b',
             'nclose_query_gap', 'overlaps_censat', 'filter_eligible',
             'nclose',
             'chr_a_norm_read_count', 'nclose_read_count', 'chr_b_norm_read_count',
             'chr_a_nclose_vaf', 'chr_b_nclose_vaf', 'keep_by_vaf', 'keep_nclose',
+            'chr_a_local_depth', 'chr_b_local_depth',
+            'chr_a_read_depth', 'chr_b_read_depth',
+            'weighted_read_depth',
             'chr_a_norm_basis', 'nclose_basis', 'chr_b_norm_basis',
             'pair_id', 'nclose_key', 'contig_name',
         ], sep='\t', file=f)
         for record in nclose_count_records:
             counts = record['read_counts']
             basis = nclose_count_basis_texts.get(int(record['pair_id']), {})
+            depth_estimate = record.get('read_count_depth_estimate', {})
             chrom_a, coord_a, chrom_b, coord_b = nclose_candidate_display_points(record)
             print(
                 chrom_a, coord_a, chrom_b, coord_b,
@@ -697,6 +801,11 @@ if not args.skip_nclose_count:
                 format_depth(record.get('vaf', {}).get('chr_b')),
                 record.get('keep_by_vaf', False),
                 record.get('keep_nclose', False),
+                format_depth(depth_estimate.get('chr_a_local_depth')),
+                format_depth(depth_estimate.get('chr_b_local_depth')),
+                format_depth(depth_estimate.get('chr_a_read_depth')),
+                format_depth(depth_estimate.get('chr_b_read_depth')),
+                format_depth(depth_estimate.get('weighted_read_depth')),
                 basis.get('d1', '*'), basis.get('d2', '*'), basis.get('d3', '*'),
                 record['pair_id'],
                 ",".join(str(x) for x in record.get('nclose_key', ())),

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 from typing import Mapping
 
@@ -23,6 +24,51 @@ CHR_COLORS = {
     "chr19": "#BC8F8F", "chr20": "#FFD700", "chr21": "#7FFFD4",
     "chr22": "#ADFF2F", "chrX": "#6495ED", "chrY": "#EE82EE",
 }
+
+_NO_JUNCTION_READ_COUNT = object()
+_NO_JUNCTION_READ_DEPTH = object()
+
+
+def weighted_vaf_read_depth(record) -> float | None:
+    """Return local-coverage/VAF-derived junction depth in raw coverage units."""
+
+    counts = record.get("read_counts", {})
+    try:
+        junction_reads = int(counts.get("d2", 0))
+        normal_reads_a = int(counts.get("d1", 0))
+        normal_reads_b = int(counts.get("d3", 0))
+    except (TypeError, ValueError):
+        return None
+
+    estimate = record.get("read_count_depth_estimate", {})
+    vaf = record.get("vaf", {})
+    side_data = []
+    for side, normal_reads in (("a", normal_reads_a), ("b", normal_reads_b)):
+        try:
+            local_depth = float(estimate.get(f"chr_{side}_local_depth"))
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(local_depth):
+            continue
+
+        try:
+            side_vaf = float(vaf.get(f"chr_{side}"))
+        except (TypeError, ValueError):
+            total_reads = junction_reads + normal_reads
+            if total_reads <= 0:
+                continue
+            side_vaf = junction_reads / total_reads
+        if not math.isfinite(side_vaf):
+            continue
+
+        support = junction_reads + normal_reads
+        if support > 0:
+            side_data.append((local_depth * side_vaf, support))
+
+    total_support = sum(support for _depth, support in side_data)
+    if total_support <= 0:
+        return None
+    return sum(depth * support for depth, support in side_data) / total_support
 
 
 def chromosome_sort_key(chrom: str) -> tuple[int, str]:
@@ -74,6 +120,8 @@ def plot_virtual_chromosome(
     label=None,
     karyotype_str=None,
     event_labels=None,
+    junction_read_counts=None,
+    junction_read_depths=None,
 ) -> None:
     _path, segments = segments_data
     x_center = 0
@@ -96,6 +144,8 @@ def plot_virtual_chromosome(
     text_x = x_center + radius * 2
     text_args = dict(ha="left", va="center", fontsize=10, color="black")
     event_labels = event_labels or []
+    junction_read_counts = junction_read_counts or []
+    junction_read_depths = junction_read_depths or []
     event_positions = [event_y for event_y, _label in event_labels]
     for index, (real_chrom, segment_length) in enumerate(segments):
         rect = patches.Rectangle(
@@ -120,6 +170,34 @@ def plot_virtual_chromosome(
                     f"t({chrom_to_iscn(previous_chrom[0])}{previous_chrom[1]};"
                     f"{chrom_to_iscn(real_chrom[0])}{real_chrom[1]})"
                 )
+            matching_read_count = next(
+                (
+                    read_count
+                    for boundary_index, read_count in junction_read_counts
+                    if index == boundary_index
+                ),
+                _NO_JUNCTION_READ_COUNT,
+            )
+            matching_read_depth = next(
+                (
+                    read_depth
+                    for boundary_index, read_depth in junction_read_depths
+                    if index == boundary_index
+                ),
+                _NO_JUNCTION_READ_DEPTH,
+            )
+            if matching_read_depth is not _NO_JUNCTION_READ_DEPTH:
+                read_depth_text = (
+                    "NA" if matching_read_depth is None
+                    else f"{float(matching_read_depth):.1f}x"
+                )
+                text_label = f"{text_label} : {read_depth_text}"
+            elif matching_read_count is not _NO_JUNCTION_READ_COUNT:
+                read_count_text = (
+                    "NA" if matching_read_count is None
+                    else str(int(matching_read_count))
+                )
+                text_label = f"{text_label} : {read_count_text}"
             text_objects.append(ax.text(text_x, current_y, text_label, **text_args))
         current_y += segment_length
 
@@ -312,11 +390,18 @@ def render_karyotype_diagram(
     path_depth_n,
     path_karyotype,
     path_event_labels=None,
+    path_junction_read_counts=None,
+    path_junction_read_depths=None,
+    path_depth_raw=None,
     fig_prefix="",
 ) -> dict:
     """Render the exact stage-30 Virtual SKY layout from prepared path data."""
 
     path_event_labels = path_event_labels or {}
+    path_junction_read_counts = path_junction_read_counts or {}
+    path_junction_read_depths = path_junction_read_depths or {}
+    show_raw_path_depth = path_depth_raw is not None
+    path_depth_raw = path_depth_raw or {}
     columns = 10
     display_chroms = sorted(
         set(grouped_norm_data) | set(display_indel), key=chromosome_sort_key
@@ -359,12 +444,18 @@ def render_karyotype_diagram(
         plot_chromosome_name(axes[current_row][0], chrom)
         for index, data in enumerate(data_list):
             path = data[0]
+            depth_n = float(path_depth_n[path])
+            depth_label = f"{round(depth_n, 2)}N"
+            if show_raw_path_depth and path in path_depth_raw:
+                depth_label = f"{float(path_depth_raw[path]):.2f}x"
             plot_virtual_chromosome(
                 axes[index // columns + current_row][index % columns + len(prefix_ratios)],
                 data, maxh, cell_col, default_cell_col,
-                label=f"{round(float(path_depth_n[path]), 2)}N",
+                label=depth_label,
                 karyotype_str=path_karyotype.get(path) or "",
                 event_labels=path_event_labels.get(path, []),
+                junction_read_counts=path_junction_read_counts.get(path, []),
+                junction_read_depths=path_junction_read_depths.get(path, []),
             )
         for offset, indel in enumerate(indels):
             index = offset + len(data_list)
@@ -439,7 +530,10 @@ def render_karyotype_diagram(
         ncol=legend_columns, loc="center", fontsize=9, frameon=True,
         handlelength=1.0, handleheight=1.0, labelspacing=0.8,
     )
-    legend_axis.set_title(f"{cell_line} Virtual SKY result", fontsize=15)
+    title = f"{cell_line} Virtual SKY result"
+    if show_raw_path_depth:
+        title += "\npath = fitted depth (x); junction = VAF-derived depth (x)"
+    legend_axis.set_title(title, fontsize=15)
     legend_axis.axis("off")
 
     pdf_path = os.path.join(output_prefix, f"virtual_sky{fig_prefix}.pdf")

@@ -11,10 +11,12 @@ from nclose_tracking import (
     record_filter_stage,
     save_filter_status,
 )
+from path_additivity import choose_removal, find_path_conflicts
 
 from collections import defaultdict
 
 import ast
+import csv
 import glob
 import psutil
 import logging
@@ -46,30 +48,17 @@ CTG_MAINFLOWDIR = 19
 CTG_MAINFLOWCHR = 20
 CTG_GLOBALIDX = 21
 
-NODE_NAME = 1
-CHR_CHANGE_IDX = 2
-DIR_CHANGE_IDX = 3
-
-DIR_FOR = 1
-DIR_BAK = 1
-
-BND_TYPE = 0
-CTG_IN_TYPE = 1
-TEL_TYPE = 2
-
 CLUSTER_START_DEPTH = 0.1
 CLUSTER_FINAL_DEPTH = 0.2
 
-JOIN_SAME_CHR_BASELINE = 0.8
-JOIN_DIFF_CHR_BASELINE = 0.9
-
 TELOMERE_EXPANSION = 5 * K
-KARYOTYPE_SECTION_MINIMUM_LENGTH = 100*K
 
 TYPE4_CLUSTER_SIZE = 1 * M
 
 BASE_ACCSUMABSMAX_RATIO = 1.5
 CHROM_ERROR_FAIL_RATE = 2.0
+PRECLUSTER_NCLOSE_COUNT_RESULT_PKL = 'precluster_nclose_count_result.pkl'
+RAW_ZERO_DECISION_TSV = 'cluster_raw_zero_path_decisions.tsv'
 
 VCF_FLANKING_LENGTH = 1*M
 NCLOSE_SIM_COMPARE_RAITO = 1.2
@@ -92,13 +81,6 @@ def import_ppc_data(file_path : str) -> list :
         contig_data.append(tuple(temp_list))
     paf_file.close()
     return contig_data
-
-def import_index_path(file_path : str) -> list:
-    file_path_list = file_path.split('/')
-    key = file_path_list[-2]
-    cnt = int(file_path_list[-1].split('.')[0]) - 1
-
-    return path_list_dict[key][cnt][0]
 
 def chr2int(x):
     chrXY2int = {'chrX' : 24, 'chrY' : 25}
@@ -221,205 +203,54 @@ def is_filter_candidate(st, ed, tier_st, tier_ed):
 
     return tier_says_filter(tier_st) and tier_says_filter(tier_ed)
 
+def load_high_quality_zero_read_events(prefix, contig_data):
+    result_path = os.path.join(prefix, PRECLUSTER_NCLOSE_COUNT_RESULT_PKL)
+    if not os.path.isfile(result_path):
+        raise FileNotFoundError(
+            f'Missing pre-cluster NClose read counts: {result_path}. '
+            'Run 25_cluster_nclose_read_count.py with --selection_stage base '
+            'before stage 24.'
+        )
 
-def parse_chromosome_labels(s):
-    """
-    Parse '...<f|b>_...<f|b>' into a canonical tuple:
-      (left_label, left_is_f, right_label, right_is_f)
+    with open(result_path, 'rb') as f:
+        records = pkl.load(f)
 
-    Rules:
-    - The two ends must end with 'f' or 'b' (assert if not).
-    - Keep each '...' label string intact (e.g., 'chr12', 'scaf_007', etc.).
-    - Canonicalize by sorting so the lexicographically smaller label comes first.
-      If labels are equal, put 'f' (True) before 'b' (False).
-    - When swapping due to sorting, directions stay attached to their original labels.
-      (So 'chr12f_chr1b' becomes ('chr1', True, 'chr12', False).)
-    """
-    m = re.fullmatch(r'(.+?)([fb])_(.+?)([fb])', s)
-    assert m is not None, "Input must match ...(f|b)_...(f|b) pattern"
-
-    a_label, a_dir_ch, b_label, b_dir_ch = m.groups()
-    a_is_f = (a_dir_ch == 'f')
-    b_is_f = (b_dir_ch == 'f')
-
-    # Canonical order by label; if same label, 'f' (True) first.
-    if (a_label > b_label) or (a_label == b_label and not a_is_f and b_is_f):
-        # Swap ends to enforce canonical order; keep directions with their labels.
-        a_label, b_label = b_label, a_label
-        a_is_f, b_is_f = b_is_f, a_is_f
-
-    return (a_label, a_is_f, b_label, b_is_f)
-
-
-def max_aligned_match_length(
-    seq_a: list[tuple[tuple[str, str], int]],
-    seq_b: list[tuple[tuple[str, str], int]],
-) -> int:
-    """
-    Return the maximum total matched length after sliding two piecewise-constant
-    label sequences along one axis. A and B are lists of ((chrom, strand), length).
-    Only regions with exactly the same (chrom, strand) contribute to the score.
-
-    Algorithm:
-      1) Convert each sequence into absolute intervals [(start, end, label)].
-      2) Consider candidate shifts = {a_ep - b_ep | a_ep in endpoints(A), b_ep in endpoints(B)}.
-         (The overlap configuration only changes when an endpoint meets another.)
-      3) For each shift, line-sweep over the two interval lists and accumulate
-         overlap length where labels are equal.
-      4) Return the maximum accumulated length across all shifts.
-
-    Time complexity:
-      Let n, m be #segments. Endpoints ~ (n+1), (m+1).
-      Candidates O((n+1)*(m+1)); each evaluation O(n+m). Works well for tens~hundreds of segments.
-    """
-    # --- build absolute intervals: [(start, end, label)] and endpoint lists ---
-    def build_intervals(seq):
-        intervals = []
-        endpoints = []
-        pos = 0
-        endpoints.append(pos)
-        for (label, length) in seq:
-            start = pos
-            end = pos + length
-            intervals.append((start, end, label))
-            pos = end
-            endpoints.append(pos)
-        return intervals, endpoints
-
-    A, A_ep = build_intervals(seq_a)
-    B, B_ep = build_intervals(seq_b)
-
-    if not A or not B:
-        return 0
-
-    # --- generate candidate shifts (all endpoint differences) ---
-    # shift d means: compare A intervals with B intervals shifted by +d
-    candidates = set()
-    for a_e in A_ep:
-        for b_e in B_ep:
-            candidates.add(a_e - b_e)
-
-    # --- overlap length for a given shift ---
-    def match_length_for_shift(d: int) -> int:
-        i, j = 0, 0
-        total = 0
-        # Two-pointer sweep over A and shifted-B
-        while i < len(A) and j < len(B):
-            a_s, a_e, a_lab = A[i]
-            b_s, b_e, b_lab = B[j]
-            b_s += d
-            b_e += d
-
-            # If no overlap, advance the one that ends earlier / starts later
-            if a_e <= b_s:
-                i += 1
-                continue
-            if b_e <= a_s:
-                j += 1
-                continue
-
-            # Overlapping segment
-            ov_s = a_s if a_s > b_s else b_s
-            ov_e = a_e if a_e < b_e else b_e
-            if ov_e > ov_s and a_lab == b_lab:
-                total += (ov_e - ov_s)
-
-            # Advance the interval that ends first
-            if a_e <= b_e:
-                i += 1
-            else:
-                j += 1
-        return total
-
-    best = 0
-    # (Optional) small heuristic: iterate over sorted candidates for deterministic behavior
-    for d in sorted(candidates):
-        val = match_length_for_shift(d)
-        if val > best:
-            best = val
-
-    return best
-
-def should_join_by_baseline(
-    seq_a: list[tuple[tuple[str, str], int]],
-    seq_b: list[tuple[tuple[str, str], int]]
-) -> bool:
-    """
-    Decide if two sequences should be joined based on:
-      max_aligned_match_length(seq_a, seq_b) / max(total_len_a, total_len_b) >= JOIN_BASELINE
-
-    Notes:
-      - Returns False if both sequences have total length 0 (to avoid 0-division).
-      - Assumes non-negative lengths.
-      - Threshold is inclusive (>=).
-
-    """
-
-    total_a = sum(length for (_, length) in seq_a)
-    total_b = sum(length for (_, length) in seq_b)
-
-    denom = total_a if total_a >= total_b else total_b
-    if denom == 0:
-        return False
-
-    seq_a_chr = (seq_a[0][0], seq_a[-1][0])
-    seq_b_chr = (seq_b[0][0], seq_b[-1][0])
-
-    score = max_aligned_match_length(seq_a, seq_b)
-    return (score / denom) >= (JOIN_SAME_CHR_BASELINE if seq_a_chr == seq_b_chr else JOIN_DIFF_CHR_BASELINE)
-
-def root_find(uf, path):
-    if path not in uf:
-        uf[path] = path
-    elif uf[path] != path:
-        uf[path] = root_find(uf, uf[path])
-    return uf[path]
-
-def get_karyotype_summary_relpath(non_type4_path_list : list):
-    karyotypes_data_direction_include = {}
-    karyotypes_nclose_count = {}
-    
-    for path_path in non_type4_path_list:
-        pieces = []
-        path = import_index_path(path_path)
-
-        # padding for easier calculation
-        if len(path[0]) < 4:
-            path[0] = tuple([0] + list(path[0]))
-        if len(path[-1]) < 4:
-            path[-1] = tuple([0] + list(path[-1]))
-        
-        curr_ref = 0 if path[0][NODE_NAME][-1] =='f' else chr_len[path[0][NODE_NAME][:-1]]
-        curr_incr = '+' if path[0][NODE_NAME][-1] =='f' else '-'
-        curr_chr = [path[0][NODE_NAME][:-1], curr_incr]
-        
-        nclose_use_cnt = 0
-        for i in range(1, len(path)-1):
-            if path[i][CHR_CHANGE_IDX] > path[i-1][CHR_CHANGE_IDX] \
-            or path[i][DIR_CHANGE_IDX] > path[i-1][DIR_CHANGE_IDX]:
-                nclose_use_cnt += 1
-                last_node = ppc_data[path[i-1][NODE_NAME]]
-                curr_node = ppc_data[path[i][NODE_NAME]]
-                # add last piece
-                if curr_incr == '+':
-                    pieces.append((tuple(curr_chr), last_node[CHR_END] - curr_ref))
-                else:
-                    pieces.append((tuple(curr_chr), curr_ref - last_node[CHR_STR]))
-                
-                # update info of new piece (starting ref, chromosome type, increment ..)
-                if path[i][NODE_NAME] > path[i-1][NODE_NAME]:
-                    curr_incr = curr_node[CTG_DIR]
-                    curr_chr = [curr_node[CHR_NAM], curr_incr]
-                    curr_ref = curr_node[CHR_STR] if curr_incr == '+' else curr_node[CHR_END]
-                else:
-                    curr_incr = '-' if curr_node[CTG_DIR] == '+' else '+'
-                    curr_chr = [curr_node[CHR_NAM], curr_incr]
-                    curr_ref = curr_node[CHR_STR] if curr_incr == '+' else curr_node[CHR_END]
-        karyotypes_nclose_count[path_path] = nclose_use_cnt
-        pieces.append((tuple(curr_chr), chr_len[curr_chr[0]] - curr_ref if curr_incr == '+' else curr_ref))
-        karyotypes_data_direction_include[path_path] = pieces
-
-    return karyotypes_data_direction_include
+    selected = {}
+    for record in records:
+        query_gap = record.get('nclose_query_gap')
+        if query_gap is None or int(query_gap) > 5 * K:
+            continue
+        if int(record.get('read_counts', {}).get('d2', 0)) != 0:
+            continue
+        if bool(record.get('overlaps_censat', False)):
+            continue
+        try:
+            node_pair = tuple(sorted(int(index) for index in record['nclose_key']))
+        except (KeyError, TypeError, ValueError):
+            continue
+        if len(node_pair) != 2 or max(node_pair) >= len(contig_data):
+            continue
+        mapqs = tuple(int(contig_data[index][CTG_MAPQ]) for index in node_pair)
+        if mapqs != (60, 60):
+            continue
+        event_key = record.get('event_key')
+        if event_key is None:
+            event_key = node_pair
+        else:
+            event_key = tuple(event_key)
+        selected[event_key] = {
+            'event_key': event_key,
+            'node_pair': node_pair,
+            'nclose_id': record.get('nclose_id', ''),
+            'contig_name': record.get('ctg_name', ''),
+            'query_gap': int(query_gap),
+            'mapq_a': mapqs[0],
+            'mapq_b': mapqs[1],
+            'normal_reads_a': int(record.get('read_counts', {}).get('d1', 0)),
+            'junction_reads': 0,
+            'normal_reads_b': int(record.get('read_counts', {}).get('d3', 0)),
+        }
+    return selected
 
 # logging 설정(레벨/포맷)은 skype_utils 에서 중앙 관리한다 (LOG_LEVEL).
 
@@ -484,9 +315,6 @@ def nnls_gram_mem_gb():
     return psutil.virtual_memory().available * NNLS_GRAM_MEM_RATIO / BYTES_PER_GB
 
 ppc_data = import_ppc_data(PREPROCESSED_PAF_FILE_PATH)
-
-with open(f'{PREFIX}/path_data.pkl', 'rb') as f:
-    path_list_dict = pkl.load(f)
 
 with open(f'{PREFIX}/contig_pat_vec_data.pkl', 'rb') as f:
     paf_ans_list, key_list, int2key, _ = pkl.load(f)
@@ -591,12 +419,19 @@ def chrom_acc_sum_peak_stats(predict_suc_B):
             }
     return chrom_peak_stats
 
-def get_fit_failures(predict_suc_B, fail_rate=CHROM_ERROR_FAIL_RATE):
+def get_fit_failures(
+    predict_suc_B,
+    fail_rate=CHROM_ERROR_FAIL_RATE,
+    baseline_peak_stats=None,
+):
     failures = []
     for chrom, stat in chrom_acc_sum_peak_stats(predict_suc_B).items():
         if chrom == 'chrY' and no_chrY:
             continue
-        acc_sum_max_base = chrom_acc_sum_dict_max_base[chrom]
+        if baseline_peak_stats is None:
+            acc_sum_max_base = chrom_acc_sum_dict_max_base[chrom]
+        else:
+            acc_sum_max_base = baseline_peak_stats.get(chrom, {}).get('max_abs', 0)
         # Preserve the previous 24_cluster_weight behavior: chromosomes with
         # a zero baseline envelope do not drive greedy rejection.
         if acc_sum_max_base == 0:
@@ -612,6 +447,10 @@ def get_fit_failures(predict_suc_B, fail_rate=CHROM_ERROR_FAIL_RATE):
             })
     failures.sort(key=lambda x: x['ratio'], reverse=True)
     return failures
+
+def solution_depth_error(solution):
+    predict_depth = solution['predict_succ'][depth_success_slice]
+    return float(np.linalg.norm(predict_depth - B_depth))
 
 def solve_idx_list(final_idx_list, warm_fullsize):
     final_idx_array_jl = jl.Vector[jl.Int]([i + 1 for i in final_idx_list])
@@ -907,9 +746,14 @@ filter_active_locations = {
     for col_idx in filter_active_column_set
 }
 
-cluster_tar_path_list = []
+# Build the initial stage-24 column pool without the former sequence-similarity
+# clustering. Ordinary paths retain the existing 0.1N entry threshold, while
+# pure chromosomes and the special type-4/centromere columns keep their prior
+# inclusion rules.
+initial_cluster_columns = set()
+loc2column = {location: column for column, location in enumerate(tot_loc_list)}
 
-# Add pure chromosome
+# Add pure chromosomes even when their fitted weight is below 0.1N.
 with open(f"{PREFIX}/tar_chr_data.pkl", "rb") as f:
     tar_chr_data = pkl.load(f)
 
@@ -918,62 +762,13 @@ loc_prefix = paf_ans_list[0][0].split('/')[:-3]
 for path_tuple in tar_chr_data.values():
     path = '/'.join(loc_prefix + list(path_tuple))
     if path in filter_active_locations:
-        cluster_tar_path_list.append(path)
+        initial_cluster_columns.add(loc2column[path])
 
 for ind, w in weights_sorted_data:
     paf_loc = tot_loc_list[ind]
     if paf_loc.split('/')[-3] not in {'11_ref_ratio_outliers', '12_cent_fragment'}:
         if w > CLUSTER_START_DEPTH * N:
-            cluster_tar_path_list.append(paf_loc)
-
-tot_loc_list2nclosecnt = dict()
-
-for paf_loc in tot_loc_list:
-    if paf_loc.split('/')[-3] not in {'11_ref_ratio_outliers', '12_cent_fragment'}:
-        path = import_index_path(paf_loc)
-
-        if len(path[0]) < 4:
-            path[0] = tuple([0] + list(path[0])) # padding for easier calculation
-        if len(path[-1]) < 4:
-            path[-1] = tuple([0] + list(path[-1]))
-
-        nclose_use_cnt = 0
-        for i in range(1, len(path)-1):
-            if path[i][CHR_CHANGE_IDX] > path[i-1][CHR_CHANGE_IDX] \
-            or path[i][DIR_CHANGE_IDX] > path[i-1][DIR_CHANGE_IDX]:
-                nclose_use_cnt += 1
-
-        tot_loc_list2nclosecnt[paf_loc] = nclose_use_cnt
-        
-# karyotypes_data : key (rel_path) => value (karyotype value)
-karyotypes_data = get_karyotype_summary_relpath(cluster_tar_path_list)
-
-chr_set_merge = defaultdict(list)
-rel_path2ncnt = dict((v, i) for i, v in enumerate(tot_loc_list))
-
-for path, seq_list in karyotypes_data.items():
-    matched_master = None
-
-    # Compare only against master paths
-    for master_path, slave_list in chr_set_merge.items():
-        master_seq = karyotypes_data[master_path]
-        if should_join_by_baseline(master_seq, seq_list):
-            matched_master = master_path
-            break
-
-    if matched_master is not None:
-        # Join to existing cluster as slave
-        chr_set_merge[matched_master].append(path)
-    else:
-        # Create new cluster with this path as master
-        chr_set_merge[path] = [path]
-
-using_merge_ncnt_list = []
-for path_list in chr_set_merge.values():
-    merge_weight = sum(loc2weight[p] for p in path_list)
-    if merge_weight > CLUSTER_FINAL_DEPTH * N:
-        repr_path = min(path_list, key=lambda t : tot_loc_list2nclosecnt[t])
-        using_merge_ncnt_list.append(rel_path2ncnt[repr_path])
+            initial_cluster_columns.add(ind)
 
 for ncnt, (paf_loc, w) in enumerate(loc2weight.items()):
     if paf_loc.split('/')[-3] == '11_ref_ratio_outliers' and w > CLUSTER_FINAL_DEPTH * N:
@@ -987,35 +782,262 @@ for ncnt, (paf_loc, w) in enumerate(loc2weight.items()):
                 pos1 = int(l[CHR_STR])
                 pos2 = int(l[CHR_END])
                 if abs(pos1-pos2) > TYPE4_CLUSTER_SIZE:
-                    using_merge_ncnt_list.append(ncnt)
+                    initial_cluster_columns.add(ncnt)
         elif event_type == 'ecdna':
-            using_merge_ncnt_list.append(ncnt)
+            initial_cluster_columns.add(ncnt)
         else:
             assert(False)
     elif paf_loc.split('/')[-3] == '12_cent_fragment':
-        using_merge_ncnt_list.append(ncnt)
+        initial_cluster_columns.add(ncnt)
 
-using_merge_ncnt_list = sorted(
-    set(using_merge_ncnt_list) & filter_active_column_set
+initial_cluster_columns &= filter_active_column_set
+
+# Raw-read veto runs before compositional A/B/AB conflict resolution.  A zero
+# is actionable only when both PAF sides are non-CENSAT, MAPQ 60, and the
+# 5-kb junction count was technically available.
+raw_zero_event_records = load_high_quality_zero_read_events(PREFIX, ppc_data)
+raw_zero_removed_columns = set()
+raw_zero_applied_event_keys = set()
+raw_zero_decision_rows = []
+for event_key, record in sorted(
+    raw_zero_event_records.items(), key=lambda item: repr(item[0])
+):
+    carrier_set = carrier_columns(nclose_path_usage, event_key)
+    removed_carriers = carrier_set & initial_cluster_columns
+    if removed_carriers:
+        raw_zero_applied_event_keys.add(event_key)
+        raw_zero_removed_columns.update(removed_carriers)
+    raw_zero_decision_rows.append({
+        **record,
+        'event_key': repr(event_key),
+        'carrier_columns': ','.join(map(str, sorted(carrier_set))),
+        'removed_cluster_columns': ','.join(map(str, sorted(removed_carriers))),
+        'removed_cluster_paths': ';'.join(
+            '/'.join(get_relative_path(tot_loc_list[column]))
+            for column in sorted(removed_carriers)
+        ),
+        'action': 'REMOVE_AND_REFIT' if removed_carriers else 'NO_CLUSTER_CARRIER',
+    })
+
+raw_zero_decision_fields = [
+    'nclose_id', 'event_key', 'node_pair', 'contig_name', 'query_gap',
+    'mapq_a', 'mapq_b',
+    'normal_reads_a', 'junction_reads', 'normal_reads_b',
+    'carrier_columns', 'removed_cluster_columns', 'removed_cluster_paths',
+    'action',
+]
+with open(f'{PREFIX}/{RAW_ZERO_DECISION_TSV}', 'w', newline='') as f:
+    writer = csv.DictWriter(
+        f, fieldnames=raw_zero_decision_fields, delimiter='\t',
+        extrasaction='ignore',
+    )
+    writer.writeheader()
+    writer.writerows(raw_zero_decision_rows)
+
+initial_cluster_columns -= raw_zero_removed_columns
+logging.info(
+    'High-quality zero-read filtering before A/B/AB: events=%d, '
+    'removed_columns=%d',
+    len(raw_zero_applied_event_keys), len(raw_zero_removed_columns),
 )
-if not using_merge_ncnt_list:
+if not initial_cluster_columns:
     raise RuntimeError("No NNLS columns remain for stage-24 cluster selection.")
 
-# Julia run partial NNLS by using_merge_ncnt_list
+current_solution = solve_idx_list(
+    sorted(initial_cluster_columns),
+    final_weights_fullsize,
+)
+if current_solution is None:
+    raise RuntimeError("No NNLS solution for the initial stage-24 column pool.")
 
-final_idx_array_jl = jl.Vector[jl.Int]([i + 1 for i in using_merge_ncnt_list])
+logging.info(
+    f'Compositional path filtering start: initial_columns={len(initial_cluster_columns)}, '
+    f'initial_error={solution_depth_error(current_solution):.4f}'
+)
+
+def is_ordinary_path_column(column):
+    return tot_loc_list[column].split('/')[-3] not in {
+        '11_ref_ratio_outliers', '12_cent_fragment'
+    }
+
+def path_conflict_candidate_columns(solution):
+    return {
+        int(column)
+        for column in solution['idx_list']
+        if is_ordinary_path_column(int(column))
+        and solution['fullsize'][int(column)] > CLUSTER_START_DEPTH * N
+    }
+
+def evaluate_path_removal(columns, baseline_peak_stats):
+    remaining = sorted(set(current_solution['idx_list']) - set(columns))
+    if not remaining:
+        return {
+            'solution': None,
+            'error': float('inf'),
+            'failures': [{'chrom': 'all', 'ratio': float('inf')}],
+            'feasible': False,
+        }
+    solution = solve_idx_list(remaining, current_solution['fullsize'])
+    failures = get_fit_failures(
+        solution['predict_succ'],
+        baseline_peak_stats=baseline_peak_stats,
+    )
+    return {
+        'solution': solution,
+        'error': solution_depth_error(solution),
+        'failures': failures,
+        'feasible': not failures,
+    }
+
+def failure_summary(evaluation):
+    if not evaluation['failures']:
+        return ''
+    worst = evaluation['failures'][0]
+    return f"{worst['chrom']}:{worst.get('coord', -1)}:{worst['ratio']:.6g}"
+
+path_conflict_decisions = []
+path_conflict_removed_columns = set()
+baseline_peak_stats = chrom_acc_sum_peak_stats(current_solution['predict_succ'])
+
+while True:
+    candidate_columns = path_conflict_candidate_columns(current_solution)
+    conflicts = find_path_conflicts(
+        candidate_columns,
+        nclose_path_usage,
+        current_solution['fullsize'],
+    )
+    if not conflicts:
+        break
+
+    # Both A/B/AB and A/BC/AB enter this one queue, so the globally smallest
+    # current three-path weight sum is always resolved first.
+    conflict = conflicts[0]
+    eval_a = evaluate_path_removal((conflict.path_a,), baseline_peak_stats)
+    eval_b = evaluate_path_removal((conflict.path_b,), baseline_peak_stats)
+    eval_both = None
+    if eval_a['feasible'] and eval_b['feasible']:
+        eval_both = evaluate_path_removal(
+            (conflict.path_a, conflict.path_b),
+            baseline_peak_stats,
+        )
+
+    choice = choose_removal(
+        conflict.path_a,
+        conflict.path_b,
+        a_feasible=eval_a['feasible'],
+        b_feasible=eval_b['feasible'],
+        a_error=eval_a['error'],
+        b_error=eval_b['error'],
+        both_feasible=(eval_both['feasible'] if eval_both is not None else None),
+    )
+    evaluation_by_removal = {
+        (conflict.path_a,): eval_a,
+        (conflict.path_b,): eval_b,
+    }
+    if eval_both is not None:
+        evaluation_by_removal[
+            tuple(sorted((conflict.path_a, conflict.path_b)))
+        ] = eval_both
+    selected_evaluation = evaluation_by_removal[choice.removed_columns]
+    if selected_evaluation['solution'] is None:
+        raise RuntimeError(
+            f"Selected compositional path removal has no NNLS solution: {choice}"
+        )
+
+    decision_index = len(path_conflict_decisions) + 1
+    path_conflict_decisions.append({
+        'iteration': decision_index,
+        'conflict_type': conflict.conflict_type,
+        'path_a_role': conflict.role_a,
+        'path_b_role': conflict.role_b,
+        'path_ab_role': conflict.role_ab,
+        'path_a_column': conflict.path_a,
+        'path_b_column': conflict.path_b,
+        'path_ab_column': conflict.path_ab,
+        'path_a_location': '/'.join(get_relative_path(tot_loc_list[conflict.path_a])),
+        'path_b_location': '/'.join(get_relative_path(tot_loc_list[conflict.path_b])),
+        'path_ab_location': '/'.join(get_relative_path(tot_loc_list[conflict.path_ab])),
+        'weight_a_N': conflict.weight_a / N,
+        'weight_b_N': conflict.weight_b / N,
+        'weight_ab_N': conflict.weight_ab / N,
+        'weight_sum_N': conflict.total_weight / N,
+        'remove_a_feasible': eval_a['feasible'],
+        'remove_b_feasible': eval_b['feasible'],
+        'remove_both_tested': eval_both is not None,
+        'remove_both_feasible': eval_both['feasible'] if eval_both is not None else '',
+        'remove_a_error': eval_a['error'],
+        'remove_b_error': eval_b['error'],
+        'remove_both_error': eval_both['error'] if eval_both is not None else '',
+        'remove_a_worst_failure': failure_summary(eval_a),
+        'remove_b_worst_failure': failure_summary(eval_b),
+        'remove_both_worst_failure': (
+            failure_summary(eval_both) if eval_both is not None else ''
+        ),
+        'selected_removed_columns': ','.join(map(str, choice.removed_columns)),
+        'selection_reason': choice.reason,
+        'selected_error': selected_evaluation['error'],
+    })
+
+    logging.info(
+        f'Compositional path decision {decision_index} '
+        f'[{conflict.conflict_type}]: '
+        f'{conflict.role_a}={conflict.path_a}({conflict.weight_a/N:.3f}N), '
+        f'{conflict.role_b}={conflict.path_b}({conflict.weight_b/N:.3f}N), '
+        f'{conflict.role_ab}={conflict.path_ab}({conflict.weight_ab/N:.3f}N), '
+        f'removed={choice.removed_columns}, reason={choice.reason}, '
+        f'error={selected_evaluation["error"]:.4f}'
+    )
+
+    path_conflict_removed_columns.update(choice.removed_columns)
+    current_solution = selected_evaluation['solution']
+    # Each completed A/B/AB or A/BC/AB decision defines the comparison
+    # envelope for the next decision. No later trial uses a stale global base.
+    baseline_peak_stats = chrom_acc_sum_peak_stats(current_solution['predict_succ'])
+
+decision_fields = [
+    'iteration', 'conflict_type',
+    'path_a_role', 'path_b_role', 'path_ab_role',
+    'path_a_column', 'path_b_column', 'path_ab_column',
+    'path_a_location', 'path_b_location', 'path_ab_location',
+    'weight_a_N', 'weight_b_N', 'weight_ab_N', 'weight_sum_N',
+    'remove_a_feasible', 'remove_b_feasible',
+    'remove_both_tested', 'remove_both_feasible',
+    'remove_a_error', 'remove_b_error', 'remove_both_error',
+    'remove_a_worst_failure', 'remove_b_worst_failure',
+    'remove_both_worst_failure',
+    'selected_removed_columns', 'selection_reason', 'selected_error',
+]
+with open(f'{PREFIX}/cluster_additive_path_decisions.tsv', 'w', newline='') as f:
+    writer = csv.DictWriter(f, fieldnames=decision_fields, delimiter='\t')
+    writer.writeheader()
+    writer.writerows(path_conflict_decisions)
+
+remaining_path_conflicts = find_path_conflicts(
+    path_conflict_candidate_columns(current_solution),
+    nclose_path_usage,
+    current_solution['fullsize'],
+)
+if remaining_path_conflicts:
+    remaining_types = sorted({
+        conflict.conflict_type for conflict in remaining_path_conflicts
+    })
+    raise RuntimeError(
+        "Stage-24 compositional path filtering ended with unresolved "
+        f"conflicts: {remaining_types}"
+    )
+
+logging.info(
+    f'Compositional path filtering end: decisions={len(path_conflict_decisions)}, '
+    f'removed_columns={len(path_conflict_removed_columns)}, '
+    f'remaining_columns={len(current_solution["idx_list"])}'
+)
+
+cluster_column_list = list(current_solution['idx_list'])
+final_idx_array_jl = jl.Vector[jl.Int]([i + 1 for i in cluster_column_list])
 A_final_jl = jl.view(A_jl, jl.Colon(), final_idx_array_jl)
 A_fail_final_jl = jl.view(A_fail_jl, jl.Colon(), final_idx_array_jl)
-
-
-solve_gram_mem_gb = nnls_gram_mem_gb()
-final_weight_jl = jl.nnls_solve(
-    A_final_jl, B_jl, THREAD, False,
-    gram_mem_gb=solve_gram_mem_gb,
-    w_init=make_jl_weight(final_weights_fullsize[using_merge_ncnt_list])
-)
-final_weight = np.asarray(final_weight_jl)
-final_weights_fullsize = np.zeros(jl.size(A_jl, 2))
+final_weight = current_solution['weight'].copy()
+final_weights_fullsize = np.zeros(len(weight_base), dtype=weight_base.dtype)
 
 cluster_weight_before_min = final_weight.copy()
 cluster_min_mask = (
@@ -1024,10 +1046,10 @@ cluster_min_mask = (
 )
 final_weight[cluster_weight_before_min <= 0] = 0
 final_weight[cluster_min_mask] = 0
-final_weight_jl = jl.Vector[jl.eltype(final_weight_jl)](final_weight)
+final_weight_jl = make_jl_weight(final_weight)
 
 for i, v in enumerate(final_weight):
-    final_weights_fullsize[using_merge_ncnt_list[i]] = v
+    final_weights_fullsize[cluster_column_list[i]] = v
 
 predict_B_succ = np.asarray(A_final_jl * final_weight_jl)
 predict_B_fail = np.asarray(A_fail_final_jl * final_weight_jl)
@@ -1047,23 +1069,26 @@ np.save(f'{PREFIX}/predict_B_cluster.npy', predict_B)
 # A true NNLS zero remains a surviving 0/PASS result.  Only a positive
 # coefficient removed by the explicit 0.1N floor is considered filtered.
 cluster_thresholded_columns = {
-    using_merge_ncnt_list[i]
+    cluster_column_list[i]
     for i, is_thresholded in enumerate(cluster_min_mask)
     if is_thresholded
 }
 cluster_positive_columns = {
-    using_merge_ncnt_list[i]
+    cluster_column_list[i]
     for i, weight in enumerate(cluster_weight_before_min)
     if weight > CLUSTER_START_DEPTH * N
 }
-cluster_active_columns = set(using_merge_ncnt_list) - cluster_thresholded_columns
+cluster_active_columns = set(cluster_column_list) - cluster_thresholded_columns
 filter_active_columns = set(
     nclose_filter_status['stages']['filter']['active_columns']
 )
-selected_columns = set(using_merge_ncnt_list)
+selected_columns = set(cluster_column_list)
 cluster_direct_reasons = {}
 for event_key in nclose_filter_status['event_keys']:
     if event_key in nclose_filter_status['stages']['filter'].get('reasons', {}):
+        continue
+    if event_key in raw_zero_applied_event_keys:
+        cluster_direct_reasons[event_key] = 'FILTERED_24_RAW_READ_ZERO'
         continue
     carriers = carrier_columns(nclose_path_usage, event_key) & filter_active_columns
     selected_carriers = carriers & selected_columns

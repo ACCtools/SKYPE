@@ -4,6 +4,7 @@ The pipeline intentionally keeps the existing internal event keys:
 
 * ordinary BND: ``(left_contig_idx, right_contig_idx)``
 * step-11 INDEL: ``(event_type, event_idx, type2_merge_idx)``
+* graph-only type4 INDEL: ``("type4_graph_indel", ...)``
 
 This lets stages 22, 23, 24, and 31 consume one path-usage representation
 without translating the keys used by the existing filtering code.
@@ -23,6 +24,7 @@ EVENT_CATALOG_PKL = "nclose_event_catalog.pkl"
 PATH_USAGE_PKL = "nclose_path_usage.pkl"
 FILTER_STATUS_PKL = "nclose_filter_status.pkl"
 TYPE4_INDEL_GRAPH_EDGE_PKL = "type4_indel_graph_edges.pkl"
+TYPE4_GRAPH_INDEL_EVENT_PREFIX = "type4_graph_indel"
 VCF_TYPE4_OUTLIER_INDEX_PKL = "vcf_type4_outlier_index.pkl"
 INDEL_MERGE_TOLERANCE = 10_000
 NCLOSE_ID_PREFIX = "SKYPE.nclose."
@@ -267,6 +269,120 @@ def indel_event_key(event_type: str, event_idx: int, type2_merge_idx: int = -1):
     return event_type, int(event_idx), int(type2_merge_idx)
 
 
+def _load_type4_graph_edges(prefix: str) -> list[dict]:
+    edge_path = _artifact_path(prefix, TYPE4_INDEL_GRAPH_EDGE_PKL)
+    if not os.path.isfile(edge_path):
+        return []
+    with open(edge_path, "rb") as handle:
+        edges = pickle.load(handle)
+    if not isinstance(edges, list):
+        raise ValueError(
+            f"Malformed type4 graph edge artifact: {edge_path}"
+        )
+    return edges
+
+
+def type4_graph_indel_event_key(edge: Mapping) -> tuple:
+    type4_tuple = tuple(edge.get("type4_tuple", ()))
+    if len(type4_tuple) == 2:
+        return (
+            TYPE4_GRAPH_INDEL_EVENT_PREFIX,
+            "type4_tuple",
+            int(type4_tuple[0]),
+            int(type4_tuple[1]),
+        )
+
+    chrom = edge.get("base_chrom") or edge.get("chrom")
+    st, nd = sorted((
+        int(edge.get("base_st", edge.get("span_st", 0))),
+        int(edge.get("base_nd", edge.get("span_nd", 0))),
+    ))
+    return (
+        TYPE4_GRAPH_INDEL_EVENT_PREFIX,
+        "span",
+        str(edge.get("contig_name", "")),
+        str(edge.get("indel_kind", "")),
+        str(chrom),
+        st,
+        nd,
+    )
+
+
+def _type4_graph_indel_event(edge: Mapping) -> dict:
+    indel_kind = edge.get("indel_kind")
+    if indel_kind not in {"deletion", "insertion"}:
+        raise ValueError(f"Unknown type4 graph INDEL kind: {indel_kind}")
+    event_type = "front_jump" if indel_kind == "deletion" else "back_jump"
+    chrom = edge.get("base_chrom") or edge.get("chrom")
+    if not chrom:
+        raise ValueError(f"Type4 graph INDEL is missing chromosome: {edge}")
+    st, nd = sorted((
+        int(edge.get("base_st", edge.get("span_st", 0))),
+        int(edge.get("base_nd", edge.get("span_nd", 0))),
+    ))
+    if st == nd:
+        raise ValueError(f"Type4 graph INDEL has an empty span: {edge}")
+
+    if event_type == "front_jump":
+        start_pos, end_pos = st, nd
+    else:
+        start_pos, end_pos = nd, st
+    event = {
+        "event_key": type4_graph_indel_event_key(edge),
+        "kind": "indel",
+        "event_type": event_type,
+        "indel_kind": indel_kind,
+        "start_chr": str(chrom),
+        "start_pos": start_pos,
+        "start_dir": "+",
+        "end_chr": str(chrom),
+        "end_pos": end_pos,
+        "end_dir": "+",
+        "chrom": str(chrom),
+        "st": st,
+        "nd": nd,
+        "contig_name": edge.get("contig_name"),
+        "type4_tuple": tuple(edge.get("type4_tuple", ())),
+        "graph_dimension_increment": int(
+            edge.get("graph_dimension_increment", 1)
+        ),
+        "source": TYPE4_INDEL_GRAPH_EDGE_PKL,
+        "graph_only": True,
+    }
+
+    metadata = edge.get("vcf_event_metadata")
+    if isinstance(metadata, Mapping):
+        for field in (
+            "event_id", "vcf_id", "mate_id", "merged_vcf_ids",
+            "svtype", "nodes", "line_no", "svlen", "reported_svlen",
+        ):
+            if field in metadata:
+                event[field] = metadata[field]
+        if metadata.get("source"):
+            event["origin_source"] = metadata["source"]
+    return event
+
+
+def discover_type4_graph_indel_events(prefix: str) -> list[dict]:
+    """Return one catalog event per graph-selected type4 indel."""
+    events_by_key = {}
+    for edge in _load_type4_graph_edges(prefix):
+        event = _type4_graph_indel_event(edge)
+        event_key = event["event_key"]
+        previous = events_by_key.setdefault(event_key, event)
+        comparable_fields = (
+            "event_type", "indel_kind", "chrom", "st", "nd",
+            "contig_name", "type4_tuple",
+        )
+        if any(previous.get(field) != event.get(field)
+               for field in comparable_fields):
+            raise ValueError(
+                f"Inconsistent directed edges for type4 graph INDEL "
+                f"{event_key}: {previous} != {event}"
+            )
+    return list(events_by_key.values())
+
+
 def _vcf_outlier_index(prefix: str) -> dict:
     path = _artifact_path(prefix, VCF_TYPE4_OUTLIER_INDEX_PKL)
     if not os.path.isfile(path):
@@ -387,6 +503,7 @@ def replace_catalog_indels(prefix: str) -> list[dict]:
         and event.get("source") == "compressed_nclose_nodes_list.txt"
     ]
     catalog.extend(discover_step11_indel_events(prefix))
+    catalog.extend(discover_type4_graph_indel_events(prefix))
     validate_event_catalog(catalog)
     save_event_catalog(prefix, catalog)
     return catalog
@@ -438,14 +555,11 @@ def load_type4_edge_event_map(
     catalog: Sequence[dict],
     tolerance: int = INDEL_MERGE_TOLERANCE,
 ) -> dict:
-    edge_path = _artifact_path(prefix, TYPE4_INDEL_GRAPH_EDGE_PKL)
-    if not os.path.isfile(edge_path):
-        return {}
-    with open(edge_path, "rb") as handle:
-        edges = pickle.load(handle)
+    edges = _load_type4_graph_edges(prefix)
     if not edges:
         return {}
 
+    event_by_key = event_catalog_by_key(catalog)
     indels = [event for event in catalog if event["kind"] == "indel"]
     edge_to_event = {}
     for edge in edges:
@@ -458,24 +572,31 @@ def load_type4_edge_event_map(
             int(edge.get("base_st", edge.get("span_st", 0))),
             int(edge.get("base_nd", edge.get("span_nd", 0))),
         ))
-        candidates = [
-            event for event in indels
-            if event.get("event_type") == event_type
-            and event.get("chrom") == chrom
-            and abs(int(event.get("st", 0)) - st) <= tolerance
-            and abs(int(event.get("nd", 0)) - nd) <= tolerance
-        ]
-        if not candidates:
-            raise ValueError(
-                "Type4 graph edge has no matching emitted step-11 INDEL: "
-                f"{event_type} {chrom}:{st}-{nd}. Rerun stages 02 and 11."
-            )
-        candidates.sort(key=lambda event: (
-            abs(int(event["st"]) - st) + abs(int(event["nd"]) - nd),
-            event["event_key"],
-        ))
+        direct_event_key = type4_graph_indel_event_key(edge)
+        if direct_event_key in event_by_key:
+            event_key = direct_event_key
+        else:
+            # Compatibility with catalogs produced before graph-only indels
+            # received their own event keys.
+            candidates = [
+                event for event in indels
+                if event.get("event_type") == event_type
+                and event.get("chrom") == chrom
+                and abs(int(event.get("st", 0)) - st) <= tolerance
+                and abs(int(event.get("nd", 0)) - nd) <= tolerance
+            ]
+            if not candidates:
+                raise ValueError(
+                    "Type4 graph edge has no matching graph-only catalog "
+                    f"event: {event_type} {chrom}:{st}-{nd}. "
+                    "Rerun stages 02 and 11."
+                )
+            candidates.sort(key=lambda event: (
+                abs(int(event["st"]) - st) + abs(int(event["nd"]) - nd),
+                event["event_key"],
+            ))
+            event_key = candidates[0]["event_key"]
         edge_key = (tuple(edge["src"]), tuple(edge["dst"]))
-        event_key = candidates[0]["event_key"]
         previous = edge_to_event.setdefault(edge_key, event_key)
         if previous != event_key:
             raise ValueError(f"Type4 graph edge maps to multiple INDELs: {edge_key}")

@@ -1032,6 +1032,7 @@ with open(f'{PREFIX}/23_input.pkl', 'rb') as f:
 # path_nclose_set_dict is keyed by matrix column index. Values are canonical event tags:
 # ordinary nclose: (left_contig_idx, right_contig_idx), sorted tuple of ints
 # step-11 INDEL: (event_type, event_idx, type2_merge_idx)
+# graph-only type4 INDEL: ("type4_graph_indel", ...)
 # ecDNA columns include compressed BND tags plus an auxiliary ecDNA identity tag;
 # cent_fragment columns carry only their auxiliary identity tag.
 

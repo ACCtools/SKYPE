@@ -4,10 +4,28 @@ import sys
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from skype_utils import *
+from nclose_tracking import bnd_event_keys, load_event_catalog, load_path_usage
+from reference_path_clustering import (
+    ReferenceSpan,
+    cluster_reference_paths,
+    extract_ordered_reference_spans,
+    is_full_reference_path,
+)
+from reference_path_depth import (
+    PathDepthProfiles,
+    build_cluster_depth_tracks,
+    build_depth_bin_index,
+    load_model_copy_number,
+    observed_copy_number,
+)
+from reference_path_plotting import DEPTH_MODES, render_reference_path_clusters
 
 import numpy as np
 import pandas as pd
-from virtual_sky_plotting import render_karyotype_diagram as render_virtual_sky
+from virtual_sky_plotting import (
+    render_karyotype_diagram as render_virtual_sky,
+    weighted_vaf_read_depth,
+)
 import pickle as pkl
 
 import csv
@@ -71,11 +89,24 @@ NCLOSE_SIM_COMPARE_RATIO = 1.2
 NCLOSE_SIM_DIFF_THRESHOLD = 5
 RAW_TRANSLOCATION_RESULT_PKL = 'raw_translocation_result.pkl'
 RAW_TRANSLOCATION_REPORT_TSV = 'raw_translocation_read_counts.tsv'
+CLUSTER_NCLOSE_COUNT_RESULT_PKL = 'cluster_nclose_count_result.pkl'
+NCLOSE_COUNT_MAX_QUERY_GAP = 5 * K
 
 JOIN_BASELINE = 0.8
 KARYOTYPE_SECTION_MINIMUM_LENGTH = 100 * K
 KARYOTYPE_MIN_SEGMENT_LENGTH = 1 * M  # karyotype 텍스트 표기 시 이보다 짧은 segment/indel 은 무시 (1Mb)
 KARYOTYPE_NORMAL_RATIO = 0.9  # 단일 염색체 path 가 reference 길이의 이 비율 미만이면 normal('1') 대신 del 로 취급
+REFERENCE_PATH_CLUSTER_MIN_OVERLAP = 100 * K
+# reference-sharing cluster 그림 종류. SKYPE_REFSPAN_MODES 로 하나만 골라 그릴 수 있다.
+# plain: 기존 branch graph / lane: lane 안 depth ribbon /
+# profile: chromosome 별 CN 패널 / attribution: region 별 기여도 막대
+REFERENCE_PATH_CLUSTER_FIGURE_MODES = tuple(
+    mode
+    for mode in os.environ.get(
+        'SKYPE_REFSPAN_MODES', 'plain,lane,profile,attribution'
+    ).replace(' ', '').split(',')
+    if mode
+)
 
 CTG_INTYPE_CHECK_MIN_LENGTH = 100 * K
 CTG_INTYPE_INSERT_MIN_SEGMENT_LENGTH = 10 * K
@@ -427,7 +458,7 @@ def infer_path_strand_from_paf_rows(rows : list, idx : int) -> str:
 
     return rows[idx][CTG_DIR] if rows[idx][CTG_DIR] in {'+', '-'} else '+'
 
-def get_ctg_intype_interrupt_pieces(key_int : int, endpoint_chroms : set) -> list:
+def get_ctg_intype_interrupt_rows(key_int : int, endpoint_chroms : set) -> list:
     paf_loc = f"{output_folder}/{key_int}.paf"
     if not os.path.isfile(paf_loc):
         return []
@@ -454,7 +485,7 @@ def get_ctg_intype_interrupt_pieces(key_int : int, endpoint_chroms : set) -> lis
     if not interrupt_chroms:
         return []
 
-    pieces = []
+    selected_rows = []
     for i, (row, length) in enumerate(zip(rows, row_lengths)):
         chrom = row[CHR_NAM]
         if chrom not in interrupt_chroms:
@@ -462,23 +493,80 @@ def get_ctg_intype_interrupt_pieces(key_int : int, endpoint_chroms : set) -> lis
         if length < CTG_INTYPE_INSERT_MIN_SEGMENT_LENGTH:
             continue
         strand = infer_path_strand_from_paf_rows(rows, i)
-        append_ctg_intype_interrupt_piece(pieces, chrom, strand, length)
+        selected_rows.append((row, strand, length))
+    return selected_rows
 
+def get_ctg_intype_interrupt_pieces(key_int : int, endpoint_chroms : set) -> list:
+    pieces = []
+    for row, strand, length in get_ctg_intype_interrupt_rows(
+        key_int, endpoint_chroms
+    ):
+        chrom = row[CHR_NAM]
+        append_ctg_intype_interrupt_piece(pieces, chrom, strand, length)
     return pieces
 
+def get_ctg_intype_interrupt_reference_spans(
+    key_int : int, endpoint_chroms : set
+) -> tuple:
+    return tuple(
+        ReferenceSpan(
+            str(row[CHR_NAM]),
+            min(int(row[CHR_STR]), int(row[CHR_END])),
+            max(int(row[CHR_STR]), int(row[CHR_END])),
+            strand,
+            "interrupt",
+        )
+        for row, strand, _length in get_ctg_intype_interrupt_rows(
+            key_int, endpoint_chroms
+        )
+    )
+
+def get_ctg_intype_key_by_edge(path_path : str) -> dict:
+    key_by_edge = {}
+    for key_int in path2key_int_list.get(path_path, []):
+        key_type, key_value = int2key[key_int]
+        if key_type == CTG_IN_TYPE:
+            key_by_edge[key_value] = key_int
+    return key_by_edge
+
+def get_path_ctg_intype_interrupt_spans(path_path : str) -> dict:
+    path = import_index_path(path_path)
+    key_by_edge = get_ctg_intype_key_by_edge(path_path)
+    spans_by_edge = {}
+    for previous_step, current_step in zip(path, path[1:]):
+        previous_id = previous_step[NODE_NAME] if len(previous_step) >= 4 else None
+        current_id = current_step[NODE_NAME] if len(current_step) >= 4 else None
+        if not isinstance(previous_id, int) or not isinstance(current_id, int):
+            continue
+        edge_key = (
+            (previous_step[0], previous_id),
+            (current_step[0], current_id),
+        )
+        key_int = key_by_edge.get(edge_key)
+        if key_int is None:
+            continue
+        endpoint_chroms = {
+            ppc_data[previous_id][CHR_NAM],
+            ppc_data[current_id][CHR_NAM],
+        }
+        interrupt_spans = get_ctg_intype_interrupt_reference_spans(
+            key_int, endpoint_chroms
+        )
+        if interrupt_spans:
+            spans_by_edge[edge_key] = interrupt_spans
+    return spans_by_edge
+
 def get_karyotype_summary_from_index(path_path : str, type4_edge_to_event_key=None,
-                                     type4_event_by_key=None) -> list:
+                                     type4_event_by_key=None, junction_event_keys=None,
+                                     nclose_boundaries=None) -> list:
     """
     Fallback summary from the compact index path. This keeps the old behavior
     for prefixes that do not have the 21_pat_depth PAF fragments available.
     """
     pieces = []
+    junction_event_keys = set(junction_event_keys or ())
     path = import_index_path(path_path)
-    ctg_intype_key_by_edge = {}
-    for key_int in path2key_int_list.get(path_path, []):
-        key_type, key_value = int2key[key_int]
-        if key_type == CTG_IN_TYPE:
-            ctg_intype_key_by_edge[key_value] = key_int
+    ctg_intype_key_by_edge = get_ctg_intype_key_by_edge(path_path)
     
     # Padding for easier calculation
     if len(path[0]) < 4:
@@ -536,6 +624,18 @@ def get_karyotype_summary_from_index(path_path : str, type4_edge_to_event_key=No
             else:
                 append_karyotype_piece(pieces, curr_chr[0], curr_chr[1], abs(curr_ref - last_node[CHR_STR]), merge=False)
 
+            ordinary_event_key = tuple(sorted((prev_node_name, curr_node_name)))
+            junction_event_key = None
+            if ordinary_event_key in junction_event_keys:
+                junction_event_key = ordinary_event_key
+            elif type4_event_key in junction_event_keys:
+                junction_event_key = type4_event_key
+            if nclose_boundaries is not None and junction_event_key is not None:
+                nclose_boundaries.append((
+                    len(pieces),
+                    junction_event_key,
+                ))
+
             for piece_chr, piece_length in interrupt_pieces:
                 append_karyotype_piece(pieces, piece_chr[0], piece_chr[1], piece_length, merge=True)
                         
@@ -561,7 +661,8 @@ def get_karyotype_summary_from_index(path_path : str, type4_edge_to_event_key=No
     return pieces
 
 def get_karyotype_summary(non_type4_path_list: list, type4_edge_to_event_key=None,
-                          type4_event_by_key=None):
+                          type4_event_by_key=None, junction_event_keys=None,
+                          path_nclose_boundaries=None):
     """
     Summarizes karyotype data from the compact index path. Only CTG_IN_TYPE
     edges are inspected in the expanded PAF fragments to reveal long inserted
@@ -570,10 +671,15 @@ def get_karyotype_summary(non_type4_path_list: list, type4_edge_to_event_key=Non
     karyotypes_data_direction_include = {}
     
     for path_path in non_type4_path_list:
+        nclose_boundaries = []
         pieces = get_karyotype_summary_from_index(
-            path_path, type4_edge_to_event_key, type4_event_by_key
+            path_path, type4_edge_to_event_key, type4_event_by_key,
+            junction_event_keys=junction_event_keys,
+            nclose_boundaries=nclose_boundaries,
         )
         karyotypes_data_direction_include[path_path] = pieces
+        if path_nclose_boundaries is not None:
+            path_nclose_boundaries[path_path] = nclose_boundaries
         
     return karyotypes_data_direction_include
 
@@ -600,6 +706,68 @@ def parse_optional_float(value):
     except (TypeError, ValueError):
         return None
     return parsed if np.isfinite(parsed) else None
+
+def load_cluster_nclose_read_evidence(prefix):
+    result_path = f'{prefix}/{CLUSTER_NCLOSE_COUNT_RESULT_PKL}'
+    if not os.path.isfile(result_path):
+        return None
+
+    with open(result_path, 'rb') as f:
+        records = pkl.load(f)
+
+    evidence = {}
+    for record in records:
+        raw_event_key = record.get('event_key')
+        if raw_event_key is not None:
+            event_key = tuple(raw_event_key)
+        else:
+            try:
+                event_key = tuple(sorted(int(index) for index in record['nclose_key']))
+            except (KeyError, TypeError, ValueError):
+                continue
+        query_gap = record.get('nclose_query_gap')
+        count_available = (
+            query_gap is not None and
+            int(query_gap) <= NCLOSE_COUNT_MAX_QUERY_GAP
+        )
+        if count_available:
+            try:
+                read_count = int(record.get('read_counts', {}).get('d2', 0))
+            except (TypeError, ValueError):
+                read_count = None
+            read_depth = weighted_vaf_read_depth(record)
+        else:
+            read_count = None
+            read_depth = None
+        value = {
+            'junction_reads': read_count,
+            'vaf_read_depth': read_depth,
+        }
+        previous = evidence.setdefault(event_key, value)
+        if previous != value:
+            raise ValueError(
+                f'Conflicting cluster raw-read evidence for NClose {event_key}: '
+                f'{previous} != {value}'
+            )
+        if raw_event_key is not None:
+            node_pair = tuple(sorted(int(index) for index in record.get('nclose_key', ())))
+            if len(node_pair) == 2:
+                previous = evidence.setdefault(node_pair, value)
+                if previous != value:
+                    raise ValueError(
+                        f'Conflicting cluster raw-read evidence for node pair {node_pair}: '
+                        f'{previous} != {value}'
+                    )
+    return evidence
+
+def load_cluster_nclose_read_counts(prefix):
+    evidence = load_cluster_nclose_read_evidence(prefix)
+    if evidence is None:
+        return None
+    return {
+        event_key: value['junction_reads']
+        for event_key, value in evidence.items()
+    }
 
 def load_raw_translocation_report(prefix):
     report_path = f'{prefix}/{RAW_TRANSLOCATION_REPORT_TSV}'
@@ -1193,6 +1361,61 @@ def karyotype_path_to_iscn(pieces : list, type4_indel_events=None):
     return base_iscn
 
 
+def build_reference_cluster_figure_modes() -> tuple:
+    """Validate the requested reference-cluster figure layouts."""
+
+    modes = tuple(
+        mode for mode in REFERENCE_PATH_CLUSTER_FIGURE_MODES if mode in DEPTH_MODES
+    )
+    unknown = set(REFERENCE_PATH_CLUSTER_FIGURE_MODES) - set(DEPTH_MODES)
+    if unknown:
+        logging.warning(
+            'Ignoring unknown SKYPE_REFSPAN_MODES values: %s (known: %s)',
+            ','.join(sorted(unknown)), ','.join(DEPTH_MODES),
+        )
+    return modes or ('plain',)
+
+
+def build_reference_cluster_depth_tracks(
+    *, clusters, path_spans, path_metadata, fig_prefix: str
+) -> dict:
+    """Attach observed, fitted, and per-path depth to each reference cluster.
+
+    Member paths reuse the same separated depth pieces the NNLS matrix was
+    built from, so a route's contribution is read at exactly the windows the
+    solver fitted rather than being re-estimated from the karyotype.
+    """
+
+    bin_index = build_depth_bin_index(df)
+    observed_cn = observed_copy_number(df, meandepth)
+    model_cn = load_model_copy_number(PREFIX, fig_prefix, bin_index, meandepth)
+    profiles = PathDepthProfiles(PREFIX, path2key_int_list, bin_index)
+    tracks = {}
+    for cluster in clusters:
+        try:
+            tracks[cluster.cluster_id] = build_cluster_depth_tracks(
+                members=cluster.members,
+                path_metadata=path_metadata,
+                path_spans=path_spans,
+                bin_index=bin_index,
+                observed_cn=observed_cn,
+                model_cn=model_cn,
+                profiles=profiles,
+            )
+        except KeyError as error:
+            logging.warning(
+                'Reference cluster %s has no depth track: %s',
+                cluster.cluster_id, error,
+            )
+    if profiles.missing_pieces:
+        logging.warning(
+            'Reference cluster depth: %d separated depth files missing (%s...)',
+            len(profiles.missing_pieces),
+            ','.join(str(piece) for piece in profiles.missing_pieces[:5]),
+        )
+    return tracks
+
+
 def build_karyotype_diagram(fig_prefix : str = '', filter_depth_N : float = TARGET_DEPTH):
     weights = np.load(f'{PREFIX}/weight{fig_prefix}.npy')
     loc2weight = dict(zip(tot_loc_list, weights))
@@ -1211,8 +1434,26 @@ def build_karyotype_diagram(fig_prefix : str = '', filter_depth_N : float = TARG
             if w > filter_depth_N * meandepth / 2:
                 non_type4_top_path.append(paf_loc)
 
+    nclose_event_catalog = load_event_catalog(PREFIX)
+    junction_event_keys = bnd_event_keys(nclose_event_catalog) | {
+        event['event_key']
+        for event in nclose_event_catalog
+        if event.get('kind') == 'indel'
+        and event.get('graph_only')
+        and len(event.get('type4_tuple', ())) == 2
+    }
+    junction_event_keys.update(
+        tuple(event['type4_tuple'])
+        for event in nclose_event_catalog
+        if event.get('kind') == 'indel'
+        and event.get('graph_only')
+        and len(event.get('type4_tuple', ())) == 2
+    )
+    path_nclose_boundaries = {}
     karyotypes_data = get_karyotype_summary(
-        non_type4_top_path, type4_edge_to_event_key, type4_event_by_key
+        non_type4_top_path, type4_edge_to_event_key, type4_event_by_key,
+        junction_event_keys=junction_event_keys,
+        path_nclose_boundaries=path_nclose_boundaries,
     )
     shown_type4_indel_weights = type4_indel_graph_weights_for_paths(
         karyotypes_data.keys(), loc2weight, type4_path_event_usage
@@ -1318,7 +1559,31 @@ def build_karyotype_diagram(fig_prefix : str = '', filter_depth_N : float = TARG
             path, type4_edge_to_event_key, type4_event_by_key, maxh
         )
 
-    return render_virtual_sky(
+    path_junction_read_counts = {}
+    path_junction_read_depths = {}
+    path_depth_raw = None
+    if fig_prefix == '_cluster':
+        cluster_nclose_read_evidence = load_cluster_nclose_read_evidence(PREFIX)
+        if cluster_nclose_read_evidence is not None:
+            path_junction_read_depths = {
+                path: [
+                    (
+                        boundary_index,
+                        (
+                            cluster_nclose_read_evidence.get(event_key, {})
+                            .get('vaf_read_depth')
+                        ),
+                    )
+                    for boundary_index, event_key in path_nclose_boundaries.get(path, [])
+                ]
+                for path in karyotypes_data
+            }
+        path_depth_raw = {
+            path: float(loc2weight[path])
+            for path in karyotypes_data
+        }
+
+    render_result = render_virtual_sky(
         output_prefix=PREFIX,
         cell_line=CELL_LINE,
         chromosome_lengths=chr_len,
@@ -1330,8 +1595,102 @@ def build_karyotype_diagram(fig_prefix : str = '', filter_depth_N : float = TARG
         path_depth_n=path_depth_n,
         path_karyotype=path_karyotype,
         path_event_labels=path_event_labels,
+        path_junction_read_counts=path_junction_read_counts,
+        path_junction_read_depths=path_junction_read_depths,
+        path_depth_raw=path_depth_raw,
         fig_prefix=fig_prefix,
     )
+
+    if fig_prefix == '_cluster':
+        ordinary_column_by_path = {
+            path: column
+            for column, (path, _key_int_list) in enumerate(paf_ans_list)
+        }
+        path_usage = load_path_usage(PREFIX, expected_len=len(weights))
+        type4_deletion_edges = {
+            edge
+            for edge, event_key in type4_edge_to_event_key.items()
+            if type4_event_by_key.get(event_key, {}).get('event_type') == 'd'
+        }
+        candidate_spans = {}
+        path_cluster_metadata = {}
+        excluded_full_reference = []
+        for path in karyotypes_data:
+            column = ordinary_column_by_path.get(path)
+            if column is None:
+                raise ValueError(
+                    f'Virtual SKY ordinary path is missing its matrix column: {path}'
+                )
+            spans = extract_ordered_reference_spans(
+                import_index_path(path),
+                ppc_data,
+                forced_break_edges=type4_deletion_edges,
+                interrupt_spans_by_edge=get_path_ctg_intype_interrupt_spans(path),
+            )
+            nclose_count = sum(int(count) for count in path_usage[column].values())
+            full_reference, full_reference_chrom, full_reference_ratio = (
+                is_full_reference_path(
+                    spans,
+                    has_nclose=bool(path_usage[column]),
+                    chromosome_lengths=chr_len,
+                    minimum_ratio=KARYOTYPE_NORMAL_RATIO,
+                )
+            )
+            metadata = {
+                'path_column': column,
+                'location': path,
+                'raw_depth': float(loc2weight[path]),
+                'depth_n': float(path_depth_n[path]),
+                'nclose_count': nclose_count,
+            }
+            if full_reference:
+                excluded_full_reference.append({
+                    **metadata,
+                    'full_reference_chrom': full_reference_chrom,
+                    'full_reference_ratio': full_reference_ratio,
+                })
+                continue
+            candidate_spans[column] = spans
+            path_cluster_metadata[column] = metadata
+
+        reference_clusters, reference_singletons = cluster_reference_paths(
+            candidate_spans,
+            minimum_overlap=REFERENCE_PATH_CLUSTER_MIN_OVERLAP,
+        )
+        figure_modes = build_reference_cluster_figure_modes()
+        cluster_tracks = {}
+        if reference_clusters and set(figure_modes) - {'plain'}:
+            cluster_tracks = build_reference_cluster_depth_tracks(
+                clusters=reference_clusters,
+                path_spans=candidate_spans,
+                path_metadata=path_cluster_metadata,
+                fig_prefix=fig_prefix,
+            )
+            if not cluster_tracks:
+                figure_modes = ('plain',)
+        reference_cluster_result = render_reference_path_clusters(
+            output_prefix=PREFIX,
+            cell_line=CELL_LINE,
+            clusters=reference_clusters,
+            singletons=reference_singletons,
+            path_spans=candidate_spans,
+            path_metadata=path_cluster_metadata,
+            excluded_full_reference=excluded_full_reference,
+            minimum_overlap=REFERENCE_PATH_CLUSTER_MIN_OVERLAP,
+            full_reference_ratio=KARYOTYPE_NORMAL_RATIO,
+            modes=figure_modes,
+            cluster_tracks=cluster_tracks,
+        )
+        logging.info(
+            'Reference-overlap path clusters: %d clusters, %d singleton paths, '
+            '%d full-reference paths excluded',
+            reference_cluster_result['cluster_count'],
+            reference_cluster_result['singleton_count'],
+            reference_cluster_result['excluded_full_reference_count'],
+        )
+        render_result['reference_path_clusters'] = reference_cluster_result
+
+    return render_result
 
 
 parser = argparse.ArgumentParser(description="SKYPE depth analysis")

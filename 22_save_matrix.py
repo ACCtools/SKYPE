@@ -761,6 +761,7 @@ ncnt = 0
 # Matrix column index -> canonical event tags.
 # ordinary nclose: (left_contig_idx, right_contig_idx), sorted tuple of ints
 # step-11 INDEL: (event_type, event_idx, type2_merge_idx)
+# graph-only type4 INDEL: ("type4_graph_indel", ...)
 # ecDNA columns carry their two compressed BND keys; cent/ecDNA identity tags
 # remain only in path_nclose_dict_set for existing downstream path handling.
 path_nclose_dict_set = defaultdict(set)

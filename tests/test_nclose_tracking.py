@@ -19,6 +19,7 @@ from nclose_tracking import (
     count_ecdna_circuit_events,
     count_index_path_events,
     discover_step11_indel_events,
+    discover_type4_graph_indel_events,
     ecdna_circuit_event_keys,
     format_nclose_ids,
     initialise_filter_status,
@@ -280,6 +281,44 @@ class NCloseUsageTests(unittest.TestCase):
                 pickle.dump([edge], handle)
             mapping = load_type4_edge_event_map(prefix, catalog)
         self.assertEqual(mapping, {((0, 11), (0, 12)): indel_key})
+
+    def test_type4_graph_edge_gets_graph_only_catalog_event(self):
+        edges = [
+            {
+                "src": (1, 11), "dst": (1, 12),
+                "type4_tuple": (11, 12),
+                "indel_kind": "deletion",
+                "base_chrom": "chr7", "base_st": 100, "base_nd": 200,
+                "contig_name": "ctg7",
+                "graph_dimension_increment": 1,
+            },
+            {
+                "src": (0, 12), "dst": (0, 11),
+                "type4_tuple": (11, 12),
+                "indel_kind": "deletion",
+                "base_chrom": "chr7", "base_st": 100, "base_nd": 200,
+                "contig_name": "ctg7",
+                "graph_dimension_increment": 1,
+            },
+        ]
+        with tempfile.TemporaryDirectory() as prefix:
+            with open(os.path.join(prefix, "type4_indel_graph_edges.pkl"), "wb") as handle:
+                pickle.dump(edges, handle)
+            catalog = discover_type4_graph_indel_events(prefix)
+            mapping = load_type4_edge_event_map(prefix, catalog)
+
+        self.assertEqual(len(catalog), 1)
+        event = catalog[0]
+        self.assertTrue(event["graph_only"])
+        self.assertEqual(event["source"], "type4_indel_graph_edges.pkl")
+        self.assertEqual(event["event_type"], "front_jump")
+        self.assertEqual(
+            mapping,
+            {
+                ((1, 11), (1, 12)): event["event_key"],
+                ((0, 12), (0, 11)): event["event_key"],
+            },
+        )
 
 
 class NCloseStatusAndReportTests(unittest.TestCase):

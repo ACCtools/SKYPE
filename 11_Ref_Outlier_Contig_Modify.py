@@ -4,7 +4,10 @@ import pickle as pkl
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from skype_utils import *
-from nclose_tracking import replace_catalog_indels
+from nclose_tracking import (
+    discover_type4_graph_indel_events,
+    replace_catalog_indels,
+)
 
 import re
 import logging
@@ -408,9 +411,32 @@ for event in vcf_type4_events + vcf_bnd_type4_events:
 
 emitted_indel_candidates = []
 merged_indel_candidates = []
+graph_excluded_indel_candidates = []
 vcf_type4_outlier_index = {}
+graph_indel_events = discover_type4_graph_indel_events(args.prefix)
+graph_indel_candidates = [
+    make_indel_candidate(
+        event['event_type'],
+        event['chrom'],
+        event['st'],
+        event['nd'],
+        f"graph:{event['event_key']}",
+    )
+    for event in graph_indel_events
+]
+
+
+def matching_graph_indel_candidate(candidate):
+    for graph_candidate in graph_indel_candidates:
+        if same_indel_candidate(candidate, graph_candidate):
+            return graph_candidate
+    return None
 
 def should_emit_indel_candidate(candidate):
+    graph_candidate = matching_graph_indel_candidate(candidate)
+    if graph_candidate is not None:
+        graph_excluded_indel_candidates.append((candidate, graph_candidate))
+        return False
     for prev in emitted_indel_candidates:
         if same_indel_candidate(candidate, prev):
             merged_indel_candidates.append((candidate, prev))
@@ -424,8 +450,8 @@ cntbj = 0
 while s<contig_data_size:
     e = contig_data[s][CTG_ENDND]
 
-    # These flanks make the same VCF event traversable by step 02; the
-    # canonical event below still owns the single step-11 outlier entry.
+    # Synthetic VCF graph flanks and graph-selected native type4 events are
+    # represented by ordinary graph paths, not standalone step-11 columns.
     is_vcf_graph_only_type4 = str(contig_data[s][CTG_NAM]).startswith(
         VCF_TYPE4_GRAPH_NODE_PREFIX
     )
@@ -501,6 +527,18 @@ for event in unique_vcf_type4_events:
             "Skipping VCF Indel event below the step-11 threshold "
             f"({event_size} < {VCF_TYPE4_MIN_SPAN}): {event}"
         )
+        continue
+
+    candidate = make_indel_candidate(
+        event_type,
+        chrom,
+        ref_st,
+        ref_nd,
+        f"vcf:{event.get('vcf_id', event.get('event_id', 'unknown'))}",
+    )
+    graph_candidate = matching_graph_indel_candidate(candidate)
+    if graph_candidate is not None:
+        graph_excluded_indel_candidates.append((candidate, graph_candidate))
         continue
 
     base_row = make_base_paf_row(chrom, ref_st, ref_nd)
@@ -606,6 +644,12 @@ logging.info(f"Backward-directed outlier contig count : {cntbj}")
 logging.info(f"VCF-derived Indel outlier count : {len(vcf_type4_outlier_index)}")
 logging.info(f"VCF BND-derived Indel outlier count : {len(vcf_bnd_type4_events)}")
 logging.info(f"Merged duplicate indel candidate count : {len(merged_indel_candidates)}")
+logging.info(
+    "Graph-selected type4 Indels excluded from step 11 : %d candidate(s), "
+    "%d graph event(s)",
+    len(graph_excluded_indel_candidates),
+    len(graph_indel_events),
+)
 for candidate, prev in merged_indel_candidates[:20]:
     logging.debug(
         "Merged duplicate indel candidate "
