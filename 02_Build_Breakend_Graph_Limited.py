@@ -2656,6 +2656,29 @@ def pass_pipeline(pre_contig_data, telo_dict, telo_bound_dict, repeat_data, repe
 
 
 
+def nclose_compression_layout(st_chr, ed_chr, st, ed, st_interval, ed_interval):
+    """Return the legacy compression bucket and stored endpoint order."""
+    st_chr_order = chr2int(st_chr[1])
+    ed_chr_order = chr2int(ed_chr[1])
+    same_chrom = st_chr_order == ed_chr_order
+    store_path_order = (
+        st_chr_order < ed_chr_order
+        or (same_chrom and st_interval <= ed_interval)
+    )
+    if store_path_order:
+        return (st_chr, ed_chr), (st, ed), same_chrom
+    return (ed_chr, st_chr), (ed, st), same_chrom
+
+
+def nclose_merge_alignment(path_nodes, stored_nodes, same_chrom, representative):
+    """Return candidate nodes and representative payload slots for merge tracking."""
+    if not same_chrom:
+        return stored_nodes, (1, 2)
+    if representative[3] < representative[4]:
+        return path_nodes, (1, 2)
+    return path_nodes, (2, 1)
+
+
 def extract_nclose_node(contig_data : list, bnd_contig : set, repeat_contig_name : set, \
                         censat_contig_name : set, repeat_censat_data : dict, ALIGNED_PAF_LOC_LIST : list, ORIGINAL_PAF_LOC_LIST : list, \
                         telo_set : set, telo_contig : dict, chr_len : dict, asm2cov : dict) -> tuple:
@@ -2907,333 +2930,126 @@ def extract_nclose_node(contig_data : list, bnd_contig : set, repeat_contig_name
                         asm2cov[upd_contig_name] = -1
                         cov_count_name = upd_contig_name
                     is_curr_ctg_repeat = upd_contig_name in repeat_contig_name
-                    if chr2int(st_chr[1]) < chr2int(ed_chr[1]): 
-                        for i in nclose_compress[(st_chr, ed_chr)]:
-                            if is_curr_ctg_repeat and i[0] in repeat_contig_name:
-                                compress_limit = ALL_REPEAT_NCLOSE_COMPRESS_LIMIT
-                            else:
-                                compress_limit = NCLOSE_COMPRESS_LIMIT
-                            dummy_list = [0,0,0,0,0,0,0,]
-                            if distance_checker(contig_data[st], dummy_list+i[1]) < compress_limit \
-                            and distance_checker(contig_data[ed], dummy_list + i[2]) < compress_limit \
-                            and nclose_canon_dir(st, ed) == nclose_canon_dir(i[3], i[4]):
-                                sorted_tar_tuple = tuple(sorted((i[3], i[4])))
-                                nclose_coverage[sorted_tar_tuple] += asm2cov[cov_count_name]
-                                nclose_compress_track[sorted_tar_tuple].append((st, ed))
-                                flag = False
-                                break
-                        # passed first filtering
-                        if flag:
-                            censat_st_chr = [st_chr[0], 0]
-                            censat_ed_chr = [ed_chr[0], 0]
-                            if contig_s[CTG_CENSAT] != '0':
-                                cnt = 0
-                                for censat_ref_range in repeat_censat_data[contig_data[st][CHR_NAM]]:
-                                    if inclusive_checker_tuple(censat_ref_range, (contig_data[st][CHR_STR], contig_data[st][CHR_END])):
-                                        censat_st_chr[1] = contig_data[st][CHR_NAM] + "." + str(cnt)
-                                        break
-                                    cnt+=1
-                            if contig_e[CTG_CENSAT] != '0':
-                                cnt = 0
-                                for censat_ref_range in repeat_censat_data[contig_data[ed][CHR_NAM]]:
-                                    if inclusive_checker_tuple(censat_ref_range, (contig_data[ed][CHR_STR], contig_data[ed][CHR_END])):
-                                        censat_ed_chr[1] = contig_data[ed][CHR_NAM] + "." + str(cnt)
-                                        break
-                                    cnt+=1
-                            # at least one of nclose is not censat
-                            if censat_st_chr[1] == 0 \
-                            or censat_ed_chr[1] == 0 :
-                                temp_list = [upd_contig_name, 
-                                            [contig_data[st][CHR_STR], contig_data[st][CHR_END]], 
-                                            [contig_data[ed][CHR_STR], contig_data[ed][CHR_END]], st, ed]
-                                for i in nclose_compress[(st_chr, ed_chr)]:
-                                    dummy_list = [0,0,0,0,0,0,0,]
-                                    flag = False
-                                    if distance_checker(contig_data[st], dummy_list+i[1]) < NCLOSE_MERGE_LIMIT:
-                                        flag = True
-                                        nclose_start_compress[(st_chr, ed_chr)][i[0]].append(contig_data[s][CTG_NAM])
-                                    if distance_checker(contig_data[ed], dummy_list+i[2]) < NCLOSE_MERGE_LIMIT:
-                                        flag = True
-                                        nclose_end_compress[(st_chr, ed_chr)][i[0]].append(contig_data[s][CTG_NAM])
-                                    if flag:
-                                        break
-                                nclose_compress[(st_chr, ed_chr)].append(temp_list)
-                                nclose_coverage[(st, ed)] += asm2cov[cov_count_name]
-                                nclose_dict[contig_data[s][CTG_NAM]].append((st, ed))
-                            # both are censat
-                            else:
-                                key = (tuple(censat_st_chr), tuple(censat_ed_chr))
-                                # if censat only one can survive
-                                if key not in censat_nclose_compress:
-                                    censat_nclose_compress.add(key)
-                                    temp_list = [upd_contig_name, 
-                                            [contig_data[st][CHR_STR], contig_data[st][CHR_END]], 
-                                            [contig_data[ed][CHR_STR], contig_data[ed][CHR_END]], st, ed]
-                                    for i in nclose_compress[(st_chr, ed_chr)]:
-                                        dummy_list = [0,0,0,0,0,0,0,]
-                                        flag = False
-                                        if distance_checker(contig_data[st], dummy_list+i[1]) < NCLOSE_MERGE_LIMIT:
-                                            flag = True
-                                            nclose_start_compress[(st_chr, ed_chr)][i[0]].append(contig_data[s][CTG_NAM])
-                                        if distance_checker(contig_data[ed], dummy_list+i[2]) < NCLOSE_MERGE_LIMIT:
-                                            flag = True
-                                            nclose_end_compress[(st_chr, ed_chr)][i[0]].append(contig_data[s][CTG_NAM])
-                                        if flag:
-                                            break
-                                    nclose_compress[(st_chr, ed_chr)].append(temp_list)
-                                    nclose_coverage[(st, ed)] += asm2cov[cov_count_name]
-                                    nclose_dict[contig_data[s][CTG_NAM]].append((st, ed))
-                    elif chr2int(st_chr[1]) > chr2int(ed_chr[1]):
-                        for i in nclose_compress[(ed_chr, st_chr)]:
-                            if is_curr_ctg_repeat and i[0] in repeat_contig_name:
-                                compress_limit = ALL_REPEAT_NCLOSE_COMPRESS_LIMIT
-                            else:
-                                compress_limit = NCLOSE_COMPRESS_LIMIT
-                            dummy_list = [0,0,0,0,0,0,0,]
-                            if distance_checker(contig_data[st], dummy_list+i[2]) < compress_limit \
-                            and distance_checker(contig_data[ed], dummy_list + i[1]) < compress_limit \
-                            and nclose_canon_dir(ed, st) == nclose_canon_dir(i[3], i[4]):
-                                sorted_tar_tuple = tuple(sorted((i[3], i[4])))
-                                nclose_coverage[sorted_tar_tuple] += asm2cov[cov_count_name]
-                                nclose_compress_track[sorted_tar_tuple].append((st, ed))
-                                flag = False
-                                break
-                        if flag:
-                            censat_st_chr = [st_chr[0], 0]
-                            censat_ed_chr = [ed_chr[0], 0]
-                            if contig_s[CTG_CENSAT] != '0':
-                                cnt = 0
-                                for censat_ref_range in repeat_censat_data[contig_data[st][CHR_NAM]]:
-                                    if inclusive_checker_tuple(censat_ref_range, (contig_data[st][CHR_STR], contig_data[st][CHR_END])):
-                                        censat_st_chr[1] = contig_data[st][CHR_NAM] + "." + str(cnt)
-                                        break
-                                    cnt+=1
-                            if contig_e[CTG_CENSAT] != '0':
-                                cnt = 0
-                                for censat_ref_range in repeat_censat_data[contig_data[ed][CHR_NAM]]:
-                                    if inclusive_checker_tuple(censat_ref_range, (contig_data[ed][CHR_STR], contig_data[ed][CHR_END])):
-                                        censat_ed_chr[1] = contig_data[ed][CHR_NAM] + "." + str(cnt)
-                                        break
-                                    cnt+=1
-                            if censat_st_chr[1] == 0 \
-                            or censat_ed_chr[1] == 0 :
-                                temp_list = [upd_contig_name,
-                                        [contig_data[ed][CHR_STR], contig_data[ed][CHR_END]], 
-                                        [contig_data[st][CHR_STR], contig_data[st][CHR_END]], ed, st]
-                                for i in nclose_compress[(ed_chr, st_chr)]:
-                                    dummy_list = [0,0,0,0,0,0,0,]
-                                    flag = False
-                                    if distance_checker(contig_data[ed], dummy_list+i[1]) < NCLOSE_MERGE_LIMIT:
-                                        nclose_start_compress[(ed_chr, st_chr)][i[0]].append(contig_data[s][CTG_NAM])
-                                        flag = True
-                                    if distance_checker(contig_data[st], dummy_list+i[2]) < NCLOSE_MERGE_LIMIT:
-                                        nclose_end_compress[(ed_chr, st_chr)][i[0]].append(contig_data[s][CTG_NAM])
-                                        flag = True
-                                    if flag:
-                                        break
-                                nclose_coverage[(st, ed)] += asm2cov[cov_count_name]
-                                nclose_compress[(ed_chr, st_chr)].append(temp_list)
-                                nclose_dict[contig_data[s][CTG_NAM]].append((st, ed))
-                            else:
-                                key = (tuple(censat_st_chr), tuple(censat_ed_chr))
-                                if key not in censat_nclose_compress:
-                                    censat_nclose_compress.add(key)
-                                    temp_list = [upd_contig_name,
-                                        [contig_data[ed][CHR_STR], contig_data[ed][CHR_END]], 
-                                        [contig_data[st][CHR_STR], contig_data[st][CHR_END]], ed, st]
-                                    for i in nclose_compress[(ed_chr, st_chr)]:
-                                        dummy_list = [0,0,0,0,0,0,0,]
-                                        flag = False
-                                        if distance_checker(contig_data[ed], dummy_list+i[1]) < NCLOSE_MERGE_LIMIT:
-                                            nclose_start_compress[(ed_chr, st_chr)][i[0]].append(contig_data[s][CTG_NAM])
-                                            flag = True
-                                        if distance_checker(contig_data[st], dummy_list+i[2]) < NCLOSE_MERGE_LIMIT:
-                                            nclose_end_compress[(ed_chr, st_chr)][i[0]].append(contig_data[s][CTG_NAM])
-                                            flag = True
-                                        if flag:
-                                            break
-                                    nclose_coverage[(st, ed)] += asm2cov[cov_count_name]
-                                    nclose_compress[(ed_chr, st_chr)].append(temp_list)
-                                    nclose_dict[contig_data[s][CTG_NAM]].append((st, ed))
-                    else:
-                        if (contig_data[st][CHR_STR], contig_data[st][CHR_END]) <= (contig_data[ed][CHR_STR], contig_data[ed][CHR_END]):
-                            for i in nclose_compress[(st_chr, ed_chr)]:
-                                if is_curr_ctg_repeat and i[0] in repeat_contig_name:
-                                    compress_limit = ALL_REPEAT_NCLOSE_COMPRESS_LIMIT
-                                else:
-                                    compress_limit = NCLOSE_COMPRESS_LIMIT
-                                dummy_list = [0,0,0,0,0,0,0,]
-                                if distance_checker(contig_data[st], dummy_list+i[1]) < compress_limit \
-                                and distance_checker(contig_data[ed], dummy_list + i[2]) < compress_limit:
-                                    sorted_tar_tuple = tuple(sorted((i[3], i[4])))
-                                    nclose_coverage[sorted_tar_tuple] += asm2cov[cov_count_name]
-                                    nclose_compress_track[sorted_tar_tuple].append((st, ed))
-                                    flag = False
-                                    break
-                            if flag:
-                                censat_st_chr = [st_chr[0], 0]
-                                censat_ed_chr = [ed_chr[0], 0]
-                                if contig_s[CTG_CENSAT] != '0':
-                                    cnt = 0
-                                    for censat_ref_range in repeat_censat_data[contig_data[st][CHR_NAM]]:
-                                        if inclusive_checker_tuple(censat_ref_range, (contig_data[st][CHR_STR], contig_data[st][CHR_END])):
-                                            censat_st_chr[1] = contig_data[st][CHR_NAM] + "." + str(cnt)
-                                            break
-                                        cnt+=1
-                                if contig_e[CTG_CENSAT] != '0':
-                                    cnt = 0
-                                    for censat_ref_range in repeat_censat_data[contig_data[ed][CHR_NAM]]:
-                                        if inclusive_checker_tuple(censat_ref_range, (contig_data[ed][CHR_STR], contig_data[ed][CHR_END])):
-                                            censat_ed_chr[1] = contig_data[ed][CHR_NAM] + "." + str(cnt)
-                                            break
-                                        cnt+=1
-                                if censat_st_chr[1] == 0 \
-                                or censat_ed_chr[1] == 0 :
-                                    temp_list = [upd_contig_name, 
-                                            [contig_data[st][CHR_STR], contig_data[st][CHR_END]], 
-                                            [contig_data[ed][CHR_STR], contig_data[ed][CHR_END]], st, ed]
-                                    for i in nclose_compress[(st_chr, ed_chr)]:
-                                        dummy_list = [0,0,0,0,0,0,0,]
-                                        flag = False
-                                        if i[3] < i[4]:
-                                            if distance_checker(contig_data[st], dummy_list+i[1]) < NCLOSE_MERGE_LIMIT:
-                                                flag = True
-                                                nclose_start_compress[(st_chr, ed_chr)][i[0]].append(contig_data[s][CTG_NAM])
-                                            if distance_checker(contig_data[ed], dummy_list+i[2]) < NCLOSE_MERGE_LIMIT:
-                                                flag = True
-                                                nclose_end_compress[(st_chr, ed_chr)][i[0]].append(contig_data[s][CTG_NAM])
-                                            if flag:
-                                                break
-                                        else:
-                                            if distance_checker(contig_data[st], dummy_list+i[2]) < NCLOSE_MERGE_LIMIT:
-                                                flag = True
-                                                nclose_start_compress[(st_chr, ed_chr)][i[0]].append(contig_data[s][CTG_NAM])
-                                            if distance_checker(contig_data[ed], dummy_list+i[1]) < NCLOSE_MERGE_LIMIT:
-                                                flag = True
-                                                nclose_end_compress[(st_chr, ed_chr)][i[0]].append(contig_data[s][CTG_NAM])
-                                            if flag:
-                                                break
-                                    nclose_coverage[(st, ed)] += asm2cov[cov_count_name]
-                                    nclose_compress[(st_chr, ed_chr)].append(temp_list)
-                                    nclose_dict[contig_data[s][CTG_NAM]].append((st, ed))      
-                                else:
-                                    key = (tuple(censat_st_chr), tuple(censat_ed_chr))
-                                    if key not in censat_nclose_compress:
-                                        censat_nclose_compress.add(key)
-                                        temp_list = [upd_contig_name, 
-                                            [contig_data[st][CHR_STR], contig_data[st][CHR_END]], 
-                                            [contig_data[ed][CHR_STR], contig_data[ed][CHR_END]], st, ed]
-                                        for i in nclose_compress[(st_chr, ed_chr)]:
-                                            dummy_list = [0,0,0,0,0,0,0,]
-                                            flag = False
-                                            if i[3] < i[4]:
-                                                if distance_checker(contig_data[st], dummy_list+i[1]) < NCLOSE_MERGE_LIMIT:
-                                                    flag = True
-                                                    nclose_start_compress[(st_chr, ed_chr)][i[0]].append(contig_data[s][CTG_NAM])
-                                                if distance_checker(contig_data[ed], dummy_list+i[2]) < NCLOSE_MERGE_LIMIT:
-                                                    flag = True
-                                                    nclose_end_compress[(st_chr, ed_chr)][i[0]].append(contig_data[s][CTG_NAM])
-                                                if flag:
-                                                    break
-                                            else:
-                                                if distance_checker(contig_data[st], dummy_list+i[2]) < NCLOSE_MERGE_LIMIT:
-                                                    flag = True
-                                                    nclose_start_compress[(st_chr, ed_chr)][i[0]].append(contig_data[s][CTG_NAM])
-                                                if distance_checker(contig_data[ed], dummy_list+i[1]) < NCLOSE_MERGE_LIMIT:
-                                                    flag = True
-                                                    nclose_end_compress[(st_chr, ed_chr)][i[0]].append(contig_data[s][CTG_NAM])
-                                                if flag:
-                                                    break
-                                        nclose_coverage[(st, ed)] += asm2cov[cov_count_name]
-                                        nclose_compress[(st_chr, ed_chr)].append(temp_list)
-                                        nclose_dict[contig_data[s][CTG_NAM]].append((st, ed))  
+                    path_nodes = (st, ed)
+                    st_interval = (contig_data[st][CHR_STR], contig_data[st][CHR_END])
+                    ed_interval = (contig_data[ed][CHR_STR], contig_data[ed][CHR_END])
+                    bucket, stored_nodes, same_chrom = nclose_compression_layout(
+                        st_chr, ed_chr, st, ed, st_interval, ed_interval
+                    )
+                    stored_st, stored_ed = stored_nodes
+                    representatives = nclose_compress[bucket]
+
+                    is_duplicate = False
+                    for representative in representatives:
+                        if is_curr_ctg_repeat and representative[0] in repeat_contig_name:
+                            compress_limit = ALL_REPEAT_NCLOSE_COMPRESS_LIMIT
                         else:
-                            for i in nclose_compress[(ed_chr, st_chr)]:
-                                if is_curr_ctg_repeat and i[0] in repeat_contig_name:
-                                    compress_limit = ALL_REPEAT_NCLOSE_COMPRESS_LIMIT
-                                else:
-                                    compress_limit = NCLOSE_COMPRESS_LIMIT
-                                dummy_list = [0,0,0,0,0,0,0,]
-                                if distance_checker(contig_data[st], dummy_list+i[2]) < compress_limit \
-                                and distance_checker(contig_data[ed], dummy_list + i[1]) < compress_limit:
-                                    sorted_tar_tuple = tuple(sorted((i[3], i[4])))
-                                    nclose_coverage[sorted_tar_tuple] += asm2cov[cov_count_name]
-                                    nclose_compress_track[sorted_tar_tuple].append((st, ed))
-                                    flag = False
-                                    break
-                            if flag:
-                                censat_st_chr = [st_chr[0], 0]
-                                censat_ed_chr = [ed_chr[0], 0]
-                                if contig_s[CTG_CENSAT] != '0':
-                                    cnt = 0
-                                    for censat_ref_range in repeat_censat_data[contig_data[st][CHR_NAM]]:
-                                        if inclusive_checker_tuple(censat_ref_range, (contig_data[st][CHR_STR], contig_data[st][CHR_END])):
-                                            censat_st_chr[1] = contig_data[st][CHR_NAM] + "." + str(cnt)
-                                            break
-                                        cnt+=1
-                                if contig_e[CTG_CENSAT] != '0':
-                                    cnt = 0
-                                    for censat_ref_range in repeat_censat_data[contig_data[ed][CHR_NAM]]:
-                                        if inclusive_checker_tuple(censat_ref_range, (contig_data[ed][CHR_STR], contig_data[ed][CHR_END])):
-                                            censat_ed_chr[1] = contig_data[ed][CHR_NAM] + "." + str(cnt)
-                                            break
-                                        cnt+=1
-                                if censat_st_chr[1] == 0 \
-                                or censat_ed_chr[1] == 0 :
-                                    temp_list = [upd_contig_name,
-                                            [contig_data[ed][CHR_STR], contig_data[ed][CHR_END]], 
-                                            [contig_data[st][CHR_STR], contig_data[st][CHR_END]], ed, st]
-                                    for i in nclose_compress[(ed_chr, st_chr)]:
-                                        dummy_list = [0,0,0,0,0,0,0,]
-                                        flag = False
-                                        if i[3] > i[4]:
-                                            if distance_checker(contig_data[st], dummy_list+i[2]) < NCLOSE_MERGE_LIMIT:
-                                                nclose_start_compress[(st_chr, ed_chr)][i[0]].append(contig_data[s][CTG_NAM])
-                                                flag = True
-                                            if distance_checker(contig_data[ed], dummy_list+i[1]) < NCLOSE_MERGE_LIMIT:
-                                                nclose_end_compress[(st_chr, ed_chr)][i[0]].append(contig_data[s][CTG_NAM])
-                                                flag = True
-                                        else:
-                                            if distance_checker(contig_data[st], dummy_list+i[1]) < NCLOSE_MERGE_LIMIT:
-                                                nclose_start_compress[(st_chr, ed_chr)][i[0]].append(contig_data[s][CTG_NAM])
-                                                flag = True
-                                            if distance_checker(contig_data[ed], dummy_list+i[2]) < NCLOSE_MERGE_LIMIT:
-                                                nclose_end_compress[(st_chr, ed_chr)][i[0]].append(contig_data[s][CTG_NAM])
-                                                flag = True
-                                        if flag:
-                                            break
-                                    nclose_coverage[(st, ed)] += asm2cov[cov_count_name]
-                                    nclose_compress[(ed_chr, st_chr)].append(temp_list)
-                                    nclose_dict[contig_data[s][CTG_NAM]].append((st, ed))     
-                                else:
-                                    key = (tuple(censat_st_chr), tuple(censat_ed_chr))
-                                    if key not in censat_nclose_compress:
-                                        censat_nclose_compress.add(key)
-                                        temp_list = [upd_contig_name,
-                                            [contig_data[ed][CHR_STR], contig_data[ed][CHR_END]], 
-                                            [contig_data[st][CHR_STR], contig_data[st][CHR_END]], ed, st]
-                                        for i in nclose_compress[(ed_chr, st_chr)]:
-                                            dummy_list = [0,0,0,0,0,0,0,]
-                                            flag = False
-                                            if i[3] > i[4]:
-                                                if distance_checker(contig_data[st], dummy_list+i[2]) < NCLOSE_MERGE_LIMIT:
-                                                    nclose_start_compress[(st_chr, ed_chr)][i[0]].append(contig_data[s][CTG_NAM])
-                                                    flag = True
-                                                if distance_checker(contig_data[ed], dummy_list+i[1]) < NCLOSE_MERGE_LIMIT:
-                                                    nclose_end_compress[(st_chr, ed_chr)][i[0]].append(contig_data[s][CTG_NAM])
-                                                    flag = True
-                                            else:
-                                                if distance_checker(contig_data[st], dummy_list+i[1]) < NCLOSE_MERGE_LIMIT:
-                                                    nclose_start_compress[(st_chr, ed_chr)][i[0]].append(contig_data[s][CTG_NAM])
-                                                    flag = True
-                                                if distance_checker(contig_data[ed], dummy_list+i[2]) < NCLOSE_MERGE_LIMIT:
-                                                    nclose_end_compress[(st_chr, ed_chr)][i[0]].append(contig_data[s][CTG_NAM])
-                                                    flag = True
-                                            if flag:
-                                                break
-                                        nclose_coverage[(st, ed)] += asm2cov[cov_count_name]
-                                        nclose_compress[(ed_chr, st_chr)].append(temp_list)
-                                        nclose_dict[contig_data[s][CTG_NAM]].append((st, ed))
+                            compress_limit = NCLOSE_COMPRESS_LIMIT
+                        dummy_list = [0, 0, 0, 0, 0, 0, 0]
+                        if (
+                            distance_checker(
+                                contig_data[stored_st], dummy_list + representative[1]
+                            ) < compress_limit
+                            and distance_checker(
+                                contig_data[stored_ed], dummy_list + representative[2]
+                            ) < compress_limit
+                            and (
+                                same_chrom
+                                or nclose_canon_dir(stored_st, stored_ed)
+                                == nclose_canon_dir(
+                                    representative[3], representative[4]
+                                )
+                            )
+                        ):
+                            representative_path = tuple(sorted(
+                                (representative[3], representative[4])
+                            ))
+                            nclose_coverage[representative_path] += asm2cov[cov_count_name]
+                            nclose_compress_track[representative_path].append((st, ed))
+                            is_duplicate = True
+                            break
+                    if is_duplicate:
+                        continue
+
+                    censat_st_chr = [st_chr[0], 0]
+                    censat_ed_chr = [ed_chr[0], 0]
+                    # Keep the legacy outer-contig CENSAT gate in phase 1.
+                    if contig_s[CTG_CENSAT] != '0':
+                        cnt = 0
+                        for censat_ref_range in repeat_censat_data[contig_data[st][CHR_NAM]]:
+                            if inclusive_checker_tuple(
+                                censat_ref_range,
+                                (contig_data[st][CHR_STR], contig_data[st][CHR_END]),
+                            ):
+                                censat_st_chr[1] = (
+                                    contig_data[st][CHR_NAM] + "." + str(cnt)
+                                )
+                                break
+                            cnt += 1
+                    if contig_e[CTG_CENSAT] != '0':
+                        cnt = 0
+                        for censat_ref_range in repeat_censat_data[contig_data[ed][CHR_NAM]]:
+                            if inclusive_checker_tuple(
+                                censat_ref_range,
+                                (contig_data[ed][CHR_STR], contig_data[ed][CHR_END]),
+                            ):
+                                censat_ed_chr[1] = (
+                                    contig_data[ed][CHR_NAM] + "." + str(cnt)
+                                )
+                                break
+                            cnt += 1
+
+                    if censat_st_chr[1] != 0 and censat_ed_chr[1] != 0:
+                        # This key intentionally remains in path order.
+                        censat_key = (
+                            tuple(censat_st_chr),
+                            tuple(censat_ed_chr),
+                        )
+                        if censat_key in censat_nclose_compress:
+                            continue
+                        censat_nclose_compress.add(censat_key)
+
+                    temp_list = [
+                        upd_contig_name,
+                        [
+                            contig_data[stored_st][CHR_STR],
+                            contig_data[stored_st][CHR_END],
+                        ],
+                        [
+                            contig_data[stored_ed][CHR_STR],
+                            contig_data[stored_ed][CHR_END],
+                        ],
+                        stored_st,
+                        stored_ed,
+                    ]
+                    for representative in representatives:
+                        merge_nodes, representative_slots = nclose_merge_alignment(
+                            path_nodes, stored_nodes, same_chrom, representative
+                        )
+                        dummy_list = [0, 0, 0, 0, 0, 0, 0]
+                        merged = False
+                        if distance_checker(
+                            contig_data[merge_nodes[0]],
+                            dummy_list + representative[representative_slots[0]],
+                        ) < NCLOSE_MERGE_LIMIT:
+                            nclose_start_compress[bucket][representative[0]].append(
+                                contig_data[s][CTG_NAM]
+                            )
+                            merged = True
+                        if distance_checker(
+                            contig_data[merge_nodes[1]],
+                            dummy_list + representative[representative_slots[1]],
+                        ) < NCLOSE_MERGE_LIMIT:
+                            nclose_end_compress[bucket][representative[0]].append(
+                                contig_data[s][CTG_NAM]
+                            )
+                            merged = True
+                        if merged:
+                            break
+
+                    nclose_compress[bucket].append(temp_list)
+                    nclose_coverage[(st, ed)] += asm2cov[cov_count_name]
+                    nclose_dict[contig_data[s][CTG_NAM]].append((st, ed))
         s = e+1
     return nclose_dict, nclose_start_compress, nclose_end_compress, fake_bnd, all_nclose_compress, nclose_coverage, nclose_compress_track
 
