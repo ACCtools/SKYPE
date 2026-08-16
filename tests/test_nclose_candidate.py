@@ -1,7 +1,15 @@
 from __future__ import annotations
 
+import ast
+import logging
+import os
+import pickle
+import tempfile
 import unittest
 from collections import defaultdict
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 from nclose_candidate import (
     NCloseCandidate,
@@ -10,6 +18,52 @@ from nclose_candidate import (
     endpoint_metadata,
     iter_legacy_candidates,
 )
+
+
+BUILD_GRAPH_PATH = (
+    Path(__file__).resolve().parents[1] / "02_Build_Breakend_Graph_Limited.py"
+)
+
+
+def ordered_direct_calls(function_name):
+    tree = ast.parse(BUILD_GRAPH_PATH.read_text(encoding="utf-8"))
+    function = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == function_name
+    )
+    calls = sorted(
+        (node for node in ast.walk(function) if isinstance(node, ast.Call)),
+        key=lambda node: (node.lineno, node.col_offset),
+    )
+    return [
+        (call.func.id, call.lineno)
+        for call in calls
+        if isinstance(call.func, ast.Name)
+    ]
+
+
+def load_stage02_function(function_name, **extra_globals):
+    tree = ast.parse(BUILD_GRAPH_PATH.read_text(encoding="utf-8"))
+    function = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == function_name
+    )
+    namespace = {
+        "apply_nclose_filter": apply_nclose_filter,
+        "logging": logging,
+        **extra_globals,
+    }
+    exec(
+        compile(
+            ast.Module(body=[function], type_ignores=[]),
+            str(BUILD_GRAPH_PATH),
+            "exec",
+        ),
+        namespace,
+    )
+    return namespace[function_name]
 
 
 def node(repeat_chrom="0", repeat_case="0", censat="0"):
@@ -76,6 +130,36 @@ class NCloseCandidateTests(unittest.TestCase):
         self.assertIsInstance(round_trip, defaultdict)
         self.assertEqual(list(round_trip.items()), list(legacy.items()))
 
+    def test_legacy_adapter_preserves_duplicate_occurrences_and_pair_order(self):
+        candidates = [
+            NCloseCandidate(
+                "owner_b",
+                (9, 4),
+                provenance={"source": "primary"},
+            ),
+            NCloseCandidate(
+                "owner_b",
+                (9, 4),
+                provenance={"source": "secondary"},
+            ),
+            NCloseCandidate("owner_b", (4, 9)),
+            NCloseCandidate("owner_a", (7, 1)),
+        ]
+
+        legacy = candidates_to_legacy(candidates)
+
+        self.assertEqual(
+            list(legacy.items()),
+            [
+                ("owner_b", [(9, 4), (9, 4), (4, 9)]),
+                ("owner_a", [(7, 1)]),
+            ],
+        )
+        self.assertEqual(
+            [candidate.identity for candidate in iter_legacy_candidates(legacy)],
+            [candidate.identity for candidate in candidates],
+        )
+
     def test_endpoint_metadata_is_live_and_in_path_order(self):
         contig_data = [
             node("chr1", "r", "0"),
@@ -117,6 +201,190 @@ class NCloseCandidateTests(unittest.TestCase):
         self.assertEqual(candidate.origin, "combined_censat_noncensat")
         self.assertEqual(candidate.provenance["parent_event_keys"], ((3, 8),))
 
+    def test_append_and_remove_are_stable_for_duplicates_and_synthetic_provenance(self):
+        primary = NCloseCandidate(
+            "shared-owner",
+            (8, 3),
+            origin="paf",
+            provenance={"source": "primary"},
+        )
+        secondary = NCloseCandidate(
+            "shared-owner",
+            (8, 3),
+            origin="paf",
+            provenance={"source": "secondary"},
+        )
+        combined = NCloseCandidate(
+            "combined-owner",
+            (20, 21),
+            origin="combined_censat_noncensat",
+            synthetic=True,
+            provenance={"parent_event_keys": ((3, 8),)},
+        )
+        rescue = NCloseCandidate(
+            "rescue-owner",
+            (30, 31),
+            origin="censat_pair_rescue",
+            synthetic=True,
+            provenance={"source_query": "unitig-7"},
+        )
+
+        candidates = [primary, secondary]
+        candidates.extend([combined, rescue])
+        without_secondary, first_rejections = apply_nclose_filter(
+            candidates,
+            "source_filter",
+            lambda candidate: (
+                "secondary"
+                if candidate.provenance.get("source") == "secondary"
+                else None
+            ),
+        )
+        final, second_rejections = apply_nclose_filter(
+            without_secondary,
+            "synthetic_filter",
+            lambda candidate: (
+                "combined"
+                if candidate.origin == "combined_censat_noncensat"
+                else None
+            ),
+        )
+
+        self.assertEqual(
+            [candidate.identity for candidate in candidates],
+            [
+                ("shared-owner", (8, 3)),
+                ("shared-owner", (8, 3)),
+                ("combined-owner", (20, 21)),
+                ("rescue-owner", (30, 31)),
+            ],
+        )
+        self.assertIs(first_rejections[0].candidate, secondary)
+        self.assertIs(second_rejections[0].candidate, combined)
+        self.assertEqual(final, [primary, rescue])
+        self.assertIs(final[0], primary)
+        self.assertIs(final[1], rescue)
+        self.assertEqual(final[1].origin, "censat_pair_rescue")
+        self.assertTrue(final[1].synthetic)
+        self.assertEqual(final[1].provenance, {"source_query": "unitig-7"})
+
+    def test_event_key_filter_removes_every_duplicate_and_reverse_occurrence(self):
+        first = NCloseCandidate("owner-a", (8, 3), origin="paf")
+        duplicate = NCloseCandidate(
+            "owner-a",
+            (8, 3),
+            origin="paf",
+            provenance={"occurrence": 2},
+        )
+        reverse = NCloseCandidate("owner-b", (3, 8), origin="paf")
+        survivor = NCloseCandidate("owner-c", (9, 7), origin="paf")
+
+        kept, rejected = apply_nclose_filter(
+            [first, duplicate, reverse, survivor],
+            "bam_event_key",
+            lambda candidate: (
+                "bam_rejected" if candidate.event_key == (3, 8) else None
+            ),
+        )
+
+        self.assertEqual(kept, [survivor])
+        self.assertIs(kept[0], survivor)
+        self.assertEqual(
+            [rejection.candidate for rejection in rejected],
+            [first, duplicate, reverse],
+        )
+        self.assertEqual(
+            [rejection.candidate.event_key for rejection in rejected],
+            [(3, 8), (3, 8), (3, 8)],
+        )
+
+    def test_raw_virtual_inversion_filter_uses_event_key_without_deduping(self):
+        subprocess = SimpleNamespace(
+            run=Mock(return_value=SimpleNamespace(returncode=0))
+        )
+        collect_pairs = Mock(return_value={(3, 8)})
+        apply_filter = load_stage02_function(
+            "apply_raw_virtual_inversion_filter",
+            SKIP_BAM_ANAL=False,
+            JULIA_BAM_THREAD_LIM=2,
+            THREAD=4,
+            args=SimpleNamespace(progress=False),
+            subprocess=subprocess,
+            os=os,
+            PREFIX="/output",
+            read_bam_loc="reads.bam",
+            CHROMOSOME_INFO_FILE_PATH="reference.fai",
+            main_stat_loc="depth.txt",
+            collect_raw_virtual_inv_nclose_pairs=collect_pairs,
+            __file__=str(BUILD_GRAPH_PATH),
+        )
+        first = NCloseCandidate("owner-a", (8, 3), origin="paf")
+        duplicate = NCloseCandidate(
+            "owner-a",
+            (8, 3),
+            origin="paf",
+            provenance={"occurrence": 2},
+        )
+        reverse = NCloseCandidate("owner-b", (3, 8), origin="paf")
+        survivor = NCloseCandidate(
+            "owner-c",
+            (9, 7),
+            origin="censat_pair_rescue",
+            synthetic=True,
+        )
+
+        kept = apply_filter([first, duplicate, reverse, survivor])
+
+        self.assertEqual(kept, [survivor])
+        self.assertIs(kept[0], survivor)
+        collect_pairs.assert_called_once_with("/output")
+
+    def test_user_exclusion_removes_all_owner_occurrences_in_file_order(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            prefix = Path(tmp_dir)
+            exclusion_path = prefix / "exclude.txt"
+            exclusion_path.write_text(
+                "owner-b\nowner-b\nINDEL_INDEX_7\nmissing\nowner-a\n",
+                encoding="utf-8",
+            )
+            logger = Mock()
+            apply_exclusions = load_stage02_function(
+                "apply_user_nclose_exclusions",
+                args=SimpleNamespace(
+                    exclude_nclose_list_loc=str(exclusion_path)
+                ),
+                PREFIX=str(prefix),
+                pkl=pickle,
+                logging=logger,
+            )
+            owner_a_first = NCloseCandidate("owner-a", (1, 2))
+            owner_b = NCloseCandidate("owner-b", (3, 4))
+            owner_a_second = NCloseCandidate(
+                "owner-a",
+                (5, 6),
+                provenance={"occurrence": 2},
+            )
+            survivor = NCloseCandidate(
+                "owner-c",
+                (7, 8),
+                origin="combined_censat_noncensat",
+                synthetic=True,
+            )
+
+            kept, indel_indices = apply_exclusions(
+                [owner_a_first, owner_b, owner_a_second, survivor]
+            )
+
+            self.assertEqual(kept, [survivor])
+            self.assertIs(kept[0], survivor)
+            self.assertEqual(indel_indices, {7})
+            self.assertEqual(
+                logger.warning.call_args_list[0].args[0],
+                "Skipped contig : owner-b, owner-a",
+            )
+            with (prefix / "indel_exclude_idx_set.pkl").open("rb") as handle:
+                self.assertEqual(pickle.load(handle), {7})
+
     def test_filter_order_and_first_rejection_are_stable(self):
         candidates = [
             NCloseCandidate("a", (0, 1)),
@@ -157,6 +425,39 @@ class NCloseCandidateTests(unittest.TestCase):
             "FILTERED_02_CENSAT_MAPQ",
         )
         self.assertEqual(second_rejections[0].candidate.contig_name, "a")
+
+    def test_nclose_calc_materializes_legacy_only_at_final_output_boundary(self):
+        calls = ordered_direct_calls("nclose_calc")
+        call_names = [name for name, _ in calls]
+
+        self.assertEqual(
+            call_names.count("candidates_to_legacy"),
+            1,
+            "Candidate-native processing must have one final legacy conversion",
+        )
+        self.assertNotIn(
+            "refresh_nclose_candidates",
+            call_names,
+            "nclose_calc must not reconcile repeated Candidate/legacy round trips",
+        )
+        self.assertNotIn("iter_legacy_candidates", call_names)
+
+        conversion_pos = call_names.index("candidates_to_legacy")
+        final_output_pos = call_names.index("finalize_nclose_outputs")
+        self.assertLess(conversion_pos, final_output_pos)
+        for candidate_stage in (
+            "apply_offset_direction_mismatched_censat_noncensat_filter",
+            "add_censat_pair_rescue_ncloses",
+            "apply_nclose_count_vaf_filter",
+            "apply_raw_virtual_inversion_filter",
+            "apply_user_nclose_exclusions",
+        ):
+            self.assertIn(candidate_stage, call_names)
+            self.assertLess(
+                call_names.index(candidate_stage),
+                conversion_pos,
+                f"{candidate_stage} must run on Candidate objects",
+            )
 
 
 if __name__ == "__main__":
