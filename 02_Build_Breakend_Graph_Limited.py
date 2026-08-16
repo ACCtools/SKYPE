@@ -192,6 +192,7 @@ class NCloseSourceConfig:
     paf_file_paths: tuple
     original_paf_paths: tuple
     is_unitig_reduced: bool
+    secondary_candidate_paf: str | None
 
 
 @dataclass
@@ -236,6 +237,18 @@ class PregraphState:
     source: NCloseSourceConfig
     ori_ctg_name_data: list
     nclose: NCloseBuildResult
+
+
+@dataclass
+class GraphAttemptState:
+    """All graph-derived state tied to one concrete pregraph build."""
+
+    pregraph: PregraphState
+    nonzero_telo_set: set
+    selected_type4_indel_graph_edges: list
+    type4_indel_zero_dim_edge_set: set
+    graph_nclose_nodes: object
+    bnd_graph_adjacency: object
 
 
 @dataclass(frozen=True)
@@ -2767,17 +2780,88 @@ def nclose_compression_layout(st_chr, ed_chr, st, ed, st_interval, ed_interval):
         or (same_chrom and st_interval <= ed_interval)
     )
     if store_path_order:
-        return (st_chr, ed_chr), (st, ed), same_chrom
-    return (ed_chr, st_chr), (ed, st), same_chrom
+        return (st_chr, ed_chr), (st, ed), same_chrom, True
+    return (ed_chr, st_chr), (ed, st), same_chrom, False
 
 
 def nclose_merge_alignment(path_nodes, stored_nodes, same_chrom, representative):
     """Return candidate nodes and representative payload slots for merge tracking."""
     if not same_chrom:
         return stored_nodes, (1, 2)
-    if representative[3] < representative[4]:
+    if representative[6]:
         return path_nodes, (1, 2)
     return path_nodes, (2, 1)
+
+
+def nclose_merge_direction_matches(
+    contig_data,
+    candidate_node,
+    representative,
+    representative_payload_slot,
+):
+    """Compare one path-aligned endpoint in its unmodified query frame."""
+
+    representative_node = representative[representative_payload_slot + 2]
+    return (
+        contig_data[candidate_node][CTG_DIR]
+        == contig_data[representative_node][CTG_DIR]
+    )
+
+
+def nclose_canonical_directions(
+    contig_data,
+    path_nodes,
+    stored_nodes,
+    canonical_order_tied=False,
+):
+    """Return endpoint directions in the stored breakend frame."""
+
+    path_directions = tuple(
+        contig_data[node_idx][CTG_DIR]
+        for node_idx in path_nodes
+    )
+    if stored_nodes == path_nodes:
+        canonical_directions = path_directions
+    elif stored_nodes == tuple(reversed(path_nodes)):
+        canonical_directions = tuple(
+            _flip_ctg_dir(direction)
+            for direction in reversed(path_directions)
+        )
+    else:
+        raise ValueError(
+            f"Stored NClose nodes {stored_nodes} do not match path {path_nodes}"
+        )
+
+    if not canonical_order_tied:
+        return canonical_directions
+    reverse_complement = tuple(
+        _flip_ctg_dir(direction)
+        for direction in reversed(canonical_directions)
+    )
+    return min(canonical_directions, reverse_complement)
+
+
+def nclose_compression_candidate_matches(
+    contig_data,
+    stored_nodes,
+    canonical_directions,
+    representative,
+    compress_limit,
+):
+    """Match coordinates and the complete canonical direction signature."""
+
+    dummy_list = [0, 0, 0, 0, 0, 0, 0]
+    return (
+        distance_checker(
+            contig_data[stored_nodes[0]],
+            dummy_list + representative[1],
+        ) < compress_limit
+        and distance_checker(
+            contig_data[stored_nodes[1]],
+            dummy_list + representative[2],
+        ) < compress_limit
+        and canonical_directions == representative[5]
+    )
 
 
 def extract_nclose_node(contig_data : list, bnd_contig : set, repeat_contig_name : set, \
@@ -2798,17 +2882,12 @@ def extract_nclose_node(contig_data : list, bnd_contig : set, repeat_contig_name
     for i in telo_set:
         telo_name_set.add(contig_data[i][CTG_NAM])
 
-    # [RECIPROCAL FIX] nclose 방향 정규화: '작은 염색체 노드를 먼저 읽는' 프레임의 (low_dir, high_dir).
+    # [RECIPROCAL FIX] nclose 방향 정규화: canonical stored frame의 endpoint 방향.
     # all_nclose 출력의 get_corr_dir 와 동일 규칙이라 reverse-complement 대칭을 자동 보장한다
     # (예: chr12+ -> chr15+ 와 chr15- -> chr12- 는 같은 값으로 정규화됨).
     # balanced reciprocal translocation 두 산물(예: der(12) vs der(15))은 같은 breakpoint를
     # 공유해 좌표만으로는 구분되지 않으므로(distance_checker 가 겹침을 0으로 봄), 압축 병합
     # 판정에 이 정규화 방향을 함께 비교해 한쪽이 통째로 버려지는 것을 막는다.
-    def nclose_canon_dir(low_node, high_node):
-        is_for = low_node < high_node
-        return (get_corr_dir(is_for, contig_data[low_node][CTG_DIR]),
-                get_corr_dir(is_for, contig_data[high_node][CTG_DIR]))
-
     div_repeat_paf_name = div_repeat_paf(ORIGINAL_PAF_LOC_LIST, ALIGNED_PAF_LOC_LIST, contig_data)
 
     while s<contig_data_size:
@@ -3034,11 +3113,24 @@ def extract_nclose_node(contig_data : list, bnd_contig : set, repeat_contig_name
                     path_nodes = (st, ed)
                     st_interval = (contig_data[st][CHR_STR], contig_data[st][CHR_END])
                     ed_interval = (contig_data[ed][CHR_STR], contig_data[ed][CHR_END])
-                    bucket, stored_nodes, same_chrom = nclose_compression_layout(
+                    (
+                        bucket,
+                        stored_nodes,
+                        same_chrom,
+                        stored_in_path_order,
+                    ) = nclose_compression_layout(
                         st_chr, ed_chr, st, ed, st_interval, ed_interval
                     )
                     stored_st, stored_ed = stored_nodes
                     representatives = nclose_compress[bucket]
+                    canonical_directions = nclose_canonical_directions(
+                        contig_data,
+                        path_nodes,
+                        stored_nodes,
+                        canonical_order_tied=(
+                            same_chrom and st_interval == ed_interval
+                        ),
+                    )
 
                     is_duplicate = False
                     for representative in representatives:
@@ -3046,21 +3138,12 @@ def extract_nclose_node(contig_data : list, bnd_contig : set, repeat_contig_name
                             compress_limit = ALL_REPEAT_NCLOSE_COMPRESS_LIMIT
                         else:
                             compress_limit = NCLOSE_COMPRESS_LIMIT
-                        dummy_list = [0, 0, 0, 0, 0, 0, 0]
-                        if (
-                            distance_checker(
-                                contig_data[stored_st], dummy_list + representative[1]
-                            ) < compress_limit
-                            and distance_checker(
-                                contig_data[stored_ed], dummy_list + representative[2]
-                            ) < compress_limit
-                            and (
-                                same_chrom
-                                or nclose_canon_dir(stored_st, stored_ed)
-                                == nclose_canon_dir(
-                                    representative[3], representative[4]
-                                )
-                            )
+                        if nclose_compression_candidate_matches(
+                            contig_data,
+                            stored_nodes,
+                            canonical_directions,
+                            representative,
+                            compress_limit,
                         ):
                             representative_path = tuple(sorted(
                                 (representative[3], representative[4])
@@ -3122,6 +3205,8 @@ def extract_nclose_node(contig_data : list, bnd_contig : set, repeat_contig_name
                         ],
                         stored_st,
                         stored_ed,
+                        canonical_directions,
+                        stored_in_path_order,
                     ]
                     for representative in representatives:
                         merge_nodes, representative_slots = nclose_merge_alignment(
@@ -3129,18 +3214,42 @@ def extract_nclose_node(contig_data : list, bnd_contig : set, repeat_contig_name
                         )
                         dummy_list = [0, 0, 0, 0, 0, 0, 0]
                         merged = False
-                        if distance_checker(
-                            contig_data[merge_nodes[0]],
-                            dummy_list + representative[representative_slots[0]],
-                        ) < NCLOSE_MERGE_LIMIT:
+                        start_direction_matches = (
+                            not same_chrom
+                            or nclose_merge_direction_matches(
+                                contig_data,
+                                merge_nodes[0],
+                                representative,
+                                representative_slots[0],
+                            )
+                        )
+                        if (
+                            start_direction_matches
+                            and distance_checker(
+                                contig_data[merge_nodes[0]],
+                                dummy_list + representative[representative_slots[0]],
+                            ) < NCLOSE_MERGE_LIMIT
+                        ):
                             nclose_start_compress[bucket][representative[0]].append(
                                 contig_data[s][CTG_NAM]
                             )
                             merged = True
-                        if distance_checker(
-                            contig_data[merge_nodes[1]],
-                            dummy_list + representative[representative_slots[1]],
-                        ) < NCLOSE_MERGE_LIMIT:
+                        end_direction_matches = (
+                            not same_chrom
+                            or nclose_merge_direction_matches(
+                                contig_data,
+                                merge_nodes[1],
+                                representative,
+                                representative_slots[1],
+                            )
+                        )
+                        if (
+                            end_direction_matches
+                            and distance_checker(
+                                contig_data[merge_nodes[1]],
+                                dummy_list + representative[representative_slots[1]],
+                            ) < NCLOSE_MERGE_LIMIT
+                        ):
                             nclose_end_compress[bucket][representative[0]].append(
                                 contig_data[s][CTG_NAM]
                             )
@@ -3341,7 +3450,13 @@ def write_virtual_ordinary_contig(path: str, contig_data: list) -> None:
                 print(field, end="\t", file=f)
             print("", file=f)
     
-def initialize_bnd_graph(contig_data : list, nclose_nodes : dict, telo_contig : dict) -> dict:
+def initialize_bnd_graph(
+    contig_data : list,
+    nclose_nodes : dict,
+    telo_contig : dict,
+    contig_data_size : int,
+    chr_rev_corr : dict,
+) -> dict:
     # Build telo direction lookup: telo_idx → 'f' or 'b'
     telo_dir_map = {}
     for telo_name in telo_contig:
@@ -3700,7 +3815,10 @@ def circuit_length_calculator(circuit):
         circuit_len += abs(contig_data[curr_node][CHR_END] - contig_data[next_node][CHR_STR])
     return circuit_len
 
-def contig_preprocessing_00(PAF_FILE_PATH_ : list):
+def contig_preprocessing_00(
+    PAF_FILE_PATH_ : list,
+    secondary_candidate_paf,
+):
 
     original_node_count = 0
     excluded_telomere_origins = set()
@@ -3862,8 +3980,8 @@ def contig_preprocessing_00(PAF_FILE_PATH_ : list):
     total_len = len(real_final_contig)
 
     # alt process
-    if args.alt != None:
-        contig_data = import_data(PAF_FILE_PATH_[1])
+    if secondary_candidate_paf is not None:
+        contig_data = import_data(secondary_candidate_paf)
         excluded_contigs, excluded_rows = find_multi_end_aligned_contigs(contig_data)
         excluded_telomere_origins.update((1, row_idx) for row_idx in excluded_rows)
         if excluded_contigs:
@@ -4707,6 +4825,17 @@ def extract_raw_censat_type2_candidates(paf_path, repeat_censat_data):
         })
 
     return candidates
+
+
+def extract_source_censat_type2_candidates(source, repeat_censat_data):
+    """Read optional type2 evidence only from the active source contract."""
+
+    if source.secondary_candidate_paf is None:
+        return []
+    return extract_raw_censat_type2_candidates(
+        source.secondary_candidate_paf,
+        repeat_censat_data,
+    )
 
 def connected_type2_endpoint_for_template(template_contig, template_side, type2_pair):
     type2_front, type2_back = type2_pair
@@ -7424,7 +7553,7 @@ def finalize_nclose_outputs(
     return translocation_pair_count, node_count
 
 
-def nclose_calc(telo_coverage):
+def nclose_calc(telo_coverage, source):
     repeat_censat_data = import_censat_repeat_data(CENSAT_PATH)
     chr_len = find_chr_len(CHROMOSOME_INFO_FILE_PATH)
     contig_data = import_data2(PREPROCESSED_PAF_FILE_PATH)
@@ -7574,8 +7703,8 @@ def nclose_calc(telo_coverage):
             nclose_nodes,
             cen_fragment_meta_for_filter,
         )
-        raw_censat_type2_candidates = extract_raw_censat_type2_candidates(
-            args.alt,
+        raw_censat_type2_candidates = extract_source_censat_type2_candidates(
+            source,
             repeat_censat_data,
         )
         combined_added = add_nearest_combined_censat_noncensat_ncloses(
@@ -7650,7 +7779,8 @@ def nclose_calc(telo_coverage):
     if (
         REQUESTED_PIPELINE_MODE == PIPELINE_MODE_KARYOTYPE
         and args.vcf_input is None
-        and args.alt is not None
+        and source.mode == PregraphSourceMode.CONFIGURED_PAF
+        and source.secondary_candidate_paf is not None
         and not is_unitig_reduced
         and len(PAF_FILE_PATH) > 1
         and len(ORIGINAL_PAF_LOC_LIST) > 1
@@ -7665,8 +7795,8 @@ def nclose_calc(telo_coverage):
             repeat_censat_data,
             chr_len,
             cen_fragment_meta_for_filter,
-            PAF_FILE_PATH[1],
-            ORIGINAL_PAF_LOC_LIST[1],
+            source.secondary_candidate_paf,
+            source.original_paf_paths[1],
             CENSAT_PATH,
             PREPROCESSED_PAF_FILE_PATH,
         )
@@ -7796,6 +7926,7 @@ def resolve_pregraph_source(
             ),
             original_paf_paths=(),
             is_unitig_reduced=False,
+            secondary_candidate_paf=None,
         )
     if mode == PregraphSourceMode.PRIMARY_ONLY_RETRY:
         primary_original_paf = original_paf_paths[0]
@@ -7804,6 +7935,7 @@ def resolve_pregraph_source(
             paf_file_paths=(primary_paf, primary_paf),
             original_paf_paths=(primary_original_paf, primary_original_paf),
             is_unitig_reduced=True,
+            secondary_candidate_paf=None,
         )
 
     paf_file_paths = (primary_paf,) if alt_paf is None else (primary_paf, alt_paf)
@@ -7812,6 +7944,7 @@ def resolve_pregraph_source(
         paf_file_paths=paf_file_paths,
         original_paf_paths=original_paf_paths,
         is_unitig_reduced=False,
+        secondary_candidate_paf=alt_paf,
     )
 
 
@@ -7837,8 +7970,11 @@ def build_pregraph_state(source):
         ori_names = get_ori_ctg_name_data(PAF_FILE_PATH)
         # Legacy preprocessing reads this lookup while it is building nodes.
         ori_ctg_name_data = ori_names
-        preprocessed_telo_coverage = contig_preprocessing_00(PAF_FILE_PATH)
-        nclose_result = nclose_calc(preprocessed_telo_coverage)
+        preprocessed_telo_coverage = contig_preprocessing_00(
+            PAF_FILE_PATH,
+            secondary_candidate_paf=source.secondary_candidate_paf,
+        )
+        nclose_result = nclose_calc(preprocessed_telo_coverage, source)
     return PregraphState(
         source=source,
         ori_ctg_name_data=ori_names,
@@ -7911,6 +8047,168 @@ def rebuild_primary_only_pregraph_state():
     return build_and_activate_pregraph_state(
         PregraphSourceMode.PRIMARY_ONLY_RETRY
     )
+
+
+def build_nonzero_telo_set(prefix, contig_data, chr_len):
+    """Build the node-indexed telomere penalty set for one pregraph result."""
+
+    connected_nodes = extract_telomere_connect_contig_bytuple(
+        f"{prefix}/telomere_connected_list.txt"
+    )
+    telo_data = import_telo_data(TELOMERE_INFO_FILE_PATH, chr_len)
+    telo_dict = defaultdict(list)
+    for telo_record in telo_data:
+        telo_dict[telo_record[0]].append(telo_record[1:])
+
+    telo_bounds = defaultdict(list)
+    for chrom, records in telo_dict.items():
+        for record in records:
+            telo_bounds[chrom + record[-1]].append([record[0], record[1]])
+
+    lengths_by_telo = defaultdict(list)
+    for telo_name, node_idx in connected_nodes:
+        telo_length = 1e9
+        for telo_bed in telo_bounds[telo_name]:
+            telo_length = min(
+                telo_length,
+                distance_checker_tuple(
+                    tuple(telo_bed),
+                    (
+                        contig_data[node_idx][CHR_STR],
+                        contig_data[node_idx][CHR_END],
+                    ),
+                ),
+            )
+        lengths_by_telo[telo_name].append(
+            (node_idx, telo_length, telo_name)
+        )
+
+    nonzero_telo_set = set()
+    for telo_length_list in lengths_by_telo.values():
+        sorted_lengths = sorted(telo_length_list, key=lambda item: item[1])
+        for node_idx, length_value, _ in sorted_lengths[1:]:
+            if length_value > 0:
+                nonzero_telo_set.add(node_idx)
+    return nonzero_telo_set
+
+
+def build_graph_attempt_state(pregraph):
+    """Rebuild every node-indexed graph input for one pregraph attempt."""
+
+    activate_pregraph_state(pregraph)
+    result = pregraph.nclose
+    attempt_nonzero_telo_set = build_nonzero_telo_set(
+        PREFIX,
+        result.contig_data,
+        result.chr_len,
+    )
+
+    selected_edges = []
+    zero_dim_edge_set = set()
+    graph_nodes = result.nclose_nodes
+    canonical_nclose_before_indel_graph = canonical_nclose_snapshot(
+        result.nclose_nodes
+    )
+    if args.add_indel_graph:
+        type4_candidates = collect_type4_indel_graph_candidates(
+            result.contig_data,
+            result.df,
+            result.repeat_censat_data,
+        )
+        selected_edges = select_type4_indel_graph_edges(
+            result.contig_data,
+            result.nclose_nodes,
+            type4_candidates,
+        )
+        graph_nodes = augment_nclose_nodes_with_type4_indels(
+            result.nclose_nodes,
+            selected_edges,
+        )
+        zero_dim_edge_set = get_type4_indel_zero_dim_edge_set(selected_edges)
+        selected_kind_by_tuple = {
+            edge['type4_tuple']: edge['indel_kind']
+            for edge in selected_edges
+        }
+        selected_kind_count = Counter(selected_kind_by_tuple.values())
+        candidate_kind_count = Counter(
+            candidate['indel_kind']
+            for candidate in type4_candidates
+        )
+        logging.info(
+            f'Added {len(zero_dim_edge_set)} type4 indel graph edges '
+            f'from {len(selected_kind_by_tuple)} selected type4 indel events '
+            f'({dict(selected_kind_count)} selected; '
+            f'{len(type4_candidates)} depth-supported candidates '
+            f'{dict(candidate_kind_count)} >= {TYPE4_INDEL_GRAPH_MIN_SPAN} bp)'
+        )
+
+    if (
+        canonical_nclose_snapshot(result.nclose_nodes)
+        != canonical_nclose_before_indel_graph
+    ):
+        raise AssertionError(
+            "--add_indel_graph mutated canonical nclose_nodes; Indel-like edges "
+            "must remain graph-only"
+        )
+    if args.vcf_input is not None:
+        assert_vcf_nclose_has_no_indel_like(
+            result.contig_data,
+            result.nclose_nodes,
+            "post --add_indel_graph canonical nclose",
+        )
+        if args.add_indel_graph:
+            non_vcf_graph_edges = [
+                edge
+                for edge in selected_edges
+                if not str(edge.get('contig_name', '')).startswith(
+                    VCF_TYPE4_GRAPH_NODE_PREFIX
+                )
+            ]
+            if non_vcf_graph_edges:
+                raise AssertionError(
+                    "VCF --add_indel_graph selected an edge outside graph-only "
+                    f"VCF nodes: {non_vcf_graph_edges[:2]}"
+                )
+
+    adjacency = initialize_bnd_graph(
+        result.contig_data,
+        graph_nodes,
+        result.telo_contig,
+        result.contig_data_size,
+        result.chr_rev_corr,
+    )
+    with open(f'{PREFIX}/{TYPE4_INDEL_GRAPH_EDGE_PKL}', 'wb') as f:
+        pkl.dump(selected_edges, f)
+
+    return GraphAttemptState(
+        pregraph=pregraph,
+        nonzero_telo_set=attempt_nonzero_telo_set,
+        selected_type4_indel_graph_edges=selected_edges,
+        type4_indel_zero_dim_edge_set=zero_dim_edge_set,
+        graph_nclose_nodes=graph_nodes,
+        bnd_graph_adjacency=adjacency,
+    )
+
+
+def activate_graph_attempt_state(attempt):
+    """Activate a coherent pregraph/graph pair for graph path enumeration."""
+
+    global nonzero_telo_set, selected_type4_indel_graph_edges
+    global type4_indel_zero_dim_edge_set, graph_nclose_nodes
+    global bnd_graph_adjacency
+    activate_pregraph_state(attempt.pregraph)
+    nonzero_telo_set = attempt.nonzero_telo_set
+    selected_type4_indel_graph_edges = \
+        attempt.selected_type4_indel_graph_edges
+    type4_indel_zero_dim_edge_set = attempt.type4_indel_zero_dim_edge_set
+    graph_nclose_nodes = attempt.graph_nclose_nodes
+    bnd_graph_adjacency = attempt.bnd_graph_adjacency
+
+
+def build_and_activate_graph_attempt_state(pregraph):
+    attempt = build_graph_attempt_state(pregraph)
+    activate_graph_attempt_state(attempt)
+    return attempt
 
 def import_bed(bed_path: str) -> dict:
     bed_data_file = open(bed_path, "r")
@@ -8102,35 +8400,6 @@ else:
         PregraphSourceMode.CONFIGURED_PAF
     )
 
-telo_connected_node_tuple = extract_telomere_connect_contig_bytuple(PREFIX+"/telomere_connected_list.txt")
-chr_fb_len_dict = defaultdict(list)
-
-telo_data = import_telo_data(TELOMERE_INFO_FILE_PATH, chr_len)
-telo_dict = defaultdict(list)
-for _ in telo_data:
-    telo_dict[_[0]].append(_[1:])
-
-telo_fb_dict = defaultdict(list)
-for k, v in telo_dict.items():
-    for i in v:
-        telo_fb_dict[k+i[-1]].append([i[0], i[1]])
-
-for chr_dir, node_id in telo_connected_node_tuple:
-    telo_len = 1e9
-    for telo_bed in telo_fb_dict[chr_dir]:
-        telo_len = min(telo_len, distance_checker_tuple(tuple(telo_bed), (contig_data[node_id][CHR_STR], contig_data[node_id][CHR_END])))
-    chr_fb_len_dict[chr_dir].append((node_id, telo_len, chr_dir))
-
-telo_len_data = []
-nonzero_telo_set = set()
-for chr_dir, telo_len_list in chr_fb_len_dict.items():
-    s_telo_len_list = sorted(telo_len_list, key=lambda t: t[1])
-    telo_len_data.extend(filter(lambda t: t[1] > 0, s_telo_len_list[1:]))
-
-for idx, len_value, chr in telo_len_data:
-    if len_value > 0:
-        nonzero_telo_set.add(idx)
-
 if args.vcf_input is None and nclose_node_count > FAIL_NCLOSE_COUNT:
     logging.info("NClose node count is too high.")
     if len(PAF_FILE_PATH) == 1:
@@ -8143,69 +8412,9 @@ if args.vcf_input is None and nclose_node_count > FAIL_NCLOSE_COUNT:
             logging.info("No method to reduce nclose node count.")
             sys.exit(1)
 
-selected_type4_indel_graph_edges = []
-type4_indel_zero_dim_edge_set = set()
-graph_nclose_nodes = nclose_nodes
-canonical_nclose_before_indel_graph = canonical_nclose_snapshot(nclose_nodes)
-if args.add_indel_graph:
-    type4_indel_graph_candidates = collect_type4_indel_graph_candidates(
-        contig_data, df, repeat_censat_data
-    )
-    selected_type4_indel_graph_edges = select_type4_indel_graph_edges(
-        contig_data, nclose_nodes, type4_indel_graph_candidates
-    )
-    graph_nclose_nodes = augment_nclose_nodes_with_type4_indels(
-        nclose_nodes, selected_type4_indel_graph_edges
-    )
-    type4_indel_zero_dim_edge_set = get_type4_indel_zero_dim_edge_set(
-        selected_type4_indel_graph_edges
-    )
-    selected_type4_indel_kind_by_tuple = {
-        edge['type4_tuple']: edge['indel_kind']
-        for edge in selected_type4_indel_graph_edges
-    }
-    selected_type4_indel_kind_count = Counter(selected_type4_indel_kind_by_tuple.values())
-    type4_indel_candidate_kind_count = Counter(
-        candidate['indel_kind'] for candidate in type4_indel_graph_candidates
-    )
-    logging.info(
-        f'Added {len(type4_indel_zero_dim_edge_set)} type4 indel graph edges '
-        f'from {len(selected_type4_indel_kind_by_tuple)} selected type4 indel events '
-        f'({dict(selected_type4_indel_kind_count)} selected; '
-        f'{len(type4_indel_graph_candidates)} depth-supported candidates '
-        f'{dict(type4_indel_candidate_kind_count)} >= {TYPE4_INDEL_GRAPH_MIN_SPAN} bp)'
-    )
-
-if canonical_nclose_snapshot(nclose_nodes) != canonical_nclose_before_indel_graph:
-    raise AssertionError(
-        "--add_indel_graph mutated canonical nclose_nodes; Indel-like edges "
-        "must remain graph-only"
-    )
-if args.vcf_input is not None:
-    assert_vcf_nclose_has_no_indel_like(
-        contig_data,
-        nclose_nodes,
-        "post --add_indel_graph canonical nclose",
-    )
-    if args.add_indel_graph:
-        non_vcf_graph_edges = [
-            edge
-            for edge in selected_type4_indel_graph_edges
-            if not str(edge.get('contig_name', '')).startswith(
-                VCF_TYPE4_GRAPH_NODE_PREFIX
-            )
-        ]
-        if non_vcf_graph_edges:
-            raise AssertionError(
-                "VCF --add_indel_graph selected an edge outside graph-only "
-                f"VCF nodes: {non_vcf_graph_edges[:2]}"
-            )
-
-bnd_graph_adjacency = initialize_bnd_graph(contig_data, graph_nclose_nodes, telo_contig)
-
-with open(f'{PREFIX}/{TYPE4_INDEL_GRAPH_EDGE_PKL}', 'wb') as f:
-    pkl.dump(selected_type4_indel_graph_edges, f)
-
+graph_attempt_state = build_and_activate_graph_attempt_state(
+    pregraph_state
+)
 save_loc = PREFIX + '/00_raw'
 logging.info("Now saving results in folder : " + PREFIX)
 
@@ -8731,7 +8940,10 @@ if not last_success:
             logging.info("NClose node count is too high.")
             logging.info("No method to reduce nclose node count.")
             sys.exit(1)
-        
+
+        graph_attempt_state = build_and_activate_graph_attempt_state(
+            pregraph_state
+        )
         last_success = run_graph_pipeline()
         if not last_success:
             logging.info('Breakend graph is too divergent.')

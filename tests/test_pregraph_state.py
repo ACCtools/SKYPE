@@ -6,6 +6,7 @@ import unittest
 from dataclasses import dataclass, fields
 from enum import Enum
 from pathlib import Path
+from unittest.mock import Mock, patch
 
 
 BUILD_GRAPH_PATH = (
@@ -21,6 +22,7 @@ def load_pregraph_helpers():
         "PregraphSourceMode",
         "NCloseSourceConfig",
         "NCloseBuildResult",
+        "extract_source_censat_type2_candidates",
         "resolve_pregraph_source",
     }
     tree = ast.parse(BUILD_GRAPH_PATH.read_text(encoding="utf-8"))
@@ -46,6 +48,29 @@ PregraphSourceMode = HELPERS["PregraphSourceMode"]
 NCloseSourceConfig = HELPERS["NCloseSourceConfig"]
 NCloseBuildResult = HELPERS["NCloseBuildResult"]
 resolve_pregraph_source = HELPERS["resolve_pregraph_source"]
+extract_source_censat_type2_candidates = HELPERS[
+    "extract_source_censat_type2_candidates"
+]
+
+
+def args_alt_accesses(function_name: str) -> list[ast.Attribute]:
+    """Return direct ``args.alt`` accesses in one top-level function."""
+
+    tree = ast.parse(BUILD_GRAPH_PATH.read_text(encoding="utf-8"))
+    function = next(
+        node
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name == function_name
+    )
+    return [
+        node
+        for node in ast.walk(function)
+        if isinstance(node, ast.Attribute)
+        and node.attr == "alt"
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "args"
+    ]
 
 
 class PregraphSourceTests(unittest.TestCase):
@@ -65,6 +90,7 @@ class PregraphSourceTests(unittest.TestCase):
             source.original_paf_paths, ("/originals/primary.paf",)
         )
         self.assertFalse(source.is_unitig_reduced)
+        self.assertIsNone(source.secondary_candidate_paf)
 
     def test_configured_dual_preserves_primary_and_alternative_order(self) -> None:
         source = resolve_pregraph_source(
@@ -84,6 +110,9 @@ class PregraphSourceTests(unittest.TestCase):
             ("/originals/primary.paf", "/originals/alternative.paf"),
         )
         self.assertFalse(source.is_unitig_reduced)
+        self.assertEqual(
+            source.secondary_candidate_paf, "/inputs/alternative.paf"
+        )
 
     def test_vcf_uses_synthetic_paf_then_assembly_anchor(self) -> None:
         source = resolve_pregraph_source(
@@ -101,6 +130,7 @@ class PregraphSourceTests(unittest.TestCase):
         )
         self.assertEqual(source.original_paf_paths, ())
         self.assertFalse(source.is_unitig_reduced)
+        self.assertIsNone(source.secondary_candidate_paf)
 
     def test_primary_only_retry_exactly_duplicates_primary_sources(self) -> None:
         source = resolve_pregraph_source(
@@ -121,6 +151,61 @@ class PregraphSourceTests(unittest.TestCase):
             ("/originals/primary.paf", "/originals/primary.paf"),
         )
         self.assertTrue(source.is_unitig_reduced)
+        self.assertIsNone(source.secondary_candidate_paf)
+
+    def test_configured_source_delegates_censat_type2_to_explicit_alt(self) -> None:
+        source = resolve_pregraph_source(
+            PregraphSourceMode.CONFIGURED_PAF,
+            "/inputs/primary.paf",
+            "/inputs/alternative.paf",
+            ["/originals/primary.paf", "/originals/alternative.paf"],
+            "/output",
+        )
+        repeat_censat_data = {"chr1": [(100, 200)]}
+        expected = [{"ctg_name": "unitig-candidate"}]
+        delegate = Mock(return_value=expected)
+
+        with patch.dict(
+            extract_source_censat_type2_candidates.__globals__,
+            {"extract_raw_censat_type2_candidates": delegate},
+        ):
+            observed = extract_source_censat_type2_candidates(
+                source, repeat_censat_data
+            )
+
+        self.assertIs(observed, expected)
+        delegate.assert_called_once_with(
+            "/inputs/alternative.paf", repeat_censat_data
+        )
+
+    def test_primary_only_retry_skips_censat_type2_delegate(self) -> None:
+        source = resolve_pregraph_source(
+            PregraphSourceMode.PRIMARY_ONLY_RETRY,
+            "/inputs/primary.paf",
+            "/inputs/alternative.paf",
+            ["/originals/primary.paf", "/originals/alternative.paf"],
+            "/output",
+        )
+        delegate = Mock(side_effect=AssertionError("unitig evidence was read"))
+
+        with patch.dict(
+            extract_source_censat_type2_candidates.__globals__,
+            {"extract_raw_censat_type2_candidates": delegate},
+        ):
+            observed = extract_source_censat_type2_candidates(source, {})
+
+        self.assertEqual(observed, [])
+        delegate.assert_not_called()
+
+    def test_paf_pregraph_builders_do_not_access_raw_cli_alt(self) -> None:
+        for function_name in ("contig_preprocessing_00", "nclose_calc"):
+            with self.subTest(function_name=function_name):
+                accesses = args_alt_accesses(function_name)
+                self.assertEqual(
+                    accesses,
+                    [],
+                    f"{function_name} must use NCloseSourceConfig, not args.alt",
+                )
 
     def test_nclose_build_result_has_explicit_stable_contract(self) -> None:
         self.assertEqual(
