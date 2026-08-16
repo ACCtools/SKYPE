@@ -89,7 +89,6 @@ TYPE34_BREAK_CHUKJI_LIMIT = 1*M
 CHUKJI_FAIL_TYPE2_RESCUE_THRESHOLD = 2*K
 CIRCUIT_ECDNA_LENGTH_LIMIT = 80*M
 
-NCLOSE_SIM_COMPARE_RAITO = 1.2
 NCLOSE_SIM_DIFF_THRESHOLD = 5
 
 TOT_PATH_LIMIT = 3*M
@@ -110,9 +109,6 @@ ALL_REPEAT_NCLOSE_COMPRESS_LIMIT = 500*K
 SUBTELO_TIP_LIMIT = 500*K
 OFFSET_DIR_GROUP_LIMIT = 100*K
 
-
-PIPELINE_02_FILTER = True
-ENABLE_CENSAT_NONCENSAT_OFFSET_DIR_FILTER = PIPELINE_02_FILTER
 
 PATH_COMPRESS_LIMIT = 50*K
 IGNORE_PATH_LIMIT = 50*K
@@ -138,9 +134,6 @@ MULTI_END_ALIGNMENT_WINDOW = 500*K
 CENSAT_OUT_DIFF_RATIO = 0.30
 
 MIN_FLANK_SIZE_BP = 1*M
-
-WEAK_BREAKEND_CEN_RATIO_THRESHOLD = 1.3
-BREAKEND_CEN_RATIO_THRESHOLD = 1.5
 
 REPEAT_MERGE_GAP = 0
 
@@ -184,6 +177,14 @@ class PregraphSourceMode(Enum):
     VCF = "vcf"
 
 
+class CensatPairClass(Enum):
+    """Number of CEN-SAT-labelled endpoints in one path-ordered NClose."""
+
+    NONE = 0
+    ONE = 1
+    BOTH = 2
+
+
 @dataclass(frozen=True)
 class NCloseSourceConfig:
     """Resolved PAF inputs for one pregraph build attempt."""
@@ -211,7 +212,6 @@ class NCloseBuildResult:
     telo_node_count: int
     telo_set: set
     rpt_con: set
-    rpt_censat_con: set
     bnd_contig: set
     raw_nclose_nodes: object
     nclose_nodes: object
@@ -258,7 +258,6 @@ class NCloseCandidateBuildContext:
     contig_data: list
     bnd_contig: set
     repeat_contig_names: set
-    censat_contig_names: set
     repeat_censat_data: object
     paf_file_paths: tuple
     original_paf_paths: tuple
@@ -266,6 +265,22 @@ class NCloseCandidateBuildContext:
     telo_contig: object
     chr_len: object
     asm2cov: object
+
+
+@dataclass(frozen=True)
+class CensatNoncensatCandidate:
+    """Path-aware view of an NClose with exactly one CEN-SAT endpoint."""
+
+    contig_name: object
+    pair: tuple[int, int]
+    censat_idx: int
+    noncensat_idx: int
+    censat_side: int
+    censat_chrom: str
+    noncensat_chrom: str
+    noncensat_pos: int
+    censat_norm_dir: str
+    is_simple_alt: bool
 
 
 @dataclass
@@ -461,7 +476,7 @@ def max_overlap(intervals, target_intervals):
     for _, delta in events:
         curr += delta
         max_cnt = max(max_cnt, curr)
-    
+
     return max_cnt - temp_inf
 
 def get_qry_cord_data(paf_path: str, get_ori_cord: bool = False) -> tuple:
@@ -502,7 +517,7 @@ def get_qry_cord_data(paf_path: str, get_ori_cord: bool = False) -> tuple:
                 start_idx = i
 
         end_idx_dict[current_contig] = (start_idx, len(paf_data_list) - 1)
-    
+
     return paf_data_list, end_idx_dict
 
 def div_repeat_paf(original_paf_path_list: list, aln_paf_path_list: list, contig_data: list) -> set:
@@ -690,17 +705,6 @@ def get_not_trust_contig_name(original_paf_path_list: list) -> set:
                     not_using_contig.add(a[0])
         
     return not_using_contig
-
-def import_repeat_data(file_path : str) -> dict :
-    fai_file = open(file_path, "r")
-    repeat_data = defaultdict(list)
-    for curr_data in fai_file:
-        temp_list = curr_data.split("\t")
-        ref_data = (int(temp_list[1]), int(temp_list[2]))
-        if abs(ref_data[1] - ref_data[0]) > CENSAT_COMPRESSABLE_THRESHOLD:
-            repeat_data[temp_list[0]].append(ref_data)
-    fai_file.close()
-    return repeat_data
 
 def find_chr_len(file_path : str) -> dict:
     chr_data_file = open(file_path, "r")
@@ -1012,10 +1016,6 @@ def extract_all_repeat_contig(contig_data : list, repeat_data : dict, ctg_index 
         s = e+1
     return rpt_con
 
-def check_censat_contig(all_repeat_censat_con : set, ALIGNED_PAF_LOC_LIST : list, ORIGINAL_PAF_LOC_LIST : list, contig_data : list):
-    div_repeat_paf_name = div_repeat_paf(ORIGINAL_PAF_LOC_LIST, ALIGNED_PAF_LOC_LIST, contig_data)
-    return all_repeat_censat_con & div_repeat_paf_name
-    
 def extract_bnd_contig(contig_data : list) -> set:
     s = 0
     contig_data_size = len(contig_data)
@@ -1676,6 +1676,100 @@ def edge_optimization(contig_data : list, contig_adjacency : list, telo_dict : d
 def _flip_ctg_dir(ctg_dir):
     return '-' if ctg_dir == '+' else '+'
 
+
+def node_is_censat(node):
+    """Return whether preprocessing labelled a node as overlapping CEN-SAT."""
+
+    return node[CTG_CENSAT] != '0'
+
+
+def classify_censat_pair(contig_data, pair):
+    """Classify an NClose without losing its biologically meaningful path order."""
+
+    censat_count = sum(node_is_censat(contig_data[node_idx]) for node_idx in pair)
+    return CensatPairClass(censat_count)
+
+
+def nclose_has_simple_alt(contig_name, pair, contig_data):
+    """Recognize simple-alt evidence at either the owner or endpoint boundary."""
+
+    return (
+        str(contig_name).startswith('simple_ctg_alt_')
+        or contig_data[pair[0]][CTG_NAM].startswith('simple_ctg_alt_')
+        or contig_data[pair[1]][CTG_NAM].startswith('simple_ctg_alt_')
+    )
+
+
+def build_censat_noncensat_candidate(contig_data, contig_name, pair):
+    """Build the shared one-CEN-SAT view used by repair and arbitration."""
+
+    pair = tuple(pair)
+    if classify_censat_pair(contig_data, pair) != CensatPairClass.ONE:
+        return None
+
+    start_is_censat = node_is_censat(contig_data[pair[0]])
+    censat_side = 0 if start_is_censat else 1
+    censat_idx = pair[censat_side]
+    noncensat_idx = pair[1 - censat_side]
+    censat_dir = contig_data[censat_idx][CTG_DIR]
+    if censat_side == 1:
+        censat_dir = _flip_ctg_dir(censat_dir)
+
+    noncensat_node = contig_data[noncensat_idx]
+    return CensatNoncensatCandidate(
+        contig_name=contig_name,
+        pair=pair,
+        censat_idx=censat_idx,
+        noncensat_idx=noncensat_idx,
+        censat_side=censat_side,
+        censat_chrom=contig_data[censat_idx][CHR_NAM],
+        noncensat_chrom=noncensat_node[CHR_NAM],
+        noncensat_pos=(noncensat_node[CHR_STR] + noncensat_node[CHR_END]) // 2,
+        censat_norm_dir=censat_dir,
+        is_simple_alt=nclose_has_simple_alt(contig_name, pair, contig_data),
+    )
+
+
+def group_censat_noncensat_candidates(candidates):
+    """Cluster one-CEN-SAT candidates by chromosome pair and nearby offset."""
+
+    grouped = defaultdict(list)
+    for candidate in candidates:
+        grouped[(candidate.censat_chrom, candidate.noncensat_chrom)].append(
+            candidate
+        )
+
+    clusters = []
+    for items in grouped.values():
+        items.sort(key=lambda candidate: candidate.noncensat_pos)
+        start = 0
+        while start < len(items):
+            end = start + 1
+            while (
+                end < len(items)
+                and items[end].noncensat_pos - items[end - 1].noncensat_pos
+                < OFFSET_DIR_GROUP_LIMIT
+            ):
+                end += 1
+            clusters.append(items[start:end])
+            start = end
+    return clusters
+
+
+def iter_censat_noncensat_candidates(contig_data, nclose_nodes):
+    """Yield a fresh one-CEN-SAT view after each mutating pipeline stage."""
+
+    for contig_name, pair_list in nclose_nodes.items():
+        for pair in pair_list:
+            candidate = build_censat_noncensat_candidate(
+                contig_data,
+                contig_name,
+                pair,
+            )
+            if candidate is not None:
+                yield candidate
+
+
 def _cen_fragment_target_dir_from_meta(cen_fragment_meta, chrom):
     return '-' if cen_fragment_meta[chrom]['dir'] else '+'
 
@@ -1701,7 +1795,7 @@ def filter_telomere_connected_cen_fragment_mismatch(
             contig = contig_data[node_idx]
             chrom = contig[CHR_NAM]
             mismatch = False
-            if contig[CTG_CENSAT] != '0' and chrom in cen_fragment_meta and telo_name[-1] in ('f', 'b'):
+            if node_is_censat(contig) and chrom in cen_fragment_meta and telo_name[-1] in ('f', 'b'):
                 norm_dir = _normalized_telo_censat_dir(telo_name, contig[CTG_DIR])
                 mismatch = norm_dir != _cen_fragment_target_dir_from_meta(cen_fragment_meta, chrom)
 
@@ -1944,23 +2038,6 @@ def exist_near_bnd_point(chrom, inside_st):
     # print(chrom, inside_st, inside_nd, not similar_check(st_depth, nd_depth))
     return not similar_check(st_depth, nd_depth)
 
-def check_depth_near_bnd(st_data, nd_data):
-    def mean_depth(start, end):
-        """Return mean meandepth over windows overlapping [start, end)."""
-        mask = (df_chr['nd'] > start) & (df_chr['st'] < end)
-        return df_chr.loc[mask, 'meandepth'].mean()
-    depth = []
-    for data in [st_data, nd_data]:
-        chrom = data[0]
-        ref = data[1]
-        df_chr = df[df['chr'] == chrom]
-        depth.append(mean_depth(ref - TYPE2_FLANKING_LENGTH/2, ref + TYPE2_FLANKING_LENGTH/2))
-    if similar_check(*depth, ratio = NCLOSE_SIM_COMPARE_RAITO):
-        return True
-    else:
-        return False
-        
-
 def censat_overlap_check(censat_dict, chrom, inside_st, inside_nd):
     if chrom not in censat_dict.keys():
         return False
@@ -2170,8 +2247,6 @@ def find_breakend_centromere(
     contig_data : list = None,
     log_context : str = "",
 ):
-    results = []
-
     # Remove unused Y
     ydf = df.query('chr == "chrY"')
     ydepth = np.mean(ydf['meandepth'].to_numpy())
@@ -2182,24 +2257,6 @@ def find_breakend_centromere(
     yratio = bd / sd
     if yratio > 2:
         df = df.query('chr != "chrY"')
-
-    # 각 염색체별 repeat 영역에 대해 flanking 영역 계산
-    for chrom, intervals in repeat_censat_data.items():
-        chrom_length = chr_len.get(chrom)
-        if chrom_length is None:
-            continue
-        chrom_df = df[df['chr'] == chrom]
-        if chrom_df.empty:
-            continue
-        
-        for rep in intervals:
-            rep_start_0, rep_end_0 = rep  # 0-indexed 좌표
-
-            results.append({
-                'chr': chrom,
-                'repeat_start_0': rep_start_0,
-                'repeat_end_0': rep_end_0,
-            })
 
     meandepth = np.median(df['meandepth'])
 
@@ -2352,8 +2409,6 @@ def find_breakend_centromere(
                     break
 
 
-    result_df = pd.DataFrame(results)
-
     cen_fragment_meta = {}
     for chrom, diff in depth_diff_data.items():
         intervals = repeat_censat_data[chrom]
@@ -2381,190 +2436,7 @@ def find_breakend_centromere(
             f'{relaxed_summary}'
         )
 
-    def find_min_error_partition(depth_diff_data):
-        """
-        Partition keys into groups of size 1, 2, or 3 to minimize total error,
-        while ensuring that in each group the dict key is the 'minuend' (largest
-        by the rule below) and the value is the list of subtrahends.
-
-        For size-2 groups: key is the one with the larger value (tie -> lex key).
-        For size-3 groups: choose i that minimizes |v_i - (v_j + v_k)|; that i becomes key.
-        """
-        # Deterministic ordering
-        all_keys = tuple(sorted(depth_diff_data.keys()))
-        memo = {}
-
-        def best_pair_mapping(k1, k2):
-            v1, v2 = depth_diff_data[k1], depth_diff_data[k2]
-            # key should be the one with larger value; tie -> lexicographic key
-            if (v1 > v2) or (v1 == v2 and k1 < k2):
-                return {k1: [k2]}, abs(v1 - v2)
-            else:
-                return {k2: [k1]}, abs(v1 - v2)
-
-        def best_triple_mapping(a, b, c):
-            v = {a: depth_diff_data[a], b: depth_diff_data[b], c: depth_diff_data[c]}
-            # candidates: which one is the minuend
-            candidates = []
-            # a as key
-            candidates.append( (a, abs(v[a] - (v[b] + v[c]))) )
-            # b as key
-            candidates.append( (b, abs(v[b] - (v[a] + v[c]))) )
-            # c as key
-            candidates.append( (c, abs(v[c] - (v[a] + v[b]))) )
-
-            # pick by minimal error; tie-break by larger value, then lex key
-            min_err = min(err for _, err in candidates)
-            tied = [k for k, err in candidates if err == min_err]
-            if len(tied) == 1:
-                key = tied[0]
-            else:
-                # larger value first
-                max_val = max(v[k] for k in tied)
-                tied2 = [k for k in tied if v[k] == max_val]
-                key = min(tied2) if len(tied2) > 1 else tied2[0]
-
-            others = [x for x in (a, b, c) if x != key]
-            return {key: others}, min_err
-
-        def recurse(remaining):
-            if not remaining:
-                return {}, 0
-            if remaining in memo:
-                return memo[remaining]
-
-            # we always pop the first, but mapping keys will be set by rules above
-            first, *rest = remaining
-            best_mapping = None
-            best_err = float('inf')
-
-            # Case 1: single
-            err1 = abs(depth_diff_data[first])
-            mapping1, err_sum1 = recurse(tuple(rest))
-            total1 = err1 + err_sum1
-            best_mapping = {first: []}
-            best_mapping.update(mapping1)
-            best_err = total1
-
-            # Case 2: pairs
-            for i, k2 in enumerate(rest):
-                pair_map, pair_err = best_pair_mapping(first, k2)
-                rem2 = rest[:i] + rest[i+1:]
-                m2, e2 = recurse(tuple(rem2))
-                total2 = pair_err + e2
-                if total2 < best_err:
-                    best_err = total2
-                    # merge maps; ensure no conflicting keys
-                    best_mapping = {}
-                    best_mapping.update(pair_map)
-                    best_mapping.update(m2)
-
-            # Case 3: triples
-            n = len(rest)
-            for i in range(n):
-                for j in range(i+1, n):
-                    k2, k3 = rest[i], rest[j]
-                    triple_map, triple_err = best_triple_mapping(first, k2, k3)
-                    rem3 = tuple(rest[:i] + rest[i+1:j] + rest[j+1:])
-                    m3, e3 = recurse(rem3)
-                    total3 = triple_err + e3
-                    if total3 < best_err:
-                        best_err = total3
-                        best_mapping = {}
-                        best_mapping.update(triple_map)
-                        best_mapping.update(m3)
-
-            memo[remaining] = (best_mapping, best_err)
-            return memo[remaining]
-
-        return recurse(all_keys)
-
-    cnt = 0
-    vtg_list = []
-    prefix = "virtual_censat_contig"
-
-    # 가상 BND contig 생성 비활성화: centromere depth 차이는 22번 NNLS의
-    # fragment chromosome column 으로 흡수한다. 페어링/노드 생성 코드는 보존.
-    partition_dict = {}
-    # partition_dict, error = find_min_error_partition(depth_diff_data)
-
-    for k, v in partition_dict.items():
-        connecting_pair = []
-        if len(v) == 1:
-            connecting_pair.append((k, v[0]))
-        elif len(v) == 2:
-            connecting_pair.append((k, v[0]))
-            connecting_pair.append((k, v[1]))
-        
-        for chrom1, chrom2 in connecting_pair:
-            row1 = result_df[result_df['chr'] == chrom1].iloc[0]
-            row2 = result_df[result_df['chr'] == chrom2].iloc[0]
-            if depth_dir_data[chrom1] and depth_dir_data[chrom2]: #right right
-                cnt+=1
-                N = int(CENSAT_COMPRESSABLE_THRESHOLD//2)
-                mid_row1_censat = int(row1.repeat_start_0 + row1.repeat_end_0)//2
-                mid_row2_censat = int(row2.repeat_start_0 + row2.repeat_end_0)//2
-
-                temp_node1 = [f'{prefix}_{cnt}', N, 0, N//2, '-', row1.chr, 
-                            chr_len[row1.chr], mid_row1_censat - N//2, mid_row1_censat, 
-                            60, 1, (cnt-1)*2, (cnt-1)*2+1, 0, 0, 0, 0, 0, 0, '-', row1.chr, f"2.{(cnt-1)*2}"]
-                
-                temp_node2 = [f'{prefix}_{cnt}', N, N//2, N, '+', row2.chr,
-                            chr_len[row2.chr], mid_row2_censat, mid_row2_censat + N//2, 
-                            60, 1, (cnt-1)*2, (cnt-1)*2+1, 0, 0, 0, 0, 0, 0, '-', row1.chr, f"2.{(cnt-1)*2+1}"]
-                
-                vtg_list.append(temp_node1)
-                vtg_list.append(temp_node2)
-            elif not depth_dir_data[chrom1] and not depth_dir_data[chrom2]: #left left
-                cnt+=1
-                N = int(CENSAT_COMPRESSABLE_THRESHOLD//2)
-                mid_row1_censat = int(row1.repeat_start_0 + row1.repeat_end_0)//2
-                mid_row2_censat = int(row2.repeat_start_0 + row2.repeat_end_0)//2
-
-                temp_node1 = [f'{prefix}_{cnt}', N, 0, N//2, '+', row1.chr, 
-                            chr_len[row1.chr], mid_row1_censat - N//2, mid_row1_censat, 
-                            60, 1, (cnt-1)*2, (cnt-1)*2+1, 0, 0, 0, 0, 0, 0, '+', row1.chr, f"2.{(cnt-1)*2}"]
-                
-                temp_node2 = [f'{prefix}_{cnt}', N, N//2, N, '-', row2.chr,
-                            chr_len[row2.chr], mid_row2_censat, mid_row2_censat + N//2, 
-                            60, 1, (cnt-1)*2, (cnt-1)*2+1, 0, 0, 0, 0, 0, 0, '+', row1.chr, f"2.{(cnt-1)*2+1}"]
-                
-                vtg_list.append(temp_node1)
-                vtg_list.append(temp_node2)
-            elif depth_dir_data[chrom1] and not depth_dir_data[chrom2]: #right left
-                cnt+=1
-                N = int(CENSAT_COMPRESSABLE_THRESHOLD//2)
-                mid_row1_censat = int(row1.repeat_start_0 + row1.repeat_end_0)//2
-                mid_row2_censat = int(row2.repeat_start_0 + row2.repeat_end_0)//2
-
-                temp_node1 = [f'{prefix}_{cnt}', N, 0, N//2, '-', row1.chr, 
-                        chr_len[row1.chr], mid_row1_censat - N//2, mid_row1_censat, 
-                        60, 1, (cnt-1)*2, (cnt-1)*2+1, 0, 0, 0, 0, 0, 0, '-', row1.chr, f"2.{(cnt-1)*2}"]
-            
-                temp_node2 = [f'{prefix}_{cnt}', N, N//2, N, '-', row2.chr,
-                        chr_len[row2.chr], mid_row2_censat, mid_row2_censat + N//2, 
-                        60, 1, (cnt-1)*2, (cnt-1)*2+1, 0, 0, 0, 0, 0, 0, '-', row1.chr, f"2.{(cnt-1)*2+1}"]
-                
-                vtg_list.append(temp_node1)
-                vtg_list.append(temp_node2)
-            else: #left right
-                cnt+=1
-                N = int(CENSAT_COMPRESSABLE_THRESHOLD//2)
-                mid_row1_censat = int(row1.repeat_start_0 + row1.repeat_end_0)//2
-                mid_row2_censat = int(row2.repeat_start_0 + row2.repeat_end_0)//2
-
-                temp_node1 = [f'{prefix}_{cnt}', N, 0, N//2, '+', row1.chr, 
-                        chr_len[row1.chr], mid_row1_censat - N//2, mid_row1_censat, 
-                        60, 1, (cnt-1)*2, (cnt-1)*2+1, 0, 0, 0, 0, 0, 0, '+', row1.chr, f"2.{(cnt-1)*2}"]
-            
-                temp_node2 = [f'{prefix}_{cnt}', N, N//2, N, '+', row2.chr,
-                        chr_len[row2.chr], mid_row2_censat, mid_row2_censat + N//2, 
-                        60, 1, (cnt-1)*2, (cnt-1)*2+1, 0, 0, 0, 0, 0, 0, '+', row1.chr, f"2.{(cnt-1)*2+1}"]
-                
-                vtg_list.append(temp_node1)
-                vtg_list.append(temp_node2)
-
-    return vtg_list, cen_fragment_meta
+    return cen_fragment_meta
 
 def break_double_telomere_contig(contig_data : list, telo_connected_set : set):
     s = 0
@@ -2865,7 +2737,7 @@ def nclose_compression_candidate_matches(
 
 
 def extract_nclose_node(contig_data : list, bnd_contig : set, repeat_contig_name : set, \
-                        censat_contig_name : set, repeat_censat_data : dict, ALIGNED_PAF_LOC_LIST : list, ORIGINAL_PAF_LOC_LIST : list, \
+                        repeat_censat_data : dict, ALIGNED_PAF_LOC_LIST : list, ORIGINAL_PAF_LOC_LIST : list, \
                         telo_set : set, telo_contig : dict, chr_len : dict, asm2cov : dict) -> tuple:
     s = 0
     fake_bnd = dict()
@@ -3074,17 +2946,6 @@ def extract_nclose_node(contig_data : list, bnd_contig : set, repeat_contig_name
                     flag = True  # reset per nclose: novel until proven duplicate (mainflow split can hold 2 ncloses)
                     st = nclose[0]
                     ed = nclose[2]
-                    # Pass if 
-                    # 1. terminal node is rin
-                    # 2. AND both terminal have similar read depth
-                    """
-                    if contig_data[st][CHR_NAM] != contig_data[ed][CHR_NAM]:
-                        if contig_data[st][CTG_RPTCASE] == 'rin' or contig_data[ed][CTG_RPTCASE] == 'rin':
-                            st_data = (contig_data[st][CHR_NAM], contig_data[st][CHR_END])
-                            ed_data = (contig_data[ed][CHR_NAM], contig_data[ed][CHR_STR])
-                            if check_depth_near_bnd(st_data, ed_data):
-                                continue
-                    """
                     nclose_front_const = 0
                     nclose_back_const = 0
                     for censat_ref_range in repeat_censat_data[contig_data[st][CHR_NAM]]:
@@ -3158,7 +3019,7 @@ def extract_nclose_node(contig_data : list, bnd_contig : set, repeat_contig_name
                     censat_st_chr = [st_chr[0], 0]
                     censat_ed_chr = [ed_chr[0], 0]
                     # Keep the legacy outer-contig CENSAT gate in phase 1.
-                    if contig_s[CTG_CENSAT] != '0':
+                    if node_is_censat(contig_s):
                         cnt = 0
                         for censat_ref_range in repeat_censat_data[contig_data[st][CHR_NAM]]:
                             if inclusive_checker_tuple(
@@ -3170,7 +3031,7 @@ def extract_nclose_node(contig_data : list, bnd_contig : set, repeat_contig_name
                                 )
                                 break
                             cnt += 1
-                    if contig_e[CTG_CENSAT] != '0':
+                    if node_is_censat(contig_e):
                         cnt = 0
                         for censat_ref_range in repeat_censat_data[contig_data[ed][CHR_NAM]]:
                             if inclusive_checker_tuple(
@@ -3279,7 +3140,6 @@ def build_candidates(context):
         context.contig_data,
         context.bnd_contig,
         context.repeat_contig_names,
-        context.censat_contig_names,
         context.repeat_censat_data,
         list(context.paf_file_paths),
         list(context.original_paf_paths),
@@ -3832,7 +3692,7 @@ def contig_preprocessing_00(
     df = pd.read_csv(main_stat_loc, compression='gzip', comment='#', sep='\t', names=['chr', 'st', 'nd', 'length', 'covsite', 'totaldepth', 'cov', 'meandepth'])
     df = df.query('chr != "chrM"')
 
-    cen_vtg_contig, cen_fragment_meta = find_breakend_centromere(
+    cen_fragment_meta = find_breakend_centromere(
         repeat_censat_data,
         chr_len,
         df,
@@ -4170,11 +4030,6 @@ def contig_preprocessing_00(
     else:
         final_break_contig = []
 
-    if len(cen_vtg_contig) > 0:
-        final_cen_vtg_contig = pass_pipeline(cen_vtg_contig, telo_dict, telo_bound_dict, repeat_data, repeat_censat_data, False, chr_len)
-    else:
-        final_cen_vtg_contig = []
-
     if len(subtelo_ppc_node) > 0:
         final_subtelo_ppc_node = pass_pipeline(subtelo_ppc_node, telo_dict, telo_bound_dict, repeat_data, repeat_censat_data, True, chr_len)
     else:
@@ -4192,14 +4047,6 @@ def contig_preprocessing_00(
         real_final_contig.append(temp_list)
 
     total_len += len(final_break_contig)
-
-    for i in final_cen_vtg_contig:
-        temp_list = i
-        temp_list[CTG_STRND] += total_len
-        temp_list[CTG_ENDND] += total_len
-        real_final_contig.append(temp_list)
-
-    total_len += len(final_cen_vtg_contig)
 
     for i in final_subtelo_ppc_node:
         temp_list = i
@@ -4288,7 +4135,7 @@ def contig_preprocessing_00(
     
     total_len += len(final_low_split_contig)
 
-    add_node_count = len(final_break_contig) + len(final_cen_vtg_contig) + len(final_low_split_contig)
+    add_node_count = len(final_break_contig) + len(final_low_split_contig)
     logging.info(f"Original PAF file length : {original_node_count}")
     logging.info(f"Final preprocessed PAF file length: {len(real_final_contig)}")
     logging.info(f"Number of virtual contigs added on preprocessing : {add_node_count}")
@@ -4874,7 +4721,6 @@ def add_censat_pair_rescue_ncloses(
     nclose_nodes,
     bnd_contig,
     rpt_con,
-    rpt_censat_con,
     repeat_data,
     repeat_censat_data,
     chr_len,
@@ -4971,7 +4817,6 @@ def add_censat_pair_rescue_ncloses(
         nclose_nodes[new_name].append(pair)
         bnd_contig.add(new_name)
         rpt_con.add(new_name)
-        rpt_censat_con.add(new_name)
         records.append(rescue_record(candidate, pair))
 
     append_ppc_rows(ppc_path, rows_to_append)
@@ -4983,59 +4828,29 @@ def collect_missing_cen_fragment_dir_censat_noncensat(
     nclose_nodes,
     cen_fragment_meta,
 ):
-    candidates = []
-    cent_fragment_chroms = set(cen_fragment_meta.keys())
-    for ctg_name, pair_list in nclose_nodes.items():
-        for pair in pair_list:
-            if str(ctg_name).startswith('simple_ctg_alt_') \
-               or contig_data[pair[0]][CTG_NAM].startswith('simple_ctg_alt_') \
-               or contig_data[pair[1]][CTG_NAM].startswith('simple_ctg_alt_'):
-                continue
-            s_is_censat = contig_data[pair[0]][CTG_CENSAT] != '0'
-            e_is_censat = contig_data[pair[1]][CTG_CENSAT] != '0'
-            if s_is_censat == e_is_censat:
-                continue
-            if s_is_censat:
-                cidx, nidx = pair[0], pair[1]
-                censat_norm_dir = contig_data[cidx][CTG_DIR]
-            else:
-                cidx, nidx = pair[1], pair[0]
-                censat_norm_dir = _flip_ctg_dir(contig_data[cidx][CTG_DIR])
+    """Return one-CEN-SAT offset clusters lacking the depth-supported direction."""
 
-            censat_chr = contig_data[cidx][CHR_NAM]
-            if censat_chr not in cent_fragment_chroms:
-                continue
-            noncensat_chr = contig_data[nidx][CHR_NAM]
-            noncensat_pos = (contig_data[nidx][CHR_STR] + contig_data[nidx][CHR_END]) // 2
-            candidates.append({
-                "ctg_name": ctg_name,
-                "pair": tuple(pair),
-                "cidx": cidx,
-                "nidx": nidx,
-                "censat_side": 0 if s_is_censat else 1,
-                "censat_chr": censat_chr,
-                "noncensat_chr": noncensat_chr,
-                "noncensat_pos": noncensat_pos,
-                "censat_norm_dir": censat_norm_dir,
-            })
-
-    grouped = defaultdict(list)
-    for cand in candidates:
-        grouped[(cand["censat_chr"], cand["noncensat_chr"])].append(cand)
+    candidates = [
+        candidate
+        for candidate in iter_censat_noncensat_candidates(
+            contig_data,
+            nclose_nodes,
+        )
+        if not candidate.is_simple_alt
+        and candidate.censat_chrom in cen_fragment_meta
+    ]
 
     missing = []
-    for (censat_chr, _), items in grouped.items():
-        target_norm_dir = _cen_fragment_target_dir_from_meta(cen_fragment_meta, censat_chr)
-        items.sort(key=lambda x: x["noncensat_pos"])
-        i = 0
-        while i < len(items):
-            j = i + 1
-            while j < len(items) and items[j]["noncensat_pos"] - items[j-1]["noncensat_pos"] < OFFSET_DIR_GROUP_LIMIT:
-                j += 1
-            sub = items[i:j]
-            if all(it["censat_norm_dir"] != target_norm_dir for it in sub):
-                missing.append(sub)
-            i = j
+    for group in group_censat_noncensat_candidates(candidates):
+        target_norm_dir = _cen_fragment_target_dir_from_meta(
+            cen_fragment_meta,
+            group[0].censat_chrom,
+        )
+        if all(
+            candidate.censat_norm_dir != target_norm_dir
+            for candidate in group
+        ):
+            missing.append(group)
 
     return missing
 
@@ -5044,49 +4859,31 @@ def filter_offset_direction_mismatched_censat_noncensat(
     nclose_nodes,
     cen_fragment_meta,
 ):
-    offset_filter_candidates = []
-    cent_fragment_chroms = set(cen_fragment_meta.keys())
-    for ctg_name, pair_list in nclose_nodes.items():
-        for pair in pair_list:
-            s_is_censat = contig_data[pair[0]][CTG_CENSAT] != '0'
-            e_is_censat = contig_data[pair[1]][CTG_CENSAT] != '0'
-            if s_is_censat == e_is_censat:
-                continue
-            if s_is_censat:
-                cidx, nidx = pair[0], pair[1]
-                censat_norm_dir = contig_data[cidx][CTG_DIR]
-            else:
-                cidx, nidx = pair[1], pair[0]
-                censat_norm_dir = _flip_ctg_dir(contig_data[cidx][CTG_DIR])
-            censat_chr = contig_data[cidx][CHR_NAM]
-            if censat_chr not in cent_fragment_chroms:
-                continue
-            noncensat_chr = contig_data[nidx][CHR_NAM]
-            noncensat_pos = (contig_data[nidx][CHR_STR] + contig_data[nidx][CHR_END]) // 2
-            offset_filter_candidates.append(
-                (ctg_name, tuple(pair), censat_chr, noncensat_chr, noncensat_pos, censat_norm_dir)
-            )
+    """Prefer the depth-supported direction inside mixed one-CEN-SAT groups."""
 
-    offset_group_map = defaultdict(list)
-    for cand in offset_filter_candidates:
-        offset_group_map[(cand[2], cand[3])].append(cand)
+    candidates = [
+        candidate
+        for candidate in iter_censat_noncensat_candidates(
+            contig_data,
+            nclose_nodes,
+        )
+        if candidate.censat_chrom in cen_fragment_meta
+    ]
 
     offset_to_remove = set()
-    for (censat_chr, _), items in offset_group_map.items():
-        target_norm_dir = _cen_fragment_target_dir_from_meta(cen_fragment_meta, censat_chr)
-        items.sort(key=lambda x: x[4])
-        i = 0
-        while i < len(items):
-            j = i + 1
-            while j < len(items) and items[j][4] - items[j-1][4] < OFFSET_DIR_GROUP_LIMIT:
-                j += 1
-            sub = items[i:j]
-            dirs = {it[5] for it in sub}
-            if len(dirs) > 1:
-                for it in sub:
-                    if it[5] != target_norm_dir:
-                        offset_to_remove.add((it[0], it[1]))
-            i = j
+    for group in group_censat_noncensat_candidates(candidates):
+        directions = {candidate.censat_norm_dir for candidate in group}
+        if len(directions) < 2:
+            continue
+        target_norm_dir = _cen_fragment_target_dir_from_meta(
+            cen_fragment_meta,
+            group[0].censat_chrom,
+        )
+        offset_to_remove.update(
+            (candidate.contig_name, candidate.pair)
+            for candidate in group
+            if candidate.censat_norm_dir != target_norm_dir
+        )
 
     offset_filtered_nclose_nodes = defaultdict(list)
     offset_removed = 0
@@ -5123,12 +4920,15 @@ def add_nearest_combined_censat_noncensat_ncloses(
     for group in missing_candidate_groups:
         best = None
         for cand in group:
-            target_dir = _cen_fragment_target_dir_from_meta(cen_fragment_meta, cand["censat_chr"])
-            censat_node = contig_data[cand["cidx"]]
-            for type2 in type2_by_chrom.get(cand["censat_chr"], []):
+            target_dir = _cen_fragment_target_dir_from_meta(
+                cen_fragment_meta,
+                cand.censat_chrom,
+            )
+            censat_node = contig_data[cand.censat_idx]
+            for type2 in type2_by_chrom.get(cand.censat_chrom, []):
                 type2_endpoint, dist = connected_type2_endpoint_for_template(
                     censat_node,
-                    cand["censat_side"],
+                    cand.censat_side,
                     type2["pair"],
                 )
                 if type2_endpoint is None:
@@ -5138,7 +4938,7 @@ def add_nearest_combined_censat_noncensat_ncloses(
                 best_key = (
                     dist,
                     abs(censat_node[CHR_STR] - type2_endpoint[CHR_STR]),
-                    cand["noncensat_pos"],
+                    cand.noncensat_pos,
                 )
                 if best is None or best_key < best[0]:
                     best = (best_key, cand, type2, type2_endpoint)
@@ -5147,12 +4947,12 @@ def add_nearest_combined_censat_noncensat_ncloses(
             continue
 
         _, cand, type2, remaining_endpoint = best
-        noncensat_node = contig_data[cand["nidx"]]
+        noncensat_node = contig_data[cand.noncensat_idx]
         # The synthetic contig is written as censat -> noncensat. If the
         # original nclose had censat on the second side, preserve the
         # noncensat endpoint in that reverse-complemented frame.
         noncensat_dir = noncensat_node[CTG_DIR]
-        if cand["censat_side"] == 1:
+        if cand.censat_side == 1:
             noncensat_dir = _flip_ctg_dir(noncensat_dir)
         signature = (
             remaining_endpoint[CTG_NAM],
@@ -5160,7 +4960,7 @@ def add_nearest_combined_censat_noncensat_ncloses(
             remaining_endpoint[CHR_STR],
             remaining_endpoint[CHR_END],
             remaining_endpoint[CTG_DIR],
-            cand["nidx"],
+            cand.noncensat_idx,
             noncensat_dir,
         )
         if signature in seen_signature:
@@ -5378,7 +5178,10 @@ def build_nclose_count_candidates(contig_data, nclose_nodes):
                 continue
             seen.add(nclose_key)
             layout = canonical_raw_nclose_layout(contig_data, tuple(int(x) for x in pair))
-            overlaps_censat = any(contig_data[int(idx)][CTG_CENSAT] != '0' for idx in nclose_key)
+            overlaps_censat = any(
+                node_is_censat(contig_data[int(idx)])
+                for idx in nclose_key
+            )
             candidates.append({
                 'pair_id': pair_id,
                 'nclose_key': nclose_key,
@@ -6563,7 +6366,7 @@ def build_vcf_mode_inputs():
     with open(f"{PREFIX}/indel_exclude_idx_set.pkl", "wb") as f:
         pkl.dump(set(), f)
 
-    _, cen_fragment_meta = find_breakend_centromere(
+    cen_fragment_meta = find_breakend_centromere(
         repeat_censat_data,
         chr_len,
         depth_df,
@@ -6684,7 +6487,6 @@ def build_vcf_mode_inputs():
         telo_node_count=telo_node_count,
         telo_set=telo_set,
         rpt_con=set(),
-        rpt_censat_con=set(),
         bnd_contig={key for key in nclose_nodes},
         raw_nclose_nodes=raw_nclose_nodes,
         nclose_nodes=nclose_nodes,
@@ -6958,7 +6760,7 @@ def _canonical_censat_pair_info(contig_data, pair):
 def _normalized_censat_endpoint_dirs(contig_data, pair):
     endpoint_dirs = []
     for order_idx, node_idx in enumerate(pair):
-        if contig_data[node_idx][CTG_CENSAT] == '0':
+        if not node_is_censat(contig_data[node_idx]):
             continue
         ctg_dir = contig_data[node_idx][CTG_DIR]
         normalized_dir = ctg_dir if order_idx == 0 else _flip_ctg_dir(ctg_dir)
@@ -6977,9 +6779,7 @@ def apply_censat_censat_filter(
     mapq60_groups = defaultdict(list)
     for candidate in candidates:
         pair = candidate.path_pair
-        start_is_censat = contig_data[pair[0]][CTG_CENSAT] != '0'
-        end_is_censat = contig_data[pair[1]][CTG_CENSAT] != '0'
-        if not (start_is_censat and end_is_censat):
+        if classify_censat_pair(contig_data, pair) != CensatPairClass.BOTH:
             continue
         if (
             contig_data[pair[0]][CTG_MAPQ] < 60
@@ -7017,9 +6817,7 @@ def apply_censat_censat_filter(
 
     def reject_reason(candidate):
         pair = candidate.path_pair
-        start_is_censat = contig_data[pair[0]][CTG_CENSAT] != '0'
-        end_is_censat = contig_data[pair[1]][CTG_CENSAT] != '0'
-        if not (start_is_censat and end_is_censat):
+        if classify_censat_pair(contig_data, pair) != CensatPairClass.BOTH:
             return None
         if (
             _censat_at_chromosome_end(
@@ -7078,10 +6876,7 @@ def apply_censat_fragment_direction_filter(
 
     def reject_reason(candidate):
         pair = candidate.path_pair
-        if not (
-            contig_data[pair[0]][CTG_CENSAT] != '0'
-            and contig_data[pair[1]][CTG_CENSAT] != '0'
-        ):
+        if classify_censat_pair(contig_data, pair) != CensatPairClass.BOTH:
             return None
         for node_idx, normalized_dir in _normalized_censat_endpoint_dirs(
             contig_data,
@@ -7120,30 +6915,23 @@ def apply_simple_alt_preference_filter(
     candidate_groups = defaultdict(list)
     for candidate in candidates:
         pair = candidate.path_pair
-        start_is_censat = contig_data[pair[0]][CTG_CENSAT] != '0'
-        end_is_censat = contig_data[pair[1]][CTG_CENSAT] != '0'
-        if start_is_censat == end_is_censat:
-            continue
-        censat_idx, noncensat_idx = (
-            (pair[0], pair[1])
-            if start_is_censat
-            else (pair[1], pair[0])
+        one_censat = build_censat_noncensat_candidate(
+            contig_data,
+            candidate.contig_name,
+            pair,
         )
-        censat_chrom = contig_data[censat_idx][CHR_NAM]
-        if censat_chrom in cent_fragment_chroms:
+        if one_censat is None:
             continue
-        is_simple_alt = (
-            candidate.contig_name.startswith('simple_ctg_alt_')
-            or contig_data[pair[0]][CTG_NAM].startswith('simple_ctg_alt_')
-            or contig_data[pair[1]][CTG_NAM].startswith('simple_ctg_alt_')
-        )
+        if one_censat.censat_chrom in cent_fragment_chroms:
+            continue
+        noncensat_node = contig_data[one_censat.noncensat_idx]
         candidate_groups[
-            (censat_chrom, contig_data[noncensat_idx][CHR_NAM])
+            (one_censat.censat_chrom, one_censat.noncensat_chrom)
         ].append((
             candidate,
-            contig_data[noncensat_idx][CHR_STR],
-            contig_data[noncensat_idx][CHR_END],
-            is_simple_alt,
+            noncensat_node[CHR_STR],
+            noncensat_node[CHR_END],
+            one_censat.is_simple_alt,
         ))
 
     identities_to_remove = set()
@@ -7577,10 +7365,7 @@ def nclose_calc(telo_coverage, source):
             telo_set.add(j[1])
 
     repeat_data = import_repeat_data_00(REPEAT_INFO_FILE_PATH)
-    repeat_censat_data = import_repeat_data(CENSAT_PATH)
     rpt_con = extract_all_repeat_contig(contig_data, repeat_data, CTG_RPTCASE, NON_REPEAT_NOISE_RATIO)
-    rpt_censat_con = extract_all_repeat_contig(contig_data, repeat_censat_data, CTG_CENSAT)
-    rpt_censat_con = check_censat_contig(rpt_censat_con, PAF_FILE_PATH, ORIGINAL_PAF_LOC_LIST, contig_data)
 
     bnd_contig = extract_bnd_contig(contig_data)
 
@@ -7590,7 +7375,6 @@ def nclose_calc(telo_coverage, source):
         contig_data=contig_data,
         bnd_contig=bnd_contig,
         repeat_contig_names=rpt_con,
-        censat_contig_names=rpt_censat_con,
         repeat_censat_data=repeat_censat_data,
         paf_file_paths=tuple(PAF_FILE_PATH),
         original_paf_paths=tuple(ORIGINAL_PAF_LOC_LIST),
@@ -7614,7 +7398,7 @@ def nclose_calc(telo_coverage, source):
         sep='\t',
         names=['chr', 'st', 'nd', 'length', 'covsite', 'totaldepth', 'cov', 'meandepth'],
     ).query('chr != "chrM"')
-    _, cen_fragment_meta = find_breakend_centromere(
+    cen_fragment_meta = find_breakend_centromere(
         repeat_censat_data,
         chr_len,
         depth_df,
@@ -7660,7 +7444,7 @@ def nclose_calc(telo_coverage, source):
         nclose_end_compress,
     )
 
-    nclose_candidates, filter_rejections = apply_initial_nclose_rejections(
+    nclose_candidates, _ = apply_initial_nclose_rejections(
         candidate_build.candidates,
         not_using_nclose_node,
         saved_not_using_nclose_node,
@@ -7673,61 +7457,49 @@ def nclose_calc(telo_coverage, source):
     #   단, 같은 두 censat locus 근처에서 보정 방향이 서로 반대인 pair 세트는 drop
     # - cen_fragment column 이 만들어진 chr 의 censat endpoint 는 아래에서
     #   depth 방향과 nclose 방향이 모두 match 해야만 보존한다.
-    with open(f'{PREFIX}/cen_fragment_data.pkl', 'rb') as f:
-        cen_fragment_meta_for_filter = pkl.load(f)
-    nclose_candidates, stage_rejections = apply_censat_censat_filter(
+    nclose_candidates, _ = apply_censat_censat_filter(
         nclose_candidates,
         contig_data,
         chr_len,
         repeat_censat_data,
     )
-    filter_rejections.extend(stage_rejections)
-    nclose_candidates, stage_rejections = \
+    nclose_candidates, _ = \
         apply_censat_fragment_direction_filter(
             nclose_candidates,
             contig_data,
-            cen_fragment_meta_for_filter,
+            cen_fragment_meta,
         )
-    filter_rejections.extend(stage_rejections)
-    nclose_candidates, stage_rejections = apply_simple_alt_preference_filter(
+    nclose_candidates, _ = apply_simple_alt_preference_filter(
         nclose_candidates,
         contig_data,
-        cen_fragment_meta_for_filter,
+        cen_fragment_meta,
     )
-    filter_rejections.extend(stage_rejections)
     nclose_nodes = candidates_to_legacy(nclose_candidates)
 
-    if ENABLE_CENSAT_NONCENSAT_OFFSET_DIR_FILTER:
-        missing_cen_fragment_dir_groups = collect_missing_cen_fragment_dir_censat_noncensat(
-            contig_data,
-            nclose_nodes,
-            cen_fragment_meta_for_filter,
-        )
-        raw_censat_type2_candidates = extract_source_censat_type2_candidates(
-            source,
-            repeat_censat_data,
-        )
-        combined_added = add_nearest_combined_censat_noncensat_ncloses(
-            contig_data,
-            nclose_nodes,
-            missing_cen_fragment_dir_groups,
-            raw_censat_type2_candidates,
-            repeat_censat_data,
-            chr_len,
-            cen_fragment_meta_for_filter,
-            PREPROCESSED_PAF_FILE_PATH,
-        )
-        logging.info(
-            f'Added {combined_added} nearest combined censat-noncensat nclose pairs '
-            f'from {len(raw_censat_type2_candidates)} raw censat-internal type2 candidates '
-            f'across {len(missing_cen_fragment_dir_groups)} target-missing groups'
-        )
-    else:
-        combined_added = 0
-        logging.info(
-            'Censat-noncensat offset direction mismatch filter disabled; '
-            'skip nearest combined censat-noncensat nclose construction'
-        )
+    missing_cen_fragment_dir_groups = collect_missing_cen_fragment_dir_censat_noncensat(
+        contig_data,
+        nclose_nodes,
+        cen_fragment_meta,
+    )
+    raw_censat_type2_candidates = extract_source_censat_type2_candidates(
+        source,
+        repeat_censat_data,
+    )
+    combined_added = add_nearest_combined_censat_noncensat_ncloses(
+        contig_data,
+        nclose_nodes,
+        missing_cen_fragment_dir_groups,
+        raw_censat_type2_candidates,
+        repeat_censat_data,
+        chr_len,
+        cen_fragment_meta,
+        PREPROCESSED_PAF_FILE_PATH,
+    )
+    logging.info(
+        f'Added {combined_added} nearest combined censat-noncensat nclose pairs '
+        f'from {len(raw_censat_type2_candidates)} raw censat-internal type2 candidates '
+        f'across {len(missing_cen_fragment_dir_groups)} target-missing groups'
+    )
     if combined_added > 0:
         contig_data_size = len(contig_data)
         chr_corr, chr_rev_corr = chr_correlation_maker(contig_data)
@@ -7748,53 +7520,40 @@ def nclose_calc(telo_coverage, source):
     # Telomere anchor가 실제 chromosome 끝이 아니라 중간 좌표에 잡힌 경우도 있다.
     # telomere_connected_list의 anchor와 겹치거나 SUBTELO_TIP_LIMIT 안에서 연결 가능한
     # chunk는 물리적 chr tip과 같은 방식으로 orientation을 부여한다.
-    nclose_candidates, stage_rejections = \
+    nclose_candidates, _ = \
         apply_subtelomeric_orientation_filter(
             nclose_candidates,
             contig_data,
             telo_contig,
             chr_len,
         )
-    filter_rejections.extend(stage_rejections)
     nclose_nodes = candidates_to_legacy(nclose_candidates)
 
     # Final offset direction mismatch filter:
     # Run once after synthetic combined nclose construction so the added
     # censat-noncensat pairs participate in the same direction arbitration.
-    if ENABLE_CENSAT_NONCENSAT_OFFSET_DIR_FILTER:
-        nclose_nodes, offset_removed = filter_offset_direction_mismatched_censat_noncensat(
-            contig_data,
-            nclose_nodes,
-            cen_fragment_meta_for_filter,
-        )
-        logging.info(f'Removed {offset_removed} offset-direction-mismatched censat-noncensat nclose pairs')
-    else:
-        logging.info('Skipped offset-direction-mismatched censat-noncensat nclose filtering')
+    nclose_nodes, offset_removed = filter_offset_direction_mismatched_censat_noncensat(
+        contig_data,
+        nclose_nodes,
+        cen_fragment_meta,
+    )
+    logging.info(f'Removed {offset_removed} offset-direction-mismatched censat-noncensat nclose pairs')
     nclose_candidates = refresh_nclose_candidates(
         nclose_nodes,
         nclose_candidates,
     )
 
     censat_pair_rescue_records = []
-    if (
-        REQUESTED_PIPELINE_MODE == PIPELINE_MODE_KARYOTYPE
-        and args.vcf_input is None
-        and source.mode == PregraphSourceMode.CONFIGURED_PAF
-        and source.secondary_candidate_paf is not None
-        and not is_unitig_reduced
-        and len(PAF_FILE_PATH) > 1
-        and len(ORIGINAL_PAF_LOC_LIST) > 1
-    ):
+    if should_add_censat_pair_rescue(REQUESTED_PIPELINE_MODE, source):
         censat_pair_rescue_records = add_censat_pair_rescue_ncloses(
             contig_data,
             nclose_nodes,
             bnd_contig,
             rpt_con,
-            rpt_censat_con,
             repeat_data,
             repeat_censat_data,
             chr_len,
-            cen_fragment_meta_for_filter,
+            cen_fragment_meta,
             source.secondary_candidate_paf,
             source.original_paf_paths[1],
             CENSAT_PATH,
@@ -7873,7 +7632,6 @@ def nclose_calc(telo_coverage, source):
         telo_node_count=telo_node_count,
         telo_set=telo_set,
         rpt_con=rpt_con,
-        rpt_censat_con=rpt_censat_con,
         bnd_contig=bnd_contig,
         raw_nclose_nodes=raw_nclose_nodes,
         nclose_nodes=nclose_nodes,
@@ -7948,6 +7706,19 @@ def resolve_pregraph_source(
     )
 
 
+def should_add_censat_pair_rescue(requested_pipeline_mode, source):
+    """Keep the trusted unitig rescue gate entirely source-driven."""
+
+    return (
+        requested_pipeline_mode == PIPELINE_MODE_KARYOTYPE
+        and source.mode == PregraphSourceMode.CONFIGURED_PAF
+        and source.secondary_candidate_paf is not None
+        and not source.is_unitig_reduced
+        and len(source.paf_file_paths) > 1
+        and len(source.original_paf_paths) > 1
+    )
+
+
 def activate_nclose_source(source):
     """Expose the selected source to legacy preprocessing helpers."""
 
@@ -7988,7 +7759,7 @@ def activate_pregraph_state(state):
     global PAF_FILE_PATH, ORIGINAL_PAF_LOC_LIST, is_unitig_reduced
     global ori_ctg_name_data, df, no_chrY, repeat_censat_data, chr_len
     global contig_data, contig_data_size, chr_corr, chr_rev_corr
-    global telo_contig, telo_node_count, telo_set, rpt_con, rpt_censat_con
+    global telo_contig, telo_node_count, telo_set, rpt_con
     global bnd_contig, raw_nclose_nodes, nclose_nodes
     global nclose_start_compress, nclose_end_compress, vctg_dict
     global all_nclose_comp, nclose_coverage, nclose_compress_track
@@ -8010,7 +7781,6 @@ def activate_pregraph_state(state):
     telo_node_count = result.telo_node_count
     telo_set = result.telo_set
     rpt_con = result.rpt_con
-    rpt_censat_con = result.rpt_censat_con
     bnd_contig = result.bnd_contig
     raw_nclose_nodes = result.raw_nclose_nodes
     nclose_nodes = result.nclose_nodes
@@ -8705,7 +8475,7 @@ def run_graph(data, nonzero_telo_set, CHR_CHANGE_LIMIT, DIR_CHANGE_LIMIT):
                     contig_e = contig_data[path[node + 1][1]]
                     ds = contig_s[CHR_END] - contig_s[CHR_STR]
                     de = contig_e[CHR_END] - contig_e[CHR_STR]
-                    if contig_s[CTG_CENSAT] != '0' and contig_e[CTG_CENSAT] != '0':
+                    if node_is_censat(contig_s) and node_is_censat(contig_e):
                         censat_node_vis += 1
                         if censat_node_vis >= CENSAT_VISIT_LIMIT:
                             censat_overuse_flag = True

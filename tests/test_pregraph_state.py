@@ -223,7 +223,6 @@ class PregraphSourceTests(unittest.TestCase):
                 "telo_node_count",
                 "telo_set",
                 "rpt_con",
-                "rpt_censat_con",
                 "bnd_contig",
                 "raw_nclose_nodes",
                 "nclose_nodes",
