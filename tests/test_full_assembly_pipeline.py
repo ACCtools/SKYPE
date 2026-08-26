@@ -13,10 +13,10 @@ sys.path.insert(0, str(SKYPE_DIR))
 
 import full_assembly_pipeline as full  # noqa: E402
 from skype_utils import (  # noqa: E402
-    PIPELINE_MODE_FULL_ASSEMBLY,
-    load_pipeline_mode,
-    pipeline_mode_is_full_assembly,
-    save_pipeline_mode,
+    load_nclose_nodes,
+    load_pipeline_input,
+    pipeline_input_is_full_assembly,
+    save_pipeline_input,
 )
 
 
@@ -31,18 +31,17 @@ def write_depth(path: Path, values):
 
 
 class FullAssemblyModeTests(unittest.TestCase):
-    def test_pipeline_mode_round_trip(self):
+    def test_pipeline_input_round_trip(self):
         with tempfile.TemporaryDirectory() as temporary:
-            save_pipeline_mode(
+            save_pipeline_input(
                 temporary,
-                requested_mode=PIPELINE_MODE_FULL_ASSEMBLY,
                 full_assembly_input=True,
                 full_assembly_path="/data/truth.fa",
                 full_assembly_paf_path="/data/truth.hs1.aln.paf",
                 reference="hs1",
             )
-            config = load_pipeline_mode(temporary)
-            self.assertTrue(pipeline_mode_is_full_assembly(config))
+            config = load_pipeline_input(temporary)
+            self.assertTrue(pipeline_input_is_full_assembly(config))
             self.assertEqual(config["full_assembly_path"], "/data/truth.fa")
             self.assertEqual(config["reference"], "hs1")
 
@@ -113,6 +112,8 @@ class FullAssemblyModeTests(unittest.TestCase):
                 str(prefix), str(main_depth), str(censat)
             )
             self.assertEqual(matrix_info["features"], 2)
+            self.assertEqual(load_nclose_nodes(prefix), {})
+            self.assertFalse((prefix / "nclose_chunk_data.pkl").exists())
             with h5py.File(prefix / "matrix.h5", "r") as handle:
                 np.testing.assert_array_equal(
                     handle["A"][:],
@@ -136,9 +137,8 @@ class FullAssemblyModeTests(unittest.TestCase):
             )
             telomeres = root / "telomeres.bed"
             telomeres.write_text("", encoding="ascii")
-            save_pipeline_mode(
+            save_pipeline_input(
                 str(prefix),
-                requested_mode=PIPELINE_MODE_FULL_ASSEMBLY,
                 full_assembly_input=True,
                 full_assembly_path=str(assembly),
                 full_assembly_paf_path=str(paf),

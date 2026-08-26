@@ -221,16 +221,16 @@ class NCloseCandidateTests(unittest.TestCase):
             synthetic=True,
             provenance={"parent_event_keys": ((3, 8),)},
         )
-        rescue = NCloseCandidate(
-            "rescue-owner",
+        synthetic = NCloseCandidate(
+            "synthetic-owner",
             (30, 31),
-            origin="censat_pair_rescue",
+            origin="synthetic_test",
             synthetic=True,
             provenance={"source_query": "unitig-7"},
         )
 
         candidates = [primary, secondary]
-        candidates.extend([combined, rescue])
+        candidates.extend([combined, synthetic])
         without_secondary, first_rejections = apply_nclose_filter(
             candidates,
             "source_filter",
@@ -256,15 +256,15 @@ class NCloseCandidateTests(unittest.TestCase):
                 ("shared-owner", (8, 3)),
                 ("shared-owner", (8, 3)),
                 ("combined-owner", (20, 21)),
-                ("rescue-owner", (30, 31)),
+                ("synthetic-owner", (30, 31)),
             ],
         )
         self.assertIs(first_rejections[0].candidate, secondary)
         self.assertIs(second_rejections[0].candidate, combined)
-        self.assertEqual(final, [primary, rescue])
+        self.assertEqual(final, [primary, synthetic])
         self.assertIs(final[0], primary)
-        self.assertIs(final[1], rescue)
-        self.assertEqual(final[1].origin, "censat_pair_rescue")
+        self.assertIs(final[1], synthetic)
+        self.assertEqual(final[1].origin, "synthetic_test")
         self.assertTrue(final[1].synthetic)
         self.assertEqual(final[1].provenance, {"source_query": "unitig-7"})
 
@@ -329,7 +329,7 @@ class NCloseCandidateTests(unittest.TestCase):
         survivor = NCloseCandidate(
             "owner-c",
             (9, 7),
-            origin="censat_pair_rescue",
+            origin="synthetic_test",
             synthetic=True,
         )
 
@@ -447,7 +447,6 @@ class NCloseCandidateTests(unittest.TestCase):
         self.assertLess(conversion_pos, final_output_pos)
         for candidate_stage in (
             "apply_offset_direction_mismatched_censat_noncensat_filter",
-            "add_censat_pair_rescue_ncloses",
             "apply_nclose_count_vaf_filter",
             "apply_raw_virtual_inversion_filter",
             "apply_user_nclose_exclusions",

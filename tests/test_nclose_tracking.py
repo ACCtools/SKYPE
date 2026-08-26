@@ -365,14 +365,14 @@ class NCloseStatusAndReportTests(unittest.TestCase):
             ("0", "PASS"),
         )
 
-    def test_variant_na_and_fixed_tsv_schema(self):
+    def test_raw_nnls_na_and_fixed_tsv_schema(self):
         status = self.build_status()
         weights = {"base": np.ones(len(self.usage), dtype=float)}
         rows = build_nclose_report_rows(
             self.catalog, self.usage, status, 2.0, weights, False
         )
         self.assertEqual(rows[0]["nclose_filter"], "NA")
-        self.assertEqual(rows[0]["nclose_filter_reason"], "NOT_RUN_VARIANT_MODE")
+        self.assertEqual(rows[0]["nclose_filter_reason"], "NOT_RUN_RAW_NNLS")
         self.assertEqual(rows[0]["nclose_cluster"], "NA")
         self.assertEqual(rows[0]["nclose_id"], "SKYPE.nclose.1")
 

@@ -24,11 +24,11 @@ chrY_MINIMUM_RATIO = 0.7
 
 CHROMOSOME_COUNT = 23
 
-PIPELINE_MODE_KARYOTYPE = "karyotype"
-PIPELINE_MODE_VARIANT = "variant"
-PIPELINE_MODE_FULL_ASSEMBLY = "full_assembly"
-PIPELINE_MODE_PKL = "pipeline_mode.pkl"
-PIPELINE_MODE_NCLOSE_LIMIT = 1000
+PIPELINE_INPUT_PKL = "pipeline_mode.pkl"
+STAGE01_HANDOFF_PKL = "01_nclose_data.pkl"
+NCLOSE_NODES_PKL = "nclose_nodes.pkl"
+LEGACY_NCLOSE_CHUNK_PKL = "nclose_chunk_data.pkl"
+DEPTH_ONLY_MATRIX_CONTRACT = "depth_only_v1"
 TYPE4_INDEL_GRAPH_EDGE_PKL = "type4_indel_graph_edges.pkl"
 
 VCF_TYPE4_EVENTS_PKL = "vcf_type4_events.pkl"
@@ -104,10 +104,7 @@ def skype_dirs_from_bnd_alt(alt):
     return dir_a, dir_b
 
 
-def make_pipeline_mode_config(
-    requested_mode=PIPELINE_MODE_KARYOTYPE,
-    nclose_node_count=None,
-    nclose_limit=PIPELINE_MODE_NCLOSE_LIMIT,
+def make_pipeline_input_config(
     vcf_input=False,
     vcf_input_path=None,
     full_assembly_input=False,
@@ -119,33 +116,7 @@ def make_pipeline_mode_config(
     full_assembly_input = bool(full_assembly_input)
     if vcf_input and full_assembly_input:
         raise ValueError("VCF input and full-assembly input are mutually exclusive")
-    if requested_mode not in {
-        PIPELINE_MODE_KARYOTYPE,
-        PIPELINE_MODE_VARIANT,
-        PIPELINE_MODE_FULL_ASSEMBLY,
-    }:
-        raise ValueError(f"Unknown pipeline mode: {requested_mode}")
-
-    forced_variant = (
-        requested_mode == PIPELINE_MODE_KARYOTYPE
-        and nclose_node_count is not None
-        and nclose_node_count > nclose_limit
-    )
-    if full_assembly_input or requested_mode == PIPELINE_MODE_FULL_ASSEMBLY:
-        effective_mode = PIPELINE_MODE_FULL_ASSEMBLY
-        full_assembly_input = True
-        forced_variant = False
-    else:
-        effective_mode = PIPELINE_MODE_VARIANT if vcf_input or forced_variant else requested_mode
-
     return {
-        "requested_mode": requested_mode,
-        "mode": effective_mode,
-        "karyotype_mode": effective_mode == PIPELINE_MODE_KARYOTYPE,
-        "variant_mode": effective_mode == PIPELINE_MODE_VARIANT,
-        "forced_variant": forced_variant,
-        "nclose_node_count": nclose_node_count,
-        "nclose_limit": nclose_limit,
         "vcf_input": vcf_input,
         "vcf_input_path": vcf_input_path,
         "full_assembly_input": full_assembly_input,
@@ -155,11 +126,8 @@ def make_pipeline_mode_config(
     }
 
 
-def save_pipeline_mode(
+def save_pipeline_input(
     prefix,
-    requested_mode=PIPELINE_MODE_KARYOTYPE,
-    nclose_node_count=None,
-    nclose_limit=PIPELINE_MODE_NCLOSE_LIMIT,
     vcf_input=False,
     vcf_input_path=None,
     full_assembly_input=False,
@@ -167,10 +135,7 @@ def save_pipeline_mode(
     full_assembly_paf_path=None,
     reference=None,
 ):
-    config = make_pipeline_mode_config(
-        requested_mode=requested_mode,
-        nclose_node_count=nclose_node_count,
-        nclose_limit=nclose_limit,
+    config = make_pipeline_input_config(
         vcf_input=vcf_input,
         vcf_input_path=vcf_input_path,
         full_assembly_input=full_assembly_input,
@@ -178,29 +143,27 @@ def save_pipeline_mode(
         full_assembly_paf_path=full_assembly_paf_path,
         reference=reference,
     )
-    with open(_os.path.join(prefix, PIPELINE_MODE_PKL), "wb") as f:
+    with open(_os.path.join(prefix, PIPELINE_INPUT_PKL), "wb") as f:
         _pickle.dump(config, f)
     return config
 
 
-def load_pipeline_mode(prefix):
-    path = _os.path.join(prefix, PIPELINE_MODE_PKL)
+def load_pipeline_input(prefix):
+    path = _os.path.join(prefix, PIPELINE_INPUT_PKL)
     vcf_summary_path = _os.path.join(prefix, VCF_MODE_SUMMARY_JSON)
     if not _os.path.isfile(path):
-        return make_pipeline_mode_config(vcf_input=_os.path.isfile(vcf_summary_path))
+        return make_pipeline_input_config(vcf_input=_os.path.isfile(vcf_summary_path))
 
     with open(path, "rb") as f:
         config = _pickle.load(f)
 
-    mode = config.get("mode", config.get("requested_mode", PIPELINE_MODE_KARYOTYPE))
     vcf_input = bool(config.get("vcf_input", False)) or _os.path.isfile(vcf_summary_path)
+    # Accept the old full-assembly marker when restarting an existing run, but
+    # deliberately ignore all former karyotype/variant mode fields.
     full_assembly_input = bool(config.get("full_assembly_input", False)) or (
-        mode == PIPELINE_MODE_FULL_ASSEMBLY
+        config.get("mode") == "full_assembly"
     )
-    loaded_config = make_pipeline_mode_config(
-        requested_mode=mode,
-        nclose_node_count=config.get("nclose_node_count"),
-        nclose_limit=config.get("nclose_limit", PIPELINE_MODE_NCLOSE_LIMIT),
+    return make_pipeline_input_config(
         vcf_input=vcf_input,
         vcf_input_path=config.get("vcf_input_path"),
         full_assembly_input=full_assembly_input,
@@ -208,44 +171,35 @@ def load_pipeline_mode(prefix):
         full_assembly_paf_path=config.get("full_assembly_paf_path"),
         reference=config.get("reference"),
     )
-    loaded_config.update({
-        "requested_mode": config.get("requested_mode", mode),
-        "forced_variant": bool(config.get("forced_variant", False)),
-    })
-    return loaded_config
 
 
-def pipeline_mode_is_karyotype(config):
-    return config.get("mode") == PIPELINE_MODE_KARYOTYPE
+def pipeline_input_is_full_assembly(config):
+    return bool(config.get("full_assembly_input", False))
 
 
-def pipeline_mode_is_variant(config):
-    return config.get("mode") == PIPELINE_MODE_VARIANT
-
-
-def pipeline_mode_is_full_assembly(config):
-    return config.get("mode") == PIPELINE_MODE_FULL_ASSEMBLY
-
-
-def pipeline_mode_is_vcf_input(config):
+def pipeline_input_is_vcf(config):
     return bool(config.get("vcf_input", False))
 
 
-def describe_pipeline_mode(config):
-    text = f"Pipeline mode: {config.get('mode', PIPELINE_MODE_KARYOTYPE)}"
-    requested = config.get("requested_mode")
-    if requested and requested != config.get("mode"):
-        text += f" (requested={requested})"
-    if config.get("forced_variant"):
-        text += (
-            f" forced by nclose_node_count={config.get('nclose_node_count')} "
-            f"> {config.get('nclose_limit')}"
-        )
-    if config.get("vcf_input"):
-        text += " (input=vcf)"
-    if config.get("full_assembly_input"):
-        text += " (input=full_assembly)"
-    return text
+def save_nclose_nodes(prefix, nclose_nodes):
+    """Persist the canonical NClose mapping without legacy compression maps."""
+
+    path = _os.path.join(prefix, NCLOSE_NODES_PKL)
+    with open(path, "wb") as handle:
+        _pickle.dump(nclose_nodes, handle)
+
+    legacy_path = _os.path.join(prefix, LEGACY_NCLOSE_CHUNK_PKL)
+    if _os.path.isfile(legacy_path):
+        _os.remove(legacy_path)
+    return path
+
+
+def load_nclose_nodes(prefix):
+    """Load the canonical NClose mapping produced by stage 01 or legacy 02."""
+
+    path = _os.path.join(prefix, NCLOSE_NODES_PKL)
+    with open(path, "rb") as handle:
+        return _pickle.load(handle)
 
 
 def _type4_indel_event_key(edge):

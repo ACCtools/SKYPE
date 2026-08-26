@@ -5,8 +5,8 @@ The pipeline intentionally keeps the existing internal event keys:
 * ordinary BND: ``(left_contig_idx, right_contig_idx)``
 * step-11 INDEL: ``(event_type, event_idx, type2_merge_idx)``
 
-This lets stages 22, 23, 24, and 31 consume one path-usage representation
-without translating the keys used by the existing filtering code.
+This lets stages 22, 23, and 31 consume one path-usage representation without
+translating the keys used by graph construction and reporting.
 """
 
 from __future__ import annotations
@@ -52,7 +52,7 @@ def _require_artifact(prefix: str, filename: str) -> str:
     if not os.path.isfile(path):
         raise FileNotFoundError(
             f"Missing NClose tracking artifact: {path}. "
-            "Rerun the SKYPE pipeline from stage 02 so NClose filter "
+            "Rerun the SKYPE pipeline from its NClose preprocessing stage so NClose "
             "provenance is not inferred from zero weights."
         )
     return path
@@ -644,7 +644,7 @@ def reconcile_filter_status_catalog(
     }
     stage_defaults = {
         "initial": "FILTERED_02_COFILTERED_PATH",
-        "base": "FILTERED_23_COFILTERED_PATH",
+        "base": "FILTERED_02_COFILTERED_PATH",
         "filter": "FILTERED_24_COFILTERED_PATH",
         "cluster": "FILTERED_24_CLUSTER_COFILTERED_PATH",
     }
@@ -789,7 +789,7 @@ def build_nclose_report_rows(
         ):
             if stage != "base" and not run_filter_cluster:
                 row[value_col] = "NA"
-                row[reason_col] = "NOT_RUN_VARIANT_MODE"
+                row[reason_col] = "NOT_RUN_RAW_NNLS"
                 continue
             reason = stage_reason(status, stage, event_key)
             if reason != "PASS":

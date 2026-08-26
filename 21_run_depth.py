@@ -3,12 +3,6 @@ import sys
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from skype_utils import *
-from censat_pair_rescue import (
-    load_rescue_artifact,
-    rescue_event_keys,
-    stable_rescue_prefix_permutation,
-)
-from nclose_tracking import count_index_path_events
 
 import re
 import ast
@@ -1393,8 +1387,7 @@ using_node = find_using_node(contig_data, link_label)
 bnd_contig = extract_bnd_contig(contig_data)
 telo_contig = extract_telomere_connect_contig(TELO_CONNECT_NODES_INFO_PATH)
 
-with open(f'{PREFIX}/nclose_chunk_data.pkl', 'rb') as f:
-    nclose_nodes_pkl, _, _ = pkl.load(f)
+nclose_nodes_pkl = load_nclose_nodes(PREFIX)
 
 nclose_nodes = []
 for vl in nclose_nodes_pkl.values():
@@ -1553,23 +1546,11 @@ with ProcessPoolExecutor(max_workers=THREAD) as executor:
         future.result()
 
 paf_ans_list = []
-rescue_records = load_rescue_artifact(PREFIX)["records"]
-rescue_keys = rescue_event_keys(rescue_records)
-rescue_path_flags = []
 for index_file_path, key_list in index_data_list:
     final_paf_path = get_final_paf_name_from_index(index_file_path)
 
     key_list = [key2int[k] for k in key_list]
     paf_ans_list.append((final_paf_path, key_list))
-    rescue_path_flags.append(
-        bool(
-            rescue_keys
-            and count_index_path_events(
-                import_index_path(index_file_path),
-                rescue_keys,
-            )
-        )
-    )
 
 def get_paf_run(paf_loc):
     paf_base = os.path.splitext(paf_loc)[0]
@@ -1604,45 +1585,11 @@ with ProcessPoolExecutor(max_workers=THREAD) as executor:
                        disable=not sys.stdout.isatty() and not args.progress):
         future.result()
 
-with open(f'{PREFIX}/path_di_data.pkl', 'rb') as f:
-    path_di_list_dict = pkl.load(f)
-
-dep_list = []
-for k in key_ord_list:
-    dep_list.extend(path_di_list_dict[k])
-
-assert(len(dep_list) == len(paf_ans_list))
-dep_sort_ind_list = np.argsort(-np.asarray(dep_list)).tolist()
-
-
-dep_sort_list = []
-paf_sort_ans_list = []
-
-for sort_ind in dep_sort_ind_list:
-    dep_sort_list.append(dep_list[sort_ind])
-    paf_sort_ans_list.append(paf_ans_list[sort_ind])
-
-sorted_rescue_flags = [
-    rescue_path_flags[sort_ind]
-    for sort_ind in dep_sort_ind_list
-]
-rescue_prefix_permutation = stable_rescue_prefix_permutation(
-    sorted_rescue_flags
-)
-dep_sort_list = [
-    dep_sort_list[index]
-    for index in rescue_prefix_permutation
-]
-paf_sort_ans_list = [
-    paf_sort_ans_list[index]
-    for index in rescue_prefix_permutation
-]
-rescue_prefix_count = sum(sorted_rescue_flags)
-if rescue_prefix_count:
-    logging.info(
-        "Moved %d censat-pair rescue carrier paths to a contiguous prefix",
-        rescue_prefix_count,
-    )
+# Stage 10 now writes paths in deterministic terminal-pair order.  The former
+# path_di score only reordered columns and did not participate in the depth
+# matrix or NNLS objective.  Keep the fourth pickle field as zeros until the
+# downstream tuple contract is retired.
+dep_list = [0] * len(paf_ans_list)
 
 with open(f'{PREFIX}/contig_pat_vec_data.pkl', 'wb') as f:
-    pkl.dump((paf_sort_ans_list, list(key2int.values()), int2key, dep_sort_list), f)
+    pkl.dump((paf_ans_list, list(key2int.values()), int2key, dep_list), f)

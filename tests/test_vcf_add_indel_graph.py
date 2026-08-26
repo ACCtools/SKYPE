@@ -9,6 +9,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import breakend_graph as bg
+
 
 SKYPE_ROOT = Path(__file__).resolve().parents[1]
 
@@ -70,9 +72,9 @@ class VcfAddIndelGraphIntegrationTests(unittest.TestCase):
                         f"{mean_depth * 100000}\t100\t{mean_depth}\n"
                     )
 
-            build_command = [
+            preprocess_command = [
                 sys.executable,
-                str(SKYPE_ROOT / "02_Build_Breakend_Graph_Limited.py"),
+                str(SKYPE_ROOT / "01_Preprocess_NClose.py"),
                 str(paf),
                 str(fai),
                 str(telomere_bed),
@@ -85,29 +87,69 @@ class VcfAddIndelGraphIntegrationTests(unittest.TestCase):
                 str(ins_paf),
                 "--vcf_input",
                 str(vcf),
-                "--limit_combinations",
-                str(native_limits),
-                "--add_indel_graph",
                 "--skip_bam_analysis",
                 "-t",
                 "1",
-                "-d",
-                "0",
             ]
-            build_result = subprocess.run(
-                build_command,
+            preprocess_result = subprocess.run(
+                preprocess_command,
                 cwd=SKYPE_ROOT,
                 capture_output=True,
                 text=True,
             )
             self.assertEqual(
-                build_result.returncode,
+                preprocess_result.returncode,
                 0,
-                msg=build_result.stdout + "\n" + build_result.stderr,
+                msg=preprocess_result.stdout + "\n" + preprocess_result.stderr,
+            )
+
+            stage_input = bg.load_stage10_input(output / "01_nclose_data.pkl")
+            type4_node_indices = {
+                index
+                for index, node in enumerate(stage_input.contig_data)
+                if str(node[bg.CTG_NAM]).startswith("vcf_type4_graph_")
+            }
+            self.assertEqual(len(type4_node_indices), 2)
+            inactive_state = bg.build_graph_state(stage_input)
+            self.assertEqual(inactive_state.selected_type4_indel_graph_edges, ())
+            for source, targets in inactive_state.bnd_graph_adjacency.items():
+                if not isinstance(source, str):
+                    self.assertNotIn(source[1], type4_node_indices)
+                for target in targets:
+                    if not isinstance(target, str):
+                        self.assertNotIn(target[1], type4_node_indices)
+
+            graph_result = subprocess.run(
+                [
+                    sys.executable,
+                    str(SKYPE_ROOT / "10_Graph_Find_Paths.py"),
+                    str(output / "01_nclose_data.pkl"),
+                    str(fai),
+                    str(output),
+                    "-t",
+                    "1",
+                    "-d",
+                    "0",
+                    "--limit-combinations",
+                    str(native_limits),
+                    "--add-indel-graph",
+                    "--main-stat-path",
+                    str(depth_path),
+                    "--censat-bed-path",
+                    str(censat_bed),
+                ],
+                cwd=SKYPE_ROOT,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(
+                graph_result.returncode,
+                0,
+                msg=graph_result.stdout + "\n" + graph_result.stderr,
             )
             self.assertIn(
                 "Using fixed limit_combinations",
-                build_result.stdout + build_result.stderr,
+                graph_result.stdout + graph_result.stderr,
             )
             self.assertEqual(
                 json.loads(
@@ -125,6 +167,20 @@ class VcfAddIndelGraphIntegrationTests(unittest.TestCase):
             self.assertEqual(summary["vcf_type4_graph_nodes"], 2)
             self.assertEqual(summary["vcf_type4_graph_ins_excluded"], 1)
             self.assertEqual(summary["nclose_pairs"], 2)
+
+            stage01_summary = json.loads(
+                (output / "stage01_nclose_summary.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(stage01_summary["source_mode"], "vcf")
+            self.assertIsNone(stage01_summary["ignored_primary_paf"])
+            self.assertEqual(
+                stage01_summary["effective_unitig_paf"], str(paf)
+            )
+            self.assertTrue(
+                (output / "stage01_nclose_rejections.tsv").is_file()
+            )
 
             with (output / "vcf_type4_events.pkl").open("rb") as handle:
                 step11_events = pickle.load(handle)
@@ -145,8 +201,8 @@ class VcfAddIndelGraphIntegrationTests(unittest.TestCase):
                 )
             )
 
-            with (output / "nclose_chunk_data.pkl").open("rb") as handle:
-                canonical_nclose, _, _ = pickle.load(handle)
+            with (output / "nclose_nodes.pkl").open("rb") as handle:
+                canonical_nclose = pickle.load(handle)
             ppc_rows = [
                 line.rstrip("\n").split("\t")
                 for line in (output / "assembly.paf.ppc.paf").read_text(

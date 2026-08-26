@@ -56,7 +56,6 @@ def load_censat_helpers():
         "_normalized_censat_endpoint_dirs",
         "apply_censat_censat_filter",
         "apply_censat_fragment_direction_filter",
-        "should_add_censat_pair_rescue",
     }
     tree = ast.parse(BUILD_GRAPH_PATH.read_text(encoding="utf-8"))
     definitions = [
@@ -90,7 +89,6 @@ def load_censat_helpers():
         "CTG_CENSAT": CTG_CENSAT,
         "NCLOSE_COMPRESS_LIMIT": NCLOSE_COMPRESS_LIMIT,
         "OFFSET_DIR_GROUP_LIMIT": OFFSET_DIR_GROUP_LIMIT,
-        "PIPELINE_MODE_KARYOTYPE": "karyotype",
     }
     module = ast.Module(body=definitions, type_ignores=[])
     exec(compile(module, str(BUILD_GRAPH_PATH), "exec"), namespace)
@@ -118,7 +116,6 @@ apply_censat_censat_filter = HELPERS["apply_censat_censat_filter"]
 apply_censat_fragment_direction_filter = HELPERS[
     "apply_censat_fragment_direction_filter"
 ]
-should_add_censat_pair_rescue = HELPERS["should_add_censat_pair_rescue"]
 
 
 def ordered_call_names(function_name: str):
@@ -487,62 +484,7 @@ class BothCensatFilterTests(unittest.TestCase):
 
 
 class CensatPipelineOrderingTests(unittest.TestCase):
-    def test_pair_rescue_source_gate_truth_table(self):
-        eligible = NCloseSourceConfig(
-            mode=PregraphSourceMode.CONFIGURED_PAF,
-            paf_file_paths=("primary.paf", "unitig.paf"),
-            original_paf_paths=("primary.raw.paf", "unitig.raw.paf"),
-            is_unitig_reduced=False,
-            secondary_candidate_paf="unitig.paf",
-        )
-        self.assertTrue(should_add_censat_pair_rescue("karyotype", eligible))
-
-        ineligible_sources = {
-            "primary retry": NCloseSourceConfig(
-                mode=PregraphSourceMode.PRIMARY_ONLY_RETRY,
-                paf_file_paths=eligible.paf_file_paths,
-                original_paf_paths=eligible.original_paf_paths,
-                is_unitig_reduced=False,
-                secondary_candidate_paf="unitig.paf",
-            ),
-            "no secondary": NCloseSourceConfig(
-                mode=PregraphSourceMode.CONFIGURED_PAF,
-                paf_file_paths=eligible.paf_file_paths,
-                original_paf_paths=eligible.original_paf_paths,
-                is_unitig_reduced=False,
-                secondary_candidate_paf=None,
-            ),
-            "unitig reduced": NCloseSourceConfig(
-                mode=PregraphSourceMode.CONFIGURED_PAF,
-                paf_file_paths=eligible.paf_file_paths,
-                original_paf_paths=eligible.original_paf_paths,
-                is_unitig_reduced=True,
-                secondary_candidate_paf="unitig.paf",
-            ),
-            "single aligned PAF": NCloseSourceConfig(
-                mode=PregraphSourceMode.CONFIGURED_PAF,
-                paf_file_paths=("primary.paf",),
-                original_paf_paths=eligible.original_paf_paths,
-                is_unitig_reduced=False,
-                secondary_candidate_paf="unitig.paf",
-            ),
-            "single original PAF": NCloseSourceConfig(
-                mode=PregraphSourceMode.CONFIGURED_PAF,
-                paf_file_paths=eligible.paf_file_paths,
-                original_paf_paths=("primary.raw.paf",),
-                is_unitig_reduced=False,
-                secondary_candidate_paf="unitig.paf",
-            ),
-        }
-        for case_name, source in ineligible_sources.items():
-            with self.subTest(case_name=case_name):
-                self.assertFalse(
-                    should_add_censat_pair_rescue("karyotype", source)
-                )
-
-        self.assertFalse(should_add_censat_pair_rescue("other", eligible))
-
-    def test_pair_rescue_stays_after_ordinary_censat_arbitration(self):
+    def test_candidate_filters_stay_after_ordinary_censat_arbitration(self):
         calls = ordered_call_names("nclose_calc")
         ordered_contract = [
             "apply_censat_censat_filter",
@@ -551,7 +493,6 @@ class CensatPipelineOrderingTests(unittest.TestCase):
             "collect_missing_cen_fragment_dir_censat_noncensat",
             "add_nearest_combined_censat_noncensat_ncloses",
             "apply_offset_direction_mismatched_censat_noncensat_filter",
-            "add_censat_pair_rescue_ncloses",
             "apply_nclose_count_vaf_filter",
         ]
 
@@ -559,7 +500,7 @@ class CensatPipelineOrderingTests(unittest.TestCase):
         self.assertEqual(
             positions,
             sorted(positions),
-            "CenSat repair/filter/rescue lifecycle changed",
+            "CenSat repair/filter lifecycle changed",
         )
 
 

@@ -1,85 +1,141 @@
 import ast
+import os
+import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
+import h5py
 import numpy as np
+from scipy.optimize import nnls
 
 
-RUN_NNLS_PATH = Path(__file__).resolve().parents[1] / "23_run_nnls.py"
+SKYPE_ROOT = Path(__file__).resolve().parents[1]
+RUN_NNLS_PATH = SKYPE_ROOT / "23_run_nnls.py"
+SAVE_MATRIX_PATH = SKYPE_ROOT / "22_save_matrix.py"
+BUILD_GRAPH_PATH = SKYPE_ROOT / "02_Build_Breakend_Graph_Limited.py"
 
 
-def load_solver_matrix_from_store():
+def load_functions(*names):
     tree = ast.parse(RUN_NNLS_PATH.read_text(encoding="utf-8"))
-    function = next(
+    functions = [
         node
         for node in tree.body
-        if isinstance(node, ast.FunctionDef)
-        and node.name == "solver_matrix_from_store"
-    )
-    module = ast.Module(body=[function], type_ignores=[])
-    namespace = {}
+        if isinstance(node, ast.FunctionDef) and node.name in names
+    ]
+    if {node.name for node in functions} != set(names):
+        raise AssertionError(f"Missing raw-NNLS helpers: {names}")
+    calls = []
+
+    def fake_bvls(matrix, target, lower, upper, n_threads):
+        calls.append((matrix.copy(), target.copy(), n_threads))
+        return SimpleNamespace(beta=nnls(matrix, target)[0].astype(matrix.dtype))
+
+    namespace = {
+        "MATRIX_CONTRACT": "depth_only_v1",
+        "h5py": h5py,
+        "np": np,
+        "os": os,
+        "bvls": fake_bvls,
+    }
+    module = ast.Module(body=functions, type_ignores=[])
     exec(compile(module, str(RUN_NNLS_PATH), "exec"), namespace)
-    return namespace["solver_matrix_from_store"]
+    return namespace, calls
 
 
-solver_matrix_from_store = load_solver_matrix_from_store()
-
-
-class SolverMatrixStoreTests(unittest.TestCase):
-    def test_compacted_workspace_prefix_is_an_exact_zero_copy_view(self):
-        feature_major = np.arange(8 * 4, dtype=np.float32).reshape(8, 4)
-
-        solver_matrix = solver_matrix_from_store(
-            feature_major,
-            n_features=5,
+class RawNnlsTests(unittest.TestCase):
+    def test_synthetic_matrix_matches_direct_full_column_nnls_once(self):
+        namespace, calls = load_functions("fit_raw_nnls")
+        matrix = np.asarray(
+            [[1, 0, 1], [0, 1, 1], [1, 1, 0], [2, 0, 0]],
+            dtype=np.float32,
         )
+        target = np.asarray([2, 3, 4, 2], dtype=np.float32)
 
-        np.testing.assert_array_equal(
-            solver_matrix,
-            feature_major[:5, :].T,
+        observed = namespace["fit_raw_nnls"](matrix, target)
+        expected = nnls(matrix, target)[0]
+
+        np.testing.assert_allclose(observed, expected, rtol=1e-5, atol=1e-5)
+        self.assertEqual(len(observed), matrix.shape[1])
+        self.assertEqual(len(calls), 1)
+        np.testing.assert_array_equal(calls[0][0], matrix)
+
+    def test_explicitly_excluded_zero_column_stays_in_the_solve(self):
+        namespace, calls = load_functions("fit_raw_nnls")
+        matrix = np.asarray(
+            [[1, 0], [1, 0], [0, 0]],
+            dtype=np.float32,
         )
-        self.assertTrue(np.shares_memory(solver_matrix, feature_major))
+        target = np.asarray([2, 2, 0], dtype=np.float32)
 
-    def test_initial_fit_uses_direct_rescue_prefix_slice(self):
-        source = RUN_NNLS_PATH.read_text(encoding="utf-8")
+        weights = namespace["fit_raw_nnls"](matrix, target)
+
+        np.testing.assert_allclose(weights, [2, 0], atol=1e-6)
+        self.assertEqual(calls[0][0].shape[1], 2)
+
+    def test_main_contains_exactly_one_raw_solver_call(self):
+        tree = ast.parse(RUN_NNLS_PATH.read_text(encoding="utf-8"))
+        main = next(
+            node
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef) and node.name == "main"
+        )
+        calls = [
+            node
+            for node in ast.walk(main)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "fit_raw_nnls"
+        ]
+        self.assertEqual(len(calls), 1)
+
+    def test_depth_only_contract_accepts_all_feature_rows(self):
+        namespace, _ = load_functions("_contract_text", "load_depth_only_matrix")
+        with tempfile.TemporaryDirectory() as prefix:
+            with h5py.File(Path(prefix) / "matrix.h5", "w") as handle:
+                handle.attrs["matrix_contract"] = "depth_only_v1"
+                handle.create_dataset("A", data=np.ones((3, 4), dtype=np.float32))
+                handle.create_dataset("A_fail", data=np.ones((3, 2), dtype=np.float32))
+                handle.create_dataset("B", data=np.ones(4, dtype=np.float32))
+                handle.create_dataset("B_fail", data=np.ones(2, dtype=np.float32))
+
+            feature_depth, feature_fail, target_depth, target_fail = namespace[
+                "load_depth_only_matrix"
+            ](prefix)
+
+        self.assertEqual(feature_depth.shape, (3, 4))
+        self.assertEqual(feature_fail.shape, (3, 2))
+        self.assertEqual(target_depth.shape, (4,))
+        self.assertEqual(target_fail.shape, (2,))
+
+    def test_old_prior_matrix_is_rejected(self):
+        namespace, _ = load_functions("_contract_text", "load_depth_only_matrix")
+        with tempfile.TemporaryDirectory() as prefix:
+            with h5py.File(Path(prefix) / "matrix.h5", "w") as handle:
+                handle.create_dataset("A", data=np.ones((2, 3), dtype=np.float32))
+                handle.create_dataset("A_fail", data=np.ones((2, 1), dtype=np.float32))
+                handle.create_dataset("B", data=np.ones(3, dtype=np.float32))
+                handle.create_dataset("B_fail", data=np.ones(1, dtype=np.float32))
+            with self.assertRaisesRegex(ValueError, "depth-only"):
+                namespace["load_depth_only_matrix"](prefix)
+
+    def test_stage22_has_no_prior_solve_or_prior_artifact(self):
+        source = SAVE_MATRIX_PATH.read_text(encoding="utf-8")
+        self.assertNotIn("normal_prior", source)
+        self.assertNotIn("scipy.optimize import nnls", source)
+        self.assertNotIn("normal_prior_data.pkl", source)
+        self.assertIn("matrix_contract", source)
         self.assertIn(
-            "A_initial = A_store[num_rescue_paths:, :].T",
+            "set(range(n)) - explicit_excluded_columns",
             source,
         )
-        self.assertNotIn("initial_A_idx_list", source)
 
-    def test_only_added_pairs_use_info_for_censat_pair_logs(self):
-        tree = ast.parse(RUN_NNLS_PATH.read_text(encoding="utf-8"))
-        rescue_logs = []
-        for node in ast.walk(tree):
-            if (
-                isinstance(node, ast.Call)
-                and isinstance(node.func, ast.Attribute)
-                and isinstance(node.func.value, ast.Name)
-                and node.func.value.id == "logging"
-                and node.args
-                and isinstance(node.args[0], ast.Constant)
-                and isinstance(node.args[0].value, str)
-                and "censat-pair" in node.args[0].value.lower()
-            ):
-                rescue_logs.append((node.func.attr, node.args[0].value))
-
-        info_logs = [
-            message
-            for level, message in rescue_logs
-            if level == "info"
-        ]
-        self.assertEqual(
-            info_logs,
-            ["Censat-pair rescue added: %s"],
-        )
-        self.assertTrue(
-            all(
-                level == "debug"
-                or message == "Censat-pair rescue added: %s"
-                for level, message in rescue_logs
-            )
-        )
+    def test_mode_cli_and_postprocessing_stages_are_removed(self):
+        source = BUILD_GRAPH_PATH.read_text(encoding="utf-8")
+        self.assertNotIn('"--karyotype_mode"', source)
+        self.assertNotIn('"--variant_mode"', source)
+        self.assertFalse((SKYPE_ROOT / "24_cluster_weight.py").exists())
+        self.assertFalse((SKYPE_ROOT / "30_virtual_sky.py").exists())
 
 
 if __name__ == "__main__":

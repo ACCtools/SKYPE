@@ -2,7 +2,7 @@
 
 The full assembly is aligned once by the outer ACCtools orchestrator.  This
 module treats every mapped FASTA record as one matrix feature and deliberately
-does not fabricate stage-02/11 graph paths.
+does not fabricate native stage-01/10/11 graph paths.
 """
 
 from __future__ import annotations
@@ -34,10 +34,10 @@ from nclose_tracking import (
     save_path_usage,
 )
 from skype_utils import (
-    PIPELINE_MODE_FULL_ASSEMBLY,
-    load_pipeline_mode,
-    pipeline_mode_is_full_assembly,
-    save_pipeline_mode,
+    load_pipeline_input,
+    pipeline_input_is_full_assembly,
+    save_nclose_nodes,
+    save_pipeline_input,
 )
 from virtual_sky_plotting import render_karyotype_diagram
 
@@ -545,19 +545,13 @@ def build_full_assembly_matrix(
 
     matrix_path = os.path.join(prefix, "matrix.h5")
     with h5py.File(matrix_path, "w") as handle:
+        handle.attrs["matrix_contract"] = "full_assembly_depth_v1"
         handle.create_dataset("A", data=A_clean)
         handle.create_dataset("A_fail", data=A_fail)
         handle.create_dataset("B", data=B_clean)
         handle.create_dataset("B_fail", data=B_fail)
         handle.create_dataset("B_depth_start", data=0)
         handle.create_dataset("B_depth_end", data=clean_count)
-        handle.create_dataset("normal_prior_strength", data=0.0)
-        handle.create_dataset("normal_prior_row_count", data=0)
-        handle.create_dataset("normal_prior_base_row_count", data=0)
-        handle.create_dataset("normal_prior_scale", data=0.0)
-        handle.create_dataset("normal_prior_scales", data=np.asarray([], dtype=np.float32))
-        handle.create_dataset("normal_prior_total_scale_squared", data=0.0)
-        handle.create_dataset("normal_prior_length_normalization_factor", data=0.0)
 
     np.save(os.path.join(prefix, "B.npy"), B)
     with open(os.path.join(prefix, FULL_ASSEMBLY_DEPTH_LAYOUT_PKL), "wb") as handle:
@@ -575,7 +569,6 @@ def build_full_assembly_matrix(
     matrix_meta = {
         "B_depth_start": 0,
         "B_depth_end": clean_count,
-        "censat_pair_rescue_path_prefix_count": 0,
         "full_assembly": True,
     }
     with open(os.path.join(prefix, "23_input.pkl"), "wb") as handle:
@@ -589,33 +582,16 @@ def build_full_assembly_matrix(
             ),
             handle,
         )
-    with open(os.path.join(prefix, "tar_chr_data.pkl"), "wb") as handle:
-        pickle.dump({}, handle)
-    with open(os.path.join(prefix, "normal_prior_data.pkl"), "wb") as handle:
-        pickle.dump(
-            {
-                "strength": 0.0,
-                "row_count": 0,
-                "base_row_count": 0,
-                "prior_chroms": [],
-                "prior_cols": [],
-                "init_cols": [],
-                "cent_fragment_cols": [],
-                "targets": np.asarray([], dtype=np.float32),
-                "tar_chr_data": {},
-            },
-            handle,
-        )
     for filename, value in (
         ("path_data.pkl", {}),
         ("cen_fragment_data.pkl", {}),
-        ("nclose_chunk_data.pkl", ({}, {}, {})),
         ("ecdna_circuit_data.pkl", ([], {})),
         ("conjoined_type4_ins_del.pkl", ([], [])),
         ("indel_exclude_idx_set.pkl", set()),
     ):
         with open(os.path.join(prefix, filename), "wb") as handle:
             pickle.dump(value, handle)
+    save_nclose_nodes(prefix, {})
     with open(os.path.join(prefix, "tot_loc_list.pkl"), "wb") as handle:
         pickle.dump([record["paf_path"] for record in path_records], handle)
 
@@ -1028,8 +1004,8 @@ def _validate_restart_metadata(
     aligned_paf_path: str,
     reference: str,
 ) -> None:
-    config = load_pipeline_mode(prefix)
-    if not pipeline_mode_is_full_assembly(config):
+    config = load_pipeline_input(prefix)
+    if not pipeline_input_is_full_assembly(config):
         raise FileNotFoundError(
             f"Full-assembly restart metadata is missing from {prefix}. "
             "Restart from the beginning of full_assembly_pipeline.py."
@@ -1091,9 +1067,8 @@ def run_full_assembly_pipeline(
 
     os.makedirs(prefix, exist_ok=True)
     if start_at == 21:
-        save_pipeline_mode(
+        save_pipeline_input(
             prefix,
-            requested_mode=PIPELINE_MODE_FULL_ASSEMBLY,
             full_assembly_input=True,
             full_assembly_path=assembly_path,
             full_assembly_paf_path=aligned_paf_path,

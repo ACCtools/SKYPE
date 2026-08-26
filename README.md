@@ -1,46 +1,72 @@
-# Graph-based cancer genome karyotyping and structural-variant analysis tool
+# Graph-based cancer structural-variant caller
 
 [![Tests](https://github.com/ACCtools/SKYPE/actions/workflows/tests.yml/badge.svg)](https://github.com/ACCtools/SKYPE/actions/workflows/tests.yml)
 
-**SKYPE** generates the following results.
+**SKYPE** discovers structural variants from assembly alignments and assigns
+copy-number support from observed read depth. It can also import an existing
+VCF and annotate its records with SKYPE depth support.
 
-- A **Circos plot** showing observed and reconstructed copy number together with rearrangement junctions, indels, amplicons, and neotelomeres
-- A **Virtual SKY diagram** showing depth-weighted combinations of reconstructed cancer chromosome paths
-- An **ISCN-style karyotype summary** and copy-number-weighted structural-variant results
+The native pipeline:
 
-**SKYPE** implements the following steps to generate these results.
+- classifies and compresses assembly segments around NClose junctions;
+- builds a breakend graph and enumerates candidate chromosome paths;
+- constructs one observed-depth matrix for all candidate paths;
+- fits every matrix column with one raw non-negative least-squares solve; and
+- emits copy-number-weighted variants, an NClose report, and a coverage plot.
 
-- Derive rearrangement junctions from contig/unitig alignments, or import them from a supported VCF
-- **Classify contig segments** by their mutational role and prune noisy or unnecessary segments
-- **Compress contigs** around their most significant terminal nodes (NClose)
-- **Build a breakend graph** by connecting NClose and telomere nodes
-- Find candidate **telomere-to-telomere paths** and circular components in the breakend graph
-- **Recover full chromosome paths** with normal reference segments
-- Estimate the copy number of each path using non-negative least squares
-- Visualize the reconstructed karyotype and report copy-number-weighted variants
+There is no karyotype/variant mode switch, normal-chromosome prior, post-NNLS
+NClose filtering, or clustering stage.
+
+### Stage-01/10 refactor status
+
+`01_Preprocess_NClose.py` now owns contig/telomere preprocessing, NClose
+post-processing, ecDNA discovery, and the exact three-field
+`01_nclose_data.pkl` handoff consumed by `10_Graph_Find_Paths.py`. VCF input is
+usable through the split stages. In assembly mode the positional primary PAF
+is retained only for command/file-name compatibility: stage 01 reads the
+`--alt` unitig PAF and the last `--original-paf-loc` value, and writes
+unitig-only rows under the primary-named `*.ppc.paf`. It extracts one
+path-ordered terminal NClose from each retained type-1/2 unitig and globally
+clusters those pairs with the same coordinate/direction rules used by the
+legacy stage 02.
+Downstream stages read canonical NCloses from `nclose_nodes.pkl`; the former
+endpoint-compression tuple is no longer an external artifact.
+
+Stage 01 exposes two ordered extension points in `nclose_preprocess.py`:
+`ContigPipelineStage` for adding another unitig split/augmentation policy and
+`NClosePipelineStage` (or `make_nclose_filter_stage`) for candidate filtering
+or augmentation. `default_stage01_pipeline()` returns the active sequence, and
+new stages can be placed relative to a named boundary with
+`with_contig_stage(...)` or `with_nclose_stage(...)` without changing the
+stage-01 driver.
+
+Every run also writes `stage01_nclose_summary.json` with ordered stage counts
+and `stage01_nclose_rejections.tsv` with the first filter/reason that removed
+each candidate. ACCtools runs stages 01 and 10 by default; `--legacy` selects
+the unchanged combined stage 02 route.
 
 ## Results
 
-All files below are written to the SKYPE output directory.
+All files are written to the SKYPE output directory.
 
 | Stage | Output | Description |
 | --- | --- | --- |
-| `30_virtual_sky.py` | `virtual_sky.png`, `virtual_sky.pdf` | Virtual SKY diagram of reconstructed chromosome paths, colored by chromosome of origin and labeled with normalized copy number. |
-| `30_virtual_sky.py` | `karyotype.txt` | Tab-separated ISCN-style karyotype labels and their normalized depth (`N`). |
-| `31_depth_analysis.py` | `total_cov.png`, `total_cov.pdf` | Circos view of observed and reconstructed chromosome depth, with copy-number-weighted breakends, inversions, indels, amplicons, and neotelomeres. |
-| `31_depth_analysis.py` | `SV_call_result.vcf` | Structural-variant calls (`BND`, `INV`, `DEL`, and `DUP`) with normalized copy-number support. Produced in assembly-input modes. |
-| `31_depth_analysis.py` | `SKYPE_result.bed` | Simplified BED report of breakends, deletions, duplications, centromere fragments, amplicons, and virtual inversions. Produced in assembly-input modes. |
-| `31_depth_analysis.py` | `SV_benchmark_result.vcf` | Copy-number-annotated copy of the input VCF. Produced only in VCF input mode instead of `SV_call_result.vcf` and `SKYPE_result.bed`. |
-
-The unsuffixed result files are always generated. Karyotype mode also generates `_filter` and `_cluster` versions of the Virtual SKY, karyotype, Circos, VCF, and BED results. Variant mode and VCF input mode generate only the unsuffixed versions.
+| `01_Preprocess_NClose.py` | `01_nclose_data.pkl` | Exact three-field graph handoff: `contig_data`, `nclose_nodes`, and `telo_contig`. |
+| `01_Preprocess_NClose.py` | `stage01_nclose_summary.json`, `stage01_nclose_rejections.tsv` | Ordered split/filter counts and first-rejection provenance. |
+| `23_run_nnls.py` | `weight.npy`, `predict_B.npy` | Full-column raw NNLS weights and reconstructed depth from one solve. |
+| `31_depth_analysis.py` | `SV_call_result.vcf` | Native `BND`, `INV`, `DEL`, and `DUP` calls with normalized copy-number support. |
+| `31_depth_analysis.py` | `SKYPE_result.bed` | Simplified native breakend, indel, centromere-fragment, amplicon, and virtual-inversion calls. |
+| `31_depth_analysis.py` | `nclose_report.tsv` | Per-NClose coordinates, orientation, copy-number support, and NClose-preprocessing exclusion provenance. |
+| `31_depth_analysis.py` | `total_cov.png`, `total_cov.pdf` | Circos view of observed and reconstructed depth with the reported variants. |
+| `31_depth_analysis.py` | `SV_benchmark_result.vcf` | Copy-number-annotated input VCF, produced instead of the native VCF/BED in VCF-input runs. |
 
 ## Running SKYPE
 
-Run SKYPE through the **[ACCtools pipeline](https://github.com/ACCtools/ACCtools-pipeline)**, which prepares the assembly, alignments, depth data, reference resources, and stage arguments required by SKYPE.
+Run SKYPE through the **[ACCtools pipeline](https://github.com/ACCtools/ACCtools-pipeline)**,
+which prepares the assembly, alignments, depth data, reference resources, and
+stage arguments.
 
-For complete-assembly input, ACCtools runs minimap2 followed by alignasm and
-invokes `full_assembly_pipeline.py` once with the resulting `*.aln.paf`. That
-entrypoint owns depth splitting, matrix construction, NNLS, Virtual SKY, and
-coverage rendering; the numbered stage scripts are not entered. The normal and
-full-assembly routes call the same reusable stage-30 and stage-31 renderers, so
-their figure layout and styling stay consistent.
+Complete-assembly input remains a separate workflow. ACCtools invokes
+`full_assembly_pipeline.py`, which treats mapped FASTA records as matrix
+features and retains its Virtual SKY, karyotype, and coverage outputs. The
+native numbered pipeline is not entered for that input type.

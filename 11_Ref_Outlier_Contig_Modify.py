@@ -303,11 +303,10 @@ def classify_vcf_bnd_type4_pair(nclose_key, node_a_idx, node_b_idx):
 
 
 def collect_vcf_bnd_type4_events():
-    nclose_chunk_path = f"{args.prefix}/nclose_chunk_data.pkl"
-    if not os.path.isfile(nclose_chunk_path):
+    nclose_nodes_path = os.path.join(args.prefix, NCLOSE_NODES_PKL)
+    if not os.path.isfile(nclose_nodes_path):
         return []
-    with open(nclose_chunk_path, "rb") as f:
-        nclose_nodes, _, _ = pkl.load(f)
+    nclose_nodes = load_nclose_nodes(args.prefix)
 
     events = []
     seen_spans = set()

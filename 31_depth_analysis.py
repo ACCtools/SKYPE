@@ -5,6 +5,13 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from skype_utils import *
 from circos_plotting import render_total_coverage_circos
 from skype_vcf_writer import write_vcf_record_with_fallback
+from bp_step_depth_ratio import (
+    BP_STEP_DEPTH_RATIO_B,
+    BP_STEP_DEPTH_RATIO_PREDICT_B,
+    BreakpointStepDepthRatio,
+    add_ratio_info,
+    bnd_expected_high_side,
+)
 from nclose_tracking import (
     bnd_event_keys,
     bed_visible_ecdna_indices_across_stages,
@@ -439,6 +446,18 @@ def build_vcf_header(contig_lengths):
         ("STRANDS", 1, "String", "Breakpoint strandedness"),
         ("MATEID", 1, "String", "ID of mate breakend"),
         ("MERGE_MATEID", 1, "String", "ID of merged breakend"),
+        (
+            BP_STEP_DEPTH_RATIO_B,
+            2,
+            "Float",
+            "Signed breakpoint depth step divided by raw NClose depth in observed B; order is local,mate for BND and POS,END for symbolic SV",
+        ),
+        (
+            BP_STEP_DEPTH_RATIO_PREDICT_B,
+            2,
+            "Float",
+            "Signed breakpoint depth step divided by raw NClose depth in predict_B; order is local,mate for BND and POS,END for symbolic SV",
+        ),
     ):
         header.add_info_line(collections.OrderedDict([
             ("ID", info_id),
@@ -474,6 +493,7 @@ def write_bnd_vcf_pair(
     quality=60,
     filter_str='.',
     merge_mate_ids=None,
+    bp_ratio_info=None,
 ):
     pos_a = max(1, int(pos_a))
     pos_b = max(1, int(pos_b))
@@ -485,10 +505,10 @@ def write_bnd_vcf_pair(
     alt_a = bnd_alt(ref, chr_b, pos_b, form_a)
     alt_b = bnd_alt(ref, chr_a, pos_a, form_b)
 
-    for chrom, pos, sv_id, alt, mate_id in (
+    for record_index, (chrom, pos, sv_id, alt, mate_id) in enumerate((
         (chr_a, pos_a, sv_id_a, alt_a, sv_id_b),
         (chr_b, pos_b, sv_id_b, alt_b, sv_id_a),
-    ):
+    )):
         info = collections.OrderedDict([
             ("SVTYPE", "BND"),
             ("WEIGHT", round(weight_N, 2)),
@@ -498,6 +518,7 @@ def write_bnd_vcf_pair(
         ])
         if merge_mate_ids:
             info["MERGE_MATEID"] = ",".join(merge_mate_ids)
+        add_ratio_info(info, bp_ratio_info, reverse=(record_index == 1))
         writer.write_record(vcfpy.Record(
             CHROM=chrom,
             POS=pos,
@@ -521,6 +542,7 @@ def write_symbolic_vcf_record(
     weight,
     ctg_name,
     svclass=None,
+    bp_ratio_info=None,
 ):
     info = collections.OrderedDict([
         ("SVTYPE", svtype),
@@ -531,6 +553,7 @@ def write_symbolic_vcf_record(
     ])
     if svclass is not None:
         info["SVCLASS"] = svclass
+    add_ratio_info(info, bp_ratio_info)
     writer.write_record(vcfpy.Record(
         CHROM=chrom,
         POS=int(pos),
@@ -627,7 +650,7 @@ def attach_ctg_intype_interrupt_flanks(segments : list, rows : list):
 
 def get_ctg_intype_interrupt_segments(key_int : int, endpoint_chroms : set) -> list:
     """
-    Coordinate-bearing mirror of 30_virtual_sky.get_ctg_intype_interrupt_pieces().
+    Build coordinate-bearing interruption pieces for split BND reporting.
     Keep the same chromosome selection/filtering; only attach entry/exit coords.
     """
     paf_loc = f"{output_folder}/{key_int}.paf"
@@ -1136,7 +1159,8 @@ def build_virtual_inv_events(prefix, meandepth, contig_lengths, min_depth_N=0.0,
     return events
 
 def _pairs_to_vcf(nclose_pairs, contig_data, contig_lengths, display_indel, amplicon_events, virtual_inv_events,
-                  split_bnd_weights, out_vcf_path, nclose_cn_std):
+                  split_bnd_weights, out_vcf_path, nclose_cn_std, raw_nclose_depth,
+                  bp_ratio_calculator):
     with vcfpy.Writer.from_path(out_vcf_path, build_vcf_header(contig_lengths)) as writer:
         # 2) Translocation, Inversion 처리
         for nclose in nclose_pairs:
@@ -1177,6 +1201,22 @@ def _pairs_to_vcf(nclose_pairs, contig_data, contig_lengths, display_indel, ampl
             # else:
             ctg_name = a[CTG_NAM]
 
+            bp_ratio_info = bp_ratio_calculator.pair(
+                [
+                    (
+                        chr_a,
+                        pos_a,
+                        bnd_expected_high_side(dir_a, "exit"),
+                    ),
+                    (
+                        chr_b,
+                        pos_b,
+                        bnd_expected_high_side(dir_b, "entry"),
+                    ),
+                ],
+                raw_nclose_depth[nclose],
+            )
+
             write_bnd_vcf_pair(
                 writer,
                 f"SKYPE.BND.{bnd_nclose_ind}",
@@ -1190,6 +1230,7 @@ def _pairs_to_vcf(nclose_pairs, contig_data, contig_lengths, display_indel, ampl
                 ctg_name,
                 quality=quality,
                 filter_str=filter_str,
+                bp_ratio_info=bp_ratio_info,
             )
 
         for split_key, split_weight in sorted(split_bnd_weights.items()):
@@ -1231,18 +1272,20 @@ def _pairs_to_vcf(nclose_pairs, contig_data, contig_lengths, display_indel, ampl
 
         for chrom, indel_list in display_indel.items():
             for indel in indel_list:
-                indel_type, start, end, w, _, indel_idx = indel
+                indel_type, start, end, w, _, indel_idx, raw_depth = indel
                 lo, hi = min(start, end), max(start, end)
                 if indel_type == 'd':
                     sv_id = f"SKYPE.DEL.{del_dounter}"
                     svlen = -(hi - lo)
                     svtype = "DEL"
+                    expected_high_sides = ("left", "right")
 
                     del_dounter += 1
                 elif indel_type == 'i':
                     sv_id = f"SKYPE.DUP.{dup_counter}"
                     svlen = hi - lo
                     svtype = "DUP"
+                    expected_high_sides = ("right", "left")
 
                     dup_counter += 1
                 else:
@@ -1252,6 +1295,13 @@ def _pairs_to_vcf(nclose_pairs, contig_data, contig_lengths, display_indel, ampl
                     f"INDEL_INDEX_{indel_idx}"
                     if isinstance(indel_idx, int)
                     else str(indel_idx)
+                )
+                bp_ratio_info = bp_ratio_calculator.pair(
+                    [
+                        (chrom, lo, expected_high_sides[0]),
+                        (chrom, hi, expected_high_sides[1]),
+                    ],
+                    raw_depth,
                 )
                 write_symbolic_vcf_record(
                     writer,
@@ -1263,6 +1313,7 @@ def _pairs_to_vcf(nclose_pairs, contig_data, contig_lengths, display_indel, ampl
                     svlen,
                     w,
                     ctg_name,
+                    bp_ratio_info=bp_ratio_info,
                 )
 
         for amplicon_counter, (chrom, st, nd, _, depth_N, amplicon_idx) in enumerate(amplicon_events, start=1):
@@ -1338,7 +1389,7 @@ CHROMOSOME_INFO_FILE_PATH = args.reference_fai_path
 main_stat_loc = args.main_stat_loc
 TELOMERE_INFO_FILE_PATH = args.telomere_bed_path
 PREPROCESSED_PAF_FILE_PATH = args.ppc_paf_file_path
-pipeline_mode_config = load_pipeline_mode(PREFIX)
+pipeline_input_config = load_pipeline_input(PREFIX)
 
 RATIO_OUTLIER_FOLDER = f"{PREFIX}/11_ref_ratio_outliers/"
 front_contig_path = RATIO_OUTLIER_FOLDER+"front_jump/"
@@ -1492,8 +1543,7 @@ amplitude = np.std(noise_array)
 chr_len = find_chr_len(CHROMOSOME_INFO_FILE_PATH)
 del chr_len['chrM']
 
-with open(f'{PREFIX}/nclose_chunk_data.pkl', 'rb') as f:
-    nclose_nodes_pkl, _, _ = pkl.load(f)
+nclose_nodes_pkl = load_nclose_nodes(PREFIX)
 
 nclose_list = []
 for vl in nclose_nodes_pkl.values():
@@ -1506,8 +1556,8 @@ nclose_event_catalog = load_event_catalog(PREFIX)
 catalog_bnd_keys = compressed_bnd_event_keys(nclose_event_catalog)
 if catalog_bnd_keys != nclose_set:
     raise ValueError(
-        "Compressed BND catalog does not match nclose_chunk_data.pkl. "
-        "Rerun the SKYPE pipeline from stage 02."
+        "Compressed BND catalog does not match nclose_nodes.pkl. "
+        "Rerun the SKYPE pipeline from its NClose preprocessing stage."
     )
 nclose_path_usage = load_path_usage(PREFIX, expected_len=len(tot_loc_list))
 nclose_filter_status = load_filter_status(PREFIX)
@@ -1943,7 +1993,7 @@ def build_vcf_detail_fields(
 
 
 def write_annotated_input_vcf(weights):
-    vcf_input_path = pipeline_mode_config.get("vcf_input_path")
+    vcf_input_path = pipeline_input_config.get("vcf_input_path")
     if not vcf_input_path:
         raise FileNotFoundError("VCF input mode is missing vcf_input_path in pipeline_mode.pkl")
     if not os.path.isfile(vcf_input_path):
@@ -2256,15 +2306,9 @@ def draw_circos_plot(fig_prefix=''):
 
 weights = np.load(f'{PREFIX}/weight.npy')
 
-use_julia_solver = pipeline_mode_is_karyotype(pipeline_mode_config)
-
 # Assign report IDs to ecDNA inversion NCloses whose Amplicon is visible in
-# any generated BED (base/filter/cluster), using each BED's strict
-# >5%-of-median raw-depth gate.
+# the single raw-weight BED, using its strict >5%-of-median raw-depth gate.
 nclose_stage_weights = {"base": weights}
-if use_julia_solver:
-    nclose_stage_weights["filter"] = np.load(f'{PREFIX}/weight_filter.npy')
-    nclose_stage_weights["cluster"] = np.load(f'{PREFIX}/weight_cluster.npy')
 visible_ecdna_indices = bed_visible_ecdna_indices_across_stages(
     nclose_stage_weights,
     ecdna_column_by_index,
@@ -2296,25 +2340,28 @@ nclose_filter_status = reconcile_filter_status_catalog(
 save_filter_status(PREFIX, nclose_filter_status)
 nclose_id_by_event_key = nclose_event_id_by_key(nclose_event_catalog)
 
-nclose_report_path = write_nclose_report(
+write_nclose_report(
     PREFIX,
     nclose_event_catalog,
     nclose_path_usage,
     nclose_filter_status,
     N,
     nclose_stage_weights,
-    use_julia_solver,
+    False,
 )
-# logging.info(f'NClose report written: {nclose_report_path}')
-
 draw_circos_plot()
-if use_julia_solver:
-    draw_circos_plot('_filter')
-    draw_circos_plot('_cluster')
 
 # Parse as vcf
-def pairs_to_vcf(out_prefix=''):
-    weights = np.load(f'{PREFIX}/weight{out_prefix}.npy')
+def pairs_to_vcf():
+    weights = np.load(f'{PREFIX}/weight.npy')
+    raw_event_depth = aggregate_nclose_event_weights(weights)
+    predicted_clean_depth = np.load(f'{PREFIX}/predict_B.npy')[:filter_len]
+    bp_ratio_calculator = BreakpointStepDepthRatio(
+        chr_filt_st_list,
+        B,
+        predicted_clean_depth,
+        bed_data,
+    )
     nclose_cn_std = aggregate_bnd_weights_by_index(weights)
     split_bnd_weights, split_parent_weight = build_ctg_intype_split_bnds(
         weights, VCF_FILTER_DEPTH_N * N
@@ -2353,6 +2400,7 @@ def pairs_to_vcf(out_prefix=''):
             event["weight"] / N,
             chrom,
             indel_event_source_label(event),
+            event["weight"],
         ))
     
     all_nclose = []
@@ -2363,29 +2411,26 @@ def pairs_to_vcf(out_prefix=''):
     indel_event_count = sum(len(indel_list) for indel_list in display_indel.values())
     amplicon_event_count = len(amplicon_events)
     logging.info(
-        f"{out_prefix[1:].capitalize()}{' ' if out_prefix else ''}"
         f"Total called breakends (DUP, DEL, BND, INV, AMP) : "
         f"{len(all_nclose) + len(split_bnd_weights) + indel_event_count + amplicon_event_count + len(virtual_inv_events)}"
     )
 
-    vcf_path = f"{PREFIX}/SV_call_result{out_prefix}.vcf"
+    vcf_path = f"{PREFIX}/SV_call_result.vcf"
     _pairs_to_vcf(
         all_nclose, contig_data, chr_len, display_indel, amplicon_events, virtual_inv_events,
-        split_bnd_weights, vcf_path, adjusted_nclose_cn_std
+        split_bnd_weights, vcf_path, adjusted_nclose_cn_std, raw_event_depth,
+        bp_ratio_calculator
     )
 
-if pipeline_mode_is_vcf_input(pipeline_mode_config):
+if pipeline_input_is_vcf(pipeline_input_config):
     write_annotated_input_vcf(weights)
 else:
     pairs_to_vcf()
-    if use_julia_solver:
-        pairs_to_vcf('_filter')
-        pairs_to_vcf('_cluster')
 
 # Bed output for further analysis
 
-def make_bed_output(output_prefix=''):
-    weights = np.load(f'{PREFIX}/weight{output_prefix}.npy')
+def make_bed_output():
+    weights = np.load(f'{PREFIX}/weight.npy')
     nclose_cn = aggregate_bnd_weights_by_index(weights)
 
     split_bnd_weights, split_parent_weight = build_ctg_intype_split_bnds(
@@ -2401,7 +2446,7 @@ def make_bed_output(output_prefix=''):
         pos = int(pos)
         return max(0, pos - 1), pos
     
-    with open(f'{PREFIX}/SKYPE_result{output_prefix}.bed', 'w') as f:
+    with open(f'{PREFIX}/SKYPE_result.bed', 'w') as f:
         cf = csv.writer(f, delimiter='\t')
         cf.writerow([
             '#chrom', 'cordst', 'cordnd', 'type', 'weight (N)', 'nclose_id'
@@ -2483,10 +2528,10 @@ def make_bed_output(output_prefix=''):
             ])
 
 
-make_bed_output()
-if use_julia_solver:
-    make_bed_output('_cluster')
-    make_bed_output('_filter')
+if not pipeline_input_is_vcf(pipeline_input_config):
+    make_bed_output()
 
-os.remove(f'{PREFIX}/matrix.h5')
+matrix_path = f'{PREFIX}/matrix.h5'
+if os.path.isfile(matrix_path):
+    os.remove(matrix_path)
 logging.info("SKYPE pipeline end")

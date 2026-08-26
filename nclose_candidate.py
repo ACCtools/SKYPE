@@ -1,4 +1,4 @@
-"""Small compatibility layer for stage-02 NClose candidates.
+"""Small compatibility layer for stage-01 NClose candidates.
 
 The legacy graph representation stores pairs in query/path order under a
 contig-name key.  That order is meaningful and must not be replaced by the
