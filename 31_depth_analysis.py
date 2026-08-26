@@ -2355,10 +2355,11 @@ draw_circos_plot()
 def pairs_to_vcf():
     weights = np.load(f'{PREFIX}/weight.npy')
     raw_event_depth = aggregate_nclose_event_weights(weights)
+    observed_clean_depth = B[:filter_len]
     predicted_clean_depth = np.load(f'{PREFIX}/predict_B.npy')[:filter_len]
     bp_ratio_calculator = BreakpointStepDepthRatio(
         chr_filt_st_list,
-        B,
+        observed_clean_depth,
         predicted_clean_depth,
         bed_data,
     )

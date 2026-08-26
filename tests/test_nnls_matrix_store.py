@@ -9,6 +9,8 @@ import h5py
 import numpy as np
 from scipy.optimize import nnls
 
+from skype_output_files import build_matrix_column_locations
+
 
 SKYPE_ROOT = Path(__file__).resolve().parents[1]
 RUN_NNLS_PATH = SKYPE_ROOT / "23_run_nnls.py"
@@ -128,6 +130,34 @@ class RawNnlsTests(unittest.TestCase):
         self.assertIn(
             "set(range(n)) - explicit_excluded_columns",
             source,
+        )
+        self.assertIn('f"{PREFIX}/tot_loc_list.pkl"', source)
+
+    def test_matrix_column_locations_follow_stage22_feature_order(self):
+        observed = build_matrix_column_locations(
+            "/result",
+            [("/paths/1.index.txt", [1]), ("/paths/2.index.txt", [2])],
+            [
+                (1, "/out/front/1.win.stat.gz", "/out/front/1_base.win.stat.gz", -1, None),
+            ],
+            [
+                (1, "/out/back/1.win.stat.gz", "/out/back/1_base.win.stat.gz", -1, None),
+            ],
+            [(1, "/out/ecdna/1.win.stat.gz")],
+            [("chr1", {"dir": False}), ("chr2", {"dir": True})],
+        )
+
+        self.assertEqual(
+            observed,
+            [
+                "/paths/1.index.txt",
+                "/paths/2.index.txt",
+                "/out/front/1_base.paf",
+                "/out/back/1_base.paf",
+                "/out/ecdna/1.paf",
+                "/result/12_cent_fragment/chr1/left.fragment",
+                "/result/12_cent_fragment/chr2/right.fragment",
+            ],
         )
 
     def test_mode_cli_and_postprocessing_stages_are_removed(self):

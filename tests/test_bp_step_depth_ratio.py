@@ -3,6 +3,7 @@ from __future__ import annotations
 import collections
 import tempfile
 import unittest
+from pathlib import Path
 
 import numpy as np
 import vcfpy
@@ -108,6 +109,19 @@ class BreakpointStepDepthRatioTests(unittest.TestCase):
                 ))
             with open(output.name) as handle:
                 self.assertIn("BP_STEP_DEPTH_RATIO_B=.,0.5", handle.read())
+
+    def test_stage31_passes_only_clean_depth_rows_to_ratio_calculator(self):
+        source = (
+            Path(__file__).resolve().parents[1] / "31_depth_analysis.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn("observed_clean_depth = B[:filter_len]", source)
+        self.assertIn(
+            "BreakpointStepDepthRatio(\n"
+            "        chr_filt_st_list,\n"
+            "        observed_clean_depth,\n"
+            "        predicted_clean_depth,",
+            source,
+        )
 
 
 if __name__ == "__main__":

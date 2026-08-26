@@ -4,6 +4,56 @@ import glob
 import os
 
 
+DEPTH_STAT_SUFFIX = ".win.stat.gz"
+
+
+def depth_stat_to_paf_path(depth_path):
+    """Return the PAF paired with one stage-21 depth-stat artifact."""
+
+    depth_path = os.fspath(depth_path)
+    if not depth_path.endswith(DEPTH_STAT_SUFFIX):
+        raise ValueError(
+            f"Expected a {DEPTH_STAT_SUFFIX} depth path, found: {depth_path}"
+        )
+    return depth_path[:-len(DEPTH_STAT_SUFFIX)] + ".paf"
+
+
+def build_matrix_column_locations(
+    prefix,
+    paf_ans_list,
+    front_depth_inputs,
+    back_depth_inputs,
+    ecdna_depth_inputs,
+    cen_fragment_list,
+):
+    """Build stage-31 location metadata in exact stage-22 column order."""
+
+    locations = [path for path, _ in paf_ans_list]
+    locations.extend(
+        depth_stat_to_paf_path(base_depth_path)
+        for _, _, base_depth_path, _, _ in front_depth_inputs
+    )
+    locations.extend(
+        depth_stat_to_paf_path(base_depth_path)
+        for _, _, base_depth_path, _, _ in back_depth_inputs
+    )
+    locations.extend(
+        depth_stat_to_paf_path(depth_path)
+        for _, depth_path in ecdna_depth_inputs
+    )
+    for chrom, info in cen_fragment_list:
+        side = "right" if info["dir"] else "left"
+        locations.append(
+            os.path.join(
+                os.fspath(prefix),
+                "12_cent_fragment",
+                chrom,
+                f"{side}.fragment",
+            )
+        )
+    return locations
+
+
 def _validate_contiguous_depth_indices(index_to_path, folder_path, file_kind):
     indices = sorted(index_to_path)
     expected = list(range(1, len(indices) + 1))

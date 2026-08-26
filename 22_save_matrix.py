@@ -4,6 +4,7 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from skype_utils import *
 from skype_output_files import (
+    build_matrix_column_locations,
     discover_ecdna_depth_inputs,
     discover_jump_depth_inputs,
 )
@@ -295,7 +296,19 @@ A_arr = np.empty(shape, dtype=np.float32, order='C')
 fm = filter_len
 
 filter_vec_list = []
-tot_loc_list = []
+tot_loc_list = build_matrix_column_locations(
+    PREFIX,
+    paf_ans_list,
+    front_depth_inputs,
+    back_depth_inputs,
+    ecdna_depth_inputs,
+    cen_fragment_list,
+)
+if len(tot_loc_list) != n:
+    raise ValueError(
+        "Stage-22 matrix-column location mismatch: "
+        f"{len(tot_loc_list)} locations for {n} matrix columns"
+    )
 
 tmp_v = np.zeros(m, dtype=np.float32)
 
@@ -471,5 +484,8 @@ with open(f"{PREFIX}/23_input.pkl", "wb") as f:
         "B_depth_start": 0,
         "B_depth_end": fm,
     }, f)
+
+with open(f"{PREFIX}/tot_loc_list.pkl", "wb") as f:
+    pkl.dump(tot_loc_list, f)
 
 np.save(f'{PREFIX}/B.npy', B)
