@@ -3,6 +3,12 @@ import sys
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from skype_utils import *
+from raw_translocation_depth import (
+    build_raw_point_depths,
+    depth_pair_is_balanced,
+    depth_pair_mean,
+    global_depth_noise_threshold,
+)
 
 import argparse
 import copy
@@ -24,8 +30,6 @@ NCLOSE_COUNT_CANDIDATE_PKL = 'nclose_count_candidates.pkl'
 NCLOSE_COUNT_RESULT_PKL = 'nclose_count_result.pkl'
 NCLOSE_COUNT_REPORT_TSV = 'nclose_read_counts.tsv'
 RAW_TRANSLOCATION_WINDOW = 5000
-RAW_TRANSLOCATION_DEPTH_FLANK = 500000
-RAW_TRANSLOCATION_DEPTH_BALANCED_RATIO = 1.1
 NCLOSE_COUNT_DEFAULT_VAF_THRESHOLD = 0.1
 RAW_COUNT_NAMES = {
     'd1': 'nclose_a_read_count',
@@ -70,6 +74,10 @@ parser.add_argument("--skip_nclose_count",
 parser.add_argument("--nclose_count_vaf_threshold",
                     help="VAF threshold used for the pass/fail column in nclose_read_counts.tsv.",
                     type=float, default=NCLOSE_COUNT_DEFAULT_VAF_THRESHOLD)
+parser.add_argument("--depth_diff_threshold",
+                    help="Absolute flank depth-difference threshold (1.5 x stage-23 noise sigma). "
+                         "Estimated from depth_stat_path without censat exclusion when omitted.",
+                    type=float, default=None)
 
 args = parser.parse_args()
 
@@ -125,61 +133,8 @@ def read_depth_by_chrom(depth_path):
 
     return depth_by_chrom
 
-def mean_depth_around_coord(depth_by_chrom, chrom, coord, chr_len,
-                            flank=RAW_TRANSLOCATION_DEPTH_FLANK):
-    if coord == '*' or chrom not in depth_by_chrom:
-        return None
-
-    chrom_len = int(chr_len.get(chrom, int(coord) + flank))
-    st = max(1, int(coord) - flank)
-    nd = min(chrom_len, int(coord) + flank)
-    if nd < st:
-        return None
-
-    weighted_sum = 0.0
-    weight_sum = 0
-    for win_st, win_nd, meandepth in depth_by_chrom[chrom]:
-        overlap_st = max(st, win_st)
-        overlap_nd = min(nd, win_nd)
-        if overlap_nd < overlap_st:
-            continue
-        weight = overlap_nd - overlap_st + 1
-        weighted_sum += meandepth * weight
-        weight_sum += weight
-
-    if weight_sum == 0:
-        return None
-    return weighted_sum / weight_sum
-
 def format_depth(value):
     return '*' if value is None or not np.isfinite(value) else round(float(value), 6)
-
-def depth_pair_is_balanced(depth_pair, ratio=RAW_TRANSLOCATION_DEPTH_BALANCED_RATIO):
-    if not depth_pair:
-        return False
-    front = depth_pair.get('front')
-    back = depth_pair.get('back')
-    if front is None or back is None:
-        return False
-    if not (np.isfinite(front) and np.isfinite(back)):
-        return False
-    if front < 0 or back < 0:
-        return False
-    low, high = sorted([float(front), float(back)])
-    if low == 0:
-        return high == 0
-    return (high / low) <= ratio
-
-def depth_pair_mean(depth_pair):
-    if not depth_pair:
-        return None
-    front = depth_pair.get('front')
-    back = depth_pair.get('back')
-    if front is None or back is None:
-        return None
-    if not (np.isfinite(front) and np.isfinite(back)):
-        return None
-    return (float(front) + float(back)) / 2
 
 def estimate_nclose_depth(point_depth, nclose_count, point_count):
     weight = int(nclose_count) + int(point_count)
@@ -389,32 +344,6 @@ def build_nclose_count_basis_texts(span_rows):
         )
     return basis_by_pair
 
-def build_point_depths(span_rows, depth_by_chrom, chr_len):
-    count_names = {2: 'point_a', 3: 'point_b'}
-    rows_by_count = {}
-    for row in span_rows:
-        pair_id = int(row[0])
-        count_idx = int(row[1])
-        if count_idx not in count_names:
-            continue
-        rows_by_count.setdefault((pair_id, count_idx), []).append(row)
-
-    point_depths = {}
-    for (pair_id, count_idx), rows in rows_by_count.items():
-        rows.sort(key=lambda row: int(row[2]))
-        depths = []
-        for row in rows:
-            chrom = row[3]
-            point_coord = int(row[6])
-            depths.append(mean_depth_around_coord(depth_by_chrom, chrom, point_coord, chr_len))
-        while len(depths) < 2:
-            depths.append(None)
-        point_depths.setdefault(pair_id, {})[count_names[count_idx]] = {
-            'front': depths[0],
-            'back': depths[1],
-        }
-    return point_depths
-
 def nclose_query_ordered_endpoints(record):
     endpoints = list(record.get('layout', {}).get('ordered_endpoints', ()))
     if len(endpoints) != 2:
@@ -504,7 +433,11 @@ for candidate in raw_translocation_candidates:
             continue
         add_reference_span_rows(raw_junction_span_rows, pair_id, int(span['count_idx']), side, chr_len)
 raw_count_basis_texts = build_count_basis_texts(raw_junction_span_rows)
-raw_point_depths = build_point_depths(raw_junction_span_rows, depth_by_chrom, chr_len)
+raw_point_depths = build_raw_point_depths(
+    raw_translocation_candidates,
+    depth_by_chrom,
+    chr_len,
+)
 
 nclose_count_span_rows = []
 for candidate in nclose_count_candidates:
@@ -532,6 +465,11 @@ raw_translocation_counts = {
 
 raw_translocation_records = []
 if not args.nclose_count_only:
+    if args.depth_diff_threshold is not None:
+        depth_diff_threshold = float(args.depth_diff_threshold)
+    else:
+        depth_diff_threshold = global_depth_noise_threshold(depth_by_chrom)
+    logging.info(f"Raw translocation depth-balance threshold : {depth_diff_threshold:.4f}")
     for candidate in raw_translocation_candidates:
         pair_id = int(candidate['pair_id'])
         d1 = raw_translocation_counts.get((pair_id, 1), 0)
@@ -541,8 +479,8 @@ if not args.nclose_count_only:
         point_a_no_spanning = d2 == 0
         point_b_no_spanning = d3 == 0
         point_depth = raw_point_depths.get(pair_id, {})
-        point_a_depth_balanced = depth_pair_is_balanced(point_depth.get('point_a', {}))
-        point_b_depth_balanced = depth_pair_is_balanced(point_depth.get('point_b', {}))
+        point_a_depth_balanced = depth_pair_is_balanced(point_depth.get('point_a', {}), depth_diff_threshold)
+        point_b_depth_balanced = depth_pair_is_balanced(point_depth.get('point_b', {}), depth_diff_threshold)
         depth_balanced_translocation = point_a_depth_balanced and point_b_depth_balanced
         point_a_depth_mean = depth_pair_mean(point_depth.get('point_a', {}))
         point_b_depth_mean = depth_pair_mean(point_depth.get('point_b', {}))

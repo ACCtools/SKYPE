@@ -22,7 +22,12 @@ from nclose_candidate import (
     apply_nclose_filter,
     candidates_to_legacy,
 )
+from denoised_relative_error import estimate_noise_sigma_by_chromosome
 from breakend_graph import save_stage10_input
+from raw_translocation_depth import (
+    DEPTH_BALANCED_NOISE_SIGMA_MULTIPLIER,
+    breakpoint_is_depth_balanced,
+)
 
 import subprocess
 import csv
@@ -83,13 +88,11 @@ CHUKJI_LIMIT = -1
 BND_CONTIG_BOUND = 0.1
 TYPE2_CONTIG_MINIMUM_LENGTH = 200*K
 SUBTELOMERE_REPEAT_LENGTH = 0 # 100*K
-TYPE2_FLANKING_LENGTH = 500 * K
-TYPE2_SIM_COMPARE_RAITO = 1.3
+TYPE2_NOISE_SIGMA_MULTIPLIER = DEPTH_BALANCED_NOISE_SIGMA_MULTIPLIER
+TYPE2_NOISE_MAX_COVERAGE_RATIO = 3.0
 TYPE34_BREAK_CHUKJI_LIMIT = 1*M
 CHUKJI_FAIL_TYPE2_RESCUE_THRESHOLD = 2*K
 CIRCUIT_ECDNA_LENGTH_LIMIT = 80*M
-
-NCLOSE_SIM_DIFF_THRESHOLD = 5
 
 NCLOSE_COMPRESS_LIMIT = 100*K
 ALL_REPEAT_NCLOSE_COMPRESS_LIMIT = 500*K
@@ -198,6 +201,7 @@ class PregraphBuildContext:
     main_stat_path: str
     asm2cov: object
     disable_alt_ctg_simple: bool
+    debug_force_ncloses: tuple = ()
 
 
 @dataclass(frozen=True)
@@ -289,6 +293,7 @@ class NCloseCandidateBuildContext:
     telo_contig: object
     chr_len: object
     original_contig_names: list
+    synthetic_candidate_provenance: dict = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -477,6 +482,48 @@ class NCloseClusterRepresentative:
 
 
 @dataclass(frozen=True)
+class DebugNCloseEndpoint:
+    """One directed, 1-based reference breakend supplied for debugging."""
+
+    chrom: str
+    pos: int
+    direction: str
+
+    def __post_init__(self):
+        chrom = str(self.chrom)
+        direction = str(self.direction)
+        if not chrom:
+            raise ValueError("Debug NClose chromosome cannot be empty")
+        if int(self.pos) < 1:
+            raise ValueError(
+                "Debug NClose position must be a positive 1-based coordinate"
+            )
+        if direction not in {"+", "-"}:
+            raise ValueError("Debug NClose direction must be '+' or '-'")
+        object.__setattr__(self, "chrom", chrom)
+        object.__setattr__(self, "pos", int(self.pos))
+        object.__setattr__(self, "direction", direction)
+
+
+def parse_debug_nclose_endpoint(value):
+    """Parse ``chrom:pos:+/-`` without resolving it against a reference."""
+
+    fields = str(value).rsplit(":", 2)
+    if len(fields) != 3:
+        raise ValueError(
+            "Debug NClose endpoint must use chrom:pos:+/- format"
+        )
+    chrom, pos_text, direction = fields
+    try:
+        pos = int(pos_text)
+    except ValueError as exc:
+        raise ValueError(
+            "Debug NClose position must be an integer in chrom:pos:+/-"
+        ) from exc
+    return DebugNCloseEndpoint(chrom, pos, direction)
+
+
+@dataclass(frozen=True)
 class Stage01Config:
     """CLI-independent inputs for one stage-01 preprocessing run."""
 
@@ -499,6 +546,9 @@ class Stage01Config:
     disable_alt_ctg_simple: bool = False
     vcf_input_path: str | None = None
     vcf_filter_pass: tuple[str, ...] = ("PASS", ".")
+    debug_force_ncloses: tuple[
+        tuple[DebugNCloseEndpoint, DebugNCloseEndpoint], ...
+    ] = ()
 
 
 def iter_contig_ranges(contig_data):
@@ -808,14 +858,23 @@ def build_unitig_nclose_candidates(context):
         context.repeat_contig_names,
         context.repeat_censat_data,
     )
-    candidates = tuple(
-        NCloseCandidate(
+    candidates = []
+    for candidate in clustered:
+        provenance = context.synthetic_candidate_provenance.get(
+            candidate.contig_name
+        )
+        candidates.append(NCloseCandidate(
             contig_name=candidate.contig_name,
             path_pair=candidate.path_pair,
-            origin="paf",
-        )
-        for candidate in clustered
-    )
+            origin=(
+                str(provenance.get("origin", "debug_forced"))
+                if provenance is not None
+                else "paf"
+            ),
+            synthetic=provenance is not None,
+            provenance=(provenance or {}),
+        ))
+    candidates = tuple(candidates)
     raw_nodes = candidates_to_legacy(candidates)
     logging.info(
         "Minimal unitig NClose build: %d extracted pair(s), %d clustered pair(s)",
@@ -2573,26 +2632,55 @@ def preprocess_contig(contig_data : list, telo_label : list, ref_qry_ratio : dic
     contig_data = contig_data[:-1]
     return [using_contig_list, contig_type, contig_terminal_node, len_count]
 
-def similar_check(v1, v2, ratio=TYPE2_SIM_COMPARE_RAITO):
-    assert(v1 >= 0 and v2 >= 0)
-    mi, ma = sorted([v1, v2])
-    return False if mi == 0 else (ma / mi <= ratio) or ma-mi < NCLOSE_SIM_DIFF_THRESHOLD
+def estimate_type2_global_noise_sigma(depth_df, censat_dict):
+    """Match stage 23's robust noise estimate on clean stage-01 depth bins."""
 
-def exist_near_bnd_point(depth_df, chrom, inside_st):
-    # subset of depth_df for the given chromosome
-    df_chr = depth_df[depth_df['chr'] == chrom]
+    median_depth = float(np.median(depth_df["meandepth"].to_numpy(dtype=float)))
+    chr_y_depth = depth_df[depth_df["chr"] == "chrY"]
+    chr_y_non_censat = [
+        row
+        for row in chr_y_depth.itertuples(index=False)
+        if not any(
+            max(int(censat_st), int(row.st))
+            < min(int(censat_nd), int(row.nd))
+            for censat_st, censat_nd in censat_dict.get("chrY", ())
+        )
+    ]
+    no_chr_y = bool(chr_y_non_censat) and (
+        sum(float(row.meandepth) != 0 for row in chr_y_non_censat)
+        / len(chr_y_non_censat)
+        < chrY_MINIMUM_RATIO
+    )
+    coordinates = []
+    depths = []
+    for row in depth_df.itertuples(index=False):
+        depth = float(row.meandepth)
+        if not np.isfinite(depth):
+            continue
+        if depth > TYPE2_NOISE_MAX_COVERAGE_RATIO * median_depth:
+            continue
+        if any(
+            int(censat_st) <= int(row.st)
+            and int(row.nd) <= int(censat_nd)
+            for censat_st, censat_nd in censat_dict.get(row.chr, ())
+        ):
+            continue
+        coordinates.append((str(row.chr), int(row.st)))
+        depths.append(0.0 if no_chr_y and row.chr == "chrY" else depth)
 
-    def mean_depth(start, end):
-        """Return mean meandepth over windows overlapping [start, end)."""
-        mask = (df_chr['nd'] > start) & (df_chr['st'] < end)
-        return df_chr.loc[mask, 'meandepth'].mean()
+    return estimate_noise_sigma_by_chromosome(
+        coordinates,
+        np.asarray(depths, dtype=float),
+    )["__global__"]
 
-    # for inside_st
-    st_depth = mean_depth(inside_st - TYPE2_FLANKING_LENGTH, inside_st)
-    nd_depth = mean_depth(inside_st, inside_st + TYPE2_FLANKING_LENGTH)
 
-    # print(chrom, inside_st, inside_nd, not similar_check(st_depth, nd_depth))
-    return not similar_check(st_depth, nd_depth)
+def depth_df_to_by_chrom(depth_df):
+    return {
+        chrom: list(
+            chrom_df[["st", "nd", "meandepth"]].itertuples(index=False, name=None)
+        )
+        for chrom, chrom_df in depth_df.groupby("chr", sort=False)
+    }
 
 def censat_overlap_check(censat_dict, chrom, inside_st, inside_nd):
     if chrom not in censat_dict.keys():
@@ -5393,6 +5481,108 @@ def make_synthetic_vcf_node(contig_name, chrom, pos, path_dir, endpoint_role,
     ]
 
 
+def build_debug_forced_nclose_nodes(contig_data, debug_force_ncloses, chr_len,
+                                    telo_data, repeat_censat_data):
+    """Build exact synthetic pairs that enter the normal assembly pipeline."""
+
+    rows = []
+    provenance_by_owner = {}
+    existing_names = {str(node[CTG_NAM]) for node in contig_data}
+
+    for pair_number, endpoints in enumerate(debug_force_ncloses, start=1):
+        if len(endpoints) != 2 or not all(
+            isinstance(endpoint, DebugNCloseEndpoint) for endpoint in endpoints
+        ):
+            raise TypeError(
+                "Each debug forced NClose must contain two "
+                "DebugNCloseEndpoint values"
+            )
+        endpoint_a, endpoint_b = endpoints
+        for endpoint in endpoints:
+            if endpoint.chrom not in chr_len:
+                raise ValueError(
+                    f"Unknown debug NClose chromosome: {endpoint.chrom}"
+                )
+            chrom_len = int(chr_len[endpoint.chrom])
+            if endpoint.pos > chrom_len:
+                raise ValueError(
+                    f"Debug NClose position {endpoint.chrom}:{endpoint.pos} "
+                    f"exceeds chromosome length {chrom_len}"
+                )
+
+        owner = f"debug_forced_nclose_{pair_number}"
+        if owner in existing_names:
+            raise ValueError(
+                f"Debug NClose synthetic contig name already exists: {owner}"
+            )
+        existing_names.add(owner)
+
+        node_a_idx = len(contig_data) + len(rows)
+        node_b_idx = node_a_idx + 1
+        contig_type = 1 if endpoint_a.chrom != endpoint_b.chrom else 2
+        node_a = make_synthetic_vcf_node(
+            owner,
+            endpoint_a.chrom,
+            endpoint_a.pos,
+            endpoint_a.direction,
+            "exit",
+            chr_len,
+            contig_type,
+            node_a_idx,
+            node_a_idx,
+        )
+        node_b = make_synthetic_vcf_node(
+            owner,
+            endpoint_b.chrom,
+            endpoint_b.pos,
+            endpoint_b.direction,
+            "entry",
+            chr_len,
+            contig_type,
+            node_b_idx,
+            node_b_idx,
+        )
+
+        node_a_len = int(node_a[CHR_END]) - int(node_a[CHR_STR])
+        node_b_len = int(node_b[CHR_END]) - int(node_b[CHR_STR])
+        total_len = node_a_len + node_b_len
+        node_a[CTG_LEN] = node_b[CTG_LEN] = total_len
+        node_a[CTG_STR], node_a[CTG_END] = 0, node_a_len
+        node_b[CTG_STR], node_b[CTG_END] = node_a_len, total_len
+        node_a[CTG_STRND] = node_b[CTG_STRND] = node_a_idx
+        node_a[CTG_ENDND] = node_b[CTG_ENDND] = node_b_idx
+
+        actual_a = int(get_breakend_coord(node_a, 0))
+        actual_b = int(get_breakend_coord(node_b, 1))
+        if actual_a != endpoint_a.pos or actual_b != endpoint_b.pos:
+            requested = (
+                f"{endpoint_a.chrom}:{endpoint_a.pos}:{endpoint_a.direction}, "
+                f"{endpoint_b.chrom}:{endpoint_b.pos}:{endpoint_b.direction}"
+            )
+            raise ValueError(
+                "Debug NClose cannot represent the requested chromosome-end "
+                f"breakend with positive-length synthetic nodes: {requested}"
+            )
+
+        rows.extend((node_a, node_b))
+        provenance_by_owner[owner] = {
+            "origin": "debug_forced",
+            "requested_endpoints": (
+                (endpoint_a.chrom, endpoint_a.pos, endpoint_a.direction),
+                (endpoint_b.chrom, endpoint_b.pos, endpoint_b.direction),
+            ),
+        }
+
+    if rows:
+        annotate_synthetic_nodes(
+            rows,
+            telo_data,
+            repeat_censat_data,
+            chr_len,
+        )
+    return tuple(tuple(row) for row in rows), provenance_by_owner
+
+
 def make_synthetic_span_node(contig_name, chrom, st, nd, path_dir,
                              chr_len, ctg_typ, idx, global_idx):
     st, nd = sorted((int(st), int(nd)))
@@ -6194,9 +6384,23 @@ def plan_initial_nclose_rejections(
 ):
     """Mark depth-like type2 and centromere-slave candidates for removal."""
 
+    global_noise_sigma = estimate_type2_global_noise_sigma(
+        depth_df,
+        repeat_censat_data,
+    )
+    absolute_diff_threshold = (
+        TYPE2_NOISE_SIGMA_MULTIPLIER * global_noise_sigma
+    )
+    logging.info(
+        "Type-2 depth global noise sigma/absolute threshold: %.4f / %.4f",
+        global_noise_sigma,
+        absolute_diff_threshold,
+    )
+
     not_using_nclose_node = set()
     type1_nclose_node = []
     type2_nclose_node = defaultdict(list)
+    depth_by_chrom = depth_df_to_by_chrom(depth_df)
 
     for pair_list in nclose_nodes.values():
         for s, e in pair_list:
@@ -6205,21 +6409,29 @@ def plan_initial_nclose_rejections(
 
             if curr_contig_first_fragment[CHR_NAM] == curr_contig_end_fragment[CHR_NAM]:
                 type2_nclose_node[curr_contig_first_fragment[CHR_NAM]].append((s, e))
-                if curr_contig_first_fragment[CTG_DIR] == '+':
-                    inside_st, inside_nd = sorted([
-                        curr_contig_end_fragment[CHR_END],
-                        curr_contig_first_fragment[CHR_STR],
-                    ])
-                else:
-                    inside_st, inside_nd = sorted([
-                        curr_contig_first_fragment[CHR_END],
-                        curr_contig_end_fragment[CHR_STR],
-                    ])
+                inside_st, inside_nd = sorted([
+                    get_breakend_coord(curr_contig_first_fragment, 0),
+                    get_breakend_coord(curr_contig_end_fragment, 1),
+                ])
                 chukji_chrom = curr_contig_first_fragment[CHR_NAM]
 
                 if (
-                    not exist_near_bnd_point(depth_df, chukji_chrom, inside_st)
-                    and not exist_near_bnd_point(depth_df, chukji_chrom, inside_nd)
+                    breakpoint_is_depth_balanced(
+                        depth_by_chrom,
+                        chukji_chrom,
+                        inside_st,
+                        inside_st,
+                        chr_len.get(chukji_chrom, 0),
+                        absolute_diff_threshold,
+                    )
+                    and breakpoint_is_depth_balanced(
+                        depth_by_chrom,
+                        chukji_chrom,
+                        inside_nd,
+                        inside_nd,
+                        chr_len.get(chukji_chrom, 0),
+                        absolute_diff_threshold,
+                    )
                     and not censat_overlap_check(
                         repeat_censat_data,
                         chukji_chrom,
@@ -6771,6 +6983,18 @@ def apply_raw_virtual_inversion_filter(candidates):
         logging.info("Raw-read translocation BAM analysis skipped")
         raw_virtual_inv_nclose_pairs = set()
     else:
+        depth_df = pd.read_csv(
+            main_stat_loc,
+            compression="gzip",
+            comment="#",
+            sep="\t",
+            names=["chr", "st", "nd", "length", "covsite", "totaldepth", "cov", "meandepth"],
+        ).query('chr != "chrM"')
+        depth_diff_threshold = TYPE2_NOISE_SIGMA_MULTIPLIER * \
+            estimate_type2_global_noise_sigma(
+                depth_df,
+                import_censat_repeat_data(CENSAT_PATH),
+            )
         thread_lim = min(JULIA_BAM_THREAD_LIM, THREAD)
         progress_args = ['--progress'] if args.progress else []
         raw_bam_result = subprocess.run(
@@ -6789,6 +7013,8 @@ def apply_raw_virtual_inversion_filter(candidates):
                 CHROMOSOME_INFO_FILE_PATH,
                 main_stat_loc,
                 '--skip_nclose_count',
+                '--depth_diff_threshold',
+                str(depth_diff_threshold),
             ] + progress_args
         )
         if raw_bam_result.returncode == 0:
@@ -7264,6 +7490,23 @@ def nclose_calc(
     chr_len = find_chr_len(context.reference_fai_path)
     contig_data = import_data2(context.preprocessed_paf_path)
 
+    synthetic_candidate_provenance = {}
+    if context.debug_force_ncloses:
+        debug_rows, synthetic_candidate_provenance = \
+            build_debug_forced_nclose_nodes(
+                contig_data,
+                context.debug_force_ncloses,
+                chr_len,
+                import_telo_data(context.telomere_bed_path, chr_len),
+                repeat_censat_data,
+            )
+        contig_data.extend(debug_rows)
+        append_ppc_rows(context.preprocessed_paf_path, debug_rows)
+        logging.info(
+            "Added %d debug-forced synthetic NClose pair(s)",
+            len(context.debug_force_ncloses),
+        )
+
     TELO_CONNECT_NODES_INFO_PATH = context.prefix+"/telomere_connected_list.txt"
 
     os.makedirs(context.prefix, exist_ok=True)
@@ -7300,6 +7543,7 @@ def nclose_calc(
         telo_contig=telo_contig,
         chr_len=chr_len,
         original_contig_names=context.ori_ctg_name_data,
+        synthetic_candidate_provenance=synthetic_candidate_provenance,
     ))
     if not isinstance(candidate_build, NCloseCandidateBuildResult):
         raise TypeError(
@@ -7614,6 +7858,7 @@ def _make_stage01_context(config: Stage01Config, source: NCloseSourceConfig):
         main_stat_path=config.main_stat_path,
         asm2cov=asm2cov,
         disable_alt_ctg_simple=config.disable_alt_ctg_simple,
+        debug_force_ncloses=config.debug_force_ncloses,
     )
 
 
@@ -7676,6 +7921,19 @@ def write_stage01_provenance(
             len(pairs) for pairs in result.nclose_nodes.values()
         ),
         "recorded_rejection_count": len(result.nclose_rejections),
+        "debug_forced_nclose_pairs_requested": len(
+            config.debug_force_ncloses
+        ),
+        "debug_forced_nclose_pairs_after_compression": sum(
+            len(pairs)
+            for owner, pairs in result.raw_nclose_nodes.items()
+            if str(owner).startswith("debug_forced_nclose_")
+        ),
+        "debug_forced_nclose_pairs_final": sum(
+            len(pairs)
+            for owner, pairs in result.nclose_nodes.items()
+            if str(owner).startswith("debug_forced_nclose_")
+        ),
     }
     with open(
         os.path.join(config.prefix, STAGE01_SUMMARY_JSON),
@@ -7790,6 +8048,10 @@ def run_stage01(
 
     if config.thread < 1:
         raise ValueError("thread must be positive")
+    if config.vcf_input_path is not None and config.debug_force_ncloses:
+        raise ValueError(
+            "--debug-force-nclose is supported only in assembly mode"
+        )
     if pipeline is None:
         pipeline = default_stage01_pipeline()
     if not isinstance(pipeline, Stage01Pipeline):

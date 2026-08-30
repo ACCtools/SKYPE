@@ -14,6 +14,7 @@ from nclose_candidate import (
     candidates_to_legacy,
     iter_legacy_candidates,
 )
+from denoised_relative_error import estimate_noise_sigma_by_chromosome
 
 import shutil
 import argparse
@@ -80,11 +81,11 @@ TYPE2_CONTIG_MINIMUM_LENGTH = 200*K
 SUBTELOMERE_REPEAT_LENGTH = 0 # 100*K
 TYPE2_FLANKING_LENGTH = 500 * K
 TYPE2_SIM_COMPARE_RAITO = 1.3
+TYPE2_NOISE_SIGMA_MULTIPLIER = 2.0
+TYPE2_NOISE_MAX_COVERAGE_RATIO = 3.0
 TYPE34_BREAK_CHUKJI_LIMIT = 1*M
 CHUKJI_FAIL_TYPE2_RESCUE_THRESHOLD = 2*K
 CIRCUIT_ECDNA_LENGTH_LIMIT = 80*M
-
-NCLOSE_SIM_DIFF_THRESHOLD = 5
 
 TOT_PATH_LIMIT = 3*M
 PAT_PATH_LIMIT = 10*K
@@ -2096,12 +2097,58 @@ def preprocess_contig(contig_data : list, telo_label : list, ref_qry_ratio : dic
     contig_data = contig_data[:-1]
     return [using_contig_list, contig_type, contig_terminal_node, len_count]
 
-def similar_check(v1, v2, ratio=TYPE2_SIM_COMPARE_RAITO):
+def estimate_type2_global_noise_sigma(depth_df, censat_dict):
+    """Match stage 23's robust noise estimate on clean stage-01 depth bins."""
+
+    median_depth = float(np.median(depth_df["meandepth"].to_numpy(dtype=float)))
+    chr_y_depth = depth_df[depth_df["chr"] == "chrY"]
+    chr_y_non_censat = [
+        row
+        for row in chr_y_depth.itertuples(index=False)
+        if not any(
+            max(int(censat_st), int(row.st))
+            < min(int(censat_nd), int(row.nd))
+            for censat_st, censat_nd in censat_dict.get("chrY", ())
+        )
+    ]
+    no_chr_y = bool(chr_y_non_censat) and (
+        sum(float(row.meandepth) != 0 for row in chr_y_non_censat)
+        / len(chr_y_non_censat)
+        < chrY_MINIMUM_RATIO
+    )
+    coordinates = []
+    depths = []
+    for row in depth_df.itertuples(index=False):
+        depth = float(row.meandepth)
+        if not np.isfinite(depth):
+            continue
+        if depth > TYPE2_NOISE_MAX_COVERAGE_RATIO * median_depth:
+            continue
+        if any(
+            int(censat_st) <= int(row.st)
+            and int(row.nd) <= int(censat_nd)
+            for censat_st, censat_nd in censat_dict.get(row.chr, ())
+        ):
+            continue
+        coordinates.append((str(row.chr), int(row.st)))
+        depths.append(0.0 if no_chr_y and row.chr == "chrY" else depth)
+
+    return estimate_noise_sigma_by_chromosome(
+        coordinates,
+        np.asarray(depths, dtype=float),
+    )["__global__"]
+
+
+def similar_check(v1, v2, absolute_diff_threshold,
+                  ratio=TYPE2_SIM_COMPARE_RAITO):
     assert(v1 >= 0 and v2 >= 0)
     mi, ma = sorted([v1, v2])
-    return False if mi == 0 else (ma / mi <= ratio) or ma-mi < NCLOSE_SIM_DIFF_THRESHOLD
+    return False if mi == 0 else (
+        ma / mi <= ratio and ma - mi < absolute_diff_threshold
+    )
 
-def exist_near_bnd_point(depth_df, chrom, inside_st):
+def exist_near_bnd_point(depth_df, chrom, inside_st,
+                         absolute_diff_threshold):
     # subset of depth_df for the given chromosome
     df_chr = depth_df[depth_df['chr'] == chrom]
 
@@ -2115,7 +2162,11 @@ def exist_near_bnd_point(depth_df, chrom, inside_st):
     nd_depth = mean_depth(inside_st, inside_st + TYPE2_FLANKING_LENGTH)
 
     # print(chrom, inside_st, inside_nd, not similar_check(st_depth, nd_depth))
-    return not similar_check(st_depth, nd_depth)
+    return not similar_check(
+        st_depth,
+        nd_depth,
+        absolute_diff_threshold,
+    )
 
 def censat_overlap_check(censat_dict, chrom, inside_st, inside_nd):
     if chrom not in censat_dict.keys():
@@ -6660,6 +6711,19 @@ def plan_initial_nclose_rejections(
 ):
     """Mark depth-like type2 and centromere-slave candidates for removal."""
 
+    global_noise_sigma = estimate_type2_global_noise_sigma(
+        depth_df,
+        repeat_censat_data,
+    )
+    absolute_diff_threshold = (
+        TYPE2_NOISE_SIGMA_MULTIPLIER * global_noise_sigma
+    )
+    logging.info(
+        "Type-2 depth global noise sigma/absolute threshold: %.4f / %.4f",
+        global_noise_sigma,
+        absolute_diff_threshold,
+    )
+
     not_using_nclose_node = set()
     type1_nclose_node = []
     type2_nclose_node = defaultdict(list)
@@ -6671,21 +6735,25 @@ def plan_initial_nclose_rejections(
 
             if curr_contig_first_fragment[CHR_NAM] == curr_contig_end_fragment[CHR_NAM]:
                 type2_nclose_node[curr_contig_first_fragment[CHR_NAM]].append((s, e))
-                if curr_contig_first_fragment[CTG_DIR] == '+':
-                    inside_st, inside_nd = sorted([
-                        curr_contig_end_fragment[CHR_END],
-                        curr_contig_first_fragment[CHR_STR],
-                    ])
-                else:
-                    inside_st, inside_nd = sorted([
-                        curr_contig_first_fragment[CHR_END],
-                        curr_contig_end_fragment[CHR_STR],
-                    ])
+                inside_st, inside_nd = sorted([
+                    get_breakend_coord(curr_contig_first_fragment, 0),
+                    get_breakend_coord(curr_contig_end_fragment, 1),
+                ])
                 chukji_chrom = curr_contig_first_fragment[CHR_NAM]
 
                 if (
-                    not exist_near_bnd_point(depth_df, chukji_chrom, inside_st)
-                    and not exist_near_bnd_point(depth_df, chukji_chrom, inside_nd)
+                    not exist_near_bnd_point(
+                        depth_df,
+                        chukji_chrom,
+                        inside_st,
+                        absolute_diff_threshold,
+                    )
+                    and not exist_near_bnd_point(
+                        depth_df,
+                        chukji_chrom,
+                        inside_nd,
+                        absolute_diff_threshold,
+                    )
                     and not censat_overlap_check(
                         repeat_censat_data,
                         chukji_chrom,

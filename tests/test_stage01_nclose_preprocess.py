@@ -8,7 +8,7 @@ import sys
 import tempfile
 import unittest
 from collections import Counter, defaultdict
-from dataclasses import fields
+from dataclasses import fields, replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -79,6 +79,321 @@ def make_config(prefix):
 
 
 class Stage01ContractTests(unittest.TestCase):
+    def test_type2_depth_filter_checks_exact_breakend_coordinates(self):
+        contig_data = [
+            make_node(
+                "debug",
+                "chr1",
+                100,
+                1100,
+                direction="+",
+                index=0,
+                terminal_range=(0, 1),
+                contig_type=2,
+            ),
+            make_node(
+                "debug",
+                "chr1",
+                1900,
+                2900,
+                direction="-",
+                index=1,
+                terminal_range=(0, 1),
+                contig_type=2,
+            ),
+        ]
+        depth_df = pd.DataFrame({
+            "chr": [], "st": [], "nd": [], "meandepth": [],
+        })
+
+        with (
+            patch.object(
+                np,
+                "estimate_type2_global_noise_sigma",
+                return_value=5.0,
+            ),
+            patch.object(
+                np,
+                "breakpoint_is_depth_balanced",
+                return_value=True,
+            ) as depth_check,
+            patch.object(
+                np,
+                "censat_overlap_check",
+                return_value=False,
+            ) as censat_check,
+            patch.object(
+                np,
+                "similar_centromere_nclose_cluster",
+                return_value=({}, {}),
+            ),
+        ):
+            rejected, rescued, _ = np.plan_initial_nclose_rejections(
+                contig_data,
+                {"debug": [(0, 1)]},
+                {},
+                {"chr1": 5_000_000},
+                depth_df,
+            )
+
+        self.assertEqual(rejected, {(0, 1)})
+        self.assertEqual(rescued, set())
+        self.assertEqual(
+            [call.args for call in depth_check.call_args_list],
+            [
+                ({}, "chr1", 1100, 1100, 5_000_000, 7.5),
+                ({}, "chr1", 2900, 2900, 5_000_000, 7.5),
+            ],
+        )
+        censat_check.assert_called_once_with({}, "chr1", 1100, 2900)
+
+    def test_type2_depth_step_accepts_two_global_noise_sigmas(self):
+        global_noise_sigma = 5.2269
+        absolute_threshold = 2.0 * global_noise_sigma
+
+        self.assertFalse(
+            np.breakpoint_is_depth_balanced(
+                {"chr1": [(1, 500_000, 84.7590), (500_001, 1_000_000, 66.1768)]},
+                "chr1", 500_001, 500_001, 1_000_000, absolute_threshold,
+            )
+        )
+        self.assertTrue(
+            np.breakpoint_is_depth_balanced(
+                {"chr1": [(1, 500_000, 74.0), (500_001, 1_000_000, 66.0)]},
+                "chr1", 500_001, 500_001, 1_000_000, absolute_threshold,
+            )
+        )
+
+    def test_type2_global_noise_excludes_censat_and_high_depth_bins(self):
+        depth_df = pd.DataFrame({
+            "chr": ["chr1"] * 4,
+            "st": [0, 100_000, 200_000, 300_000],
+            "nd": [100_000, 200_000, 300_000, 400_000],
+            "meandepth": [10.0, 400.0, 20.0, 30.0],
+        })
+
+        with patch.object(
+            np,
+            "estimate_noise_sigma_by_chromosome",
+            return_value={"__global__": 7.0},
+        ) as estimate_noise:
+            sigma = np.estimate_type2_global_noise_sigma(
+                depth_df,
+                {"chr1": [(150_000, 350_000)]},
+            )
+
+        self.assertEqual(sigma, 7.0)
+        coordinates, depths = estimate_noise.call_args.args
+        self.assertEqual(coordinates, [("chr1", 0), ("chr1", 300_000)])
+        self.assertEqual(depths.tolist(), [10.0, 30.0])
+
+    def test_debug_nclose_parser_preserves_repeated_cli_pairs(self):
+        path = SKYPE_ROOT / "01_Preprocess_NClose.py"
+        spec = importlib.util.spec_from_file_location("stage01_debug_cli", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        args = module.build_parser().parse_args([
+            "primary.paf",
+            "reference.fai",
+            "telomere.bed",
+            "repeat.bed",
+            "censat.bed",
+            "depth.stat.gz",
+            "output",
+            "reads.bam",
+            "--debug-force-nclose",
+            "chr1:123:+",
+            "chr2:456:-",
+            "--debug_force_nclose",
+            "chr3:789:-",
+            "chr4:1000:+",
+        ])
+
+        self.assertEqual(
+            args.debug_force_nclose,
+            [
+                [
+                    np.DebugNCloseEndpoint("chr1", 123, "+"),
+                    np.DebugNCloseEndpoint("chr2", 456, "-"),
+                ],
+                [
+                    np.DebugNCloseEndpoint("chr3", 789, "-"),
+                    np.DebugNCloseEndpoint("chr4", 1000, "+"),
+                ],
+            ],
+        )
+
+    def test_debug_nclose_endpoint_parser_rejects_invalid_values(self):
+        for value, message in (
+            ("chr1:123", "chrom:pos"),
+            ("chr1:not-an-int:+", "integer"),
+            ("chr1:0:+", "positive"),
+            ("chr1:123:x", "direction"),
+        ):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(ValueError, message):
+                    np.parse_debug_nclose_endpoint(value)
+
+    def test_debug_nclose_builds_multiple_exact_synthetic_candidates(self):
+        debug_pairs = (
+            (
+                np.DebugNCloseEndpoint("chr1", 100_000, "+"),
+                np.DebugNCloseEndpoint("chr2", 200_000, "-"),
+            ),
+            (
+                np.DebugNCloseEndpoint("chr3", 300_000, "-"),
+                np.DebugNCloseEndpoint("chr4", 400_000, "+"),
+            ),
+        )
+        chr_len = {f"chr{index}": 5_000_000 for index in range(1, 5)}
+        rows, provenance = np.build_debug_forced_nclose_nodes(
+            [],
+            debug_pairs,
+            chr_len,
+            defaultdict(list),
+            defaultdict(list),
+        )
+
+        self.assertEqual(
+            [row[np.CTG_NAM] for row in rows],
+            [
+                "debug_forced_nclose_1",
+                "debug_forced_nclose_1",
+                "debug_forced_nclose_2",
+                "debug_forced_nclose_2",
+            ],
+        )
+        self.assertEqual(np.get_breakend_coord(rows[0], 0), 100_000)
+        self.assertEqual(np.get_breakend_coord(rows[1], 1), 200_000)
+        self.assertEqual(np.get_breakend_coord(rows[2], 0), 300_000)
+        self.assertEqual(np.get_breakend_coord(rows[3], 1), 400_000)
+        for start in (0, 2):
+            first, second = rows[start:start + 2]
+            self.assertEqual(first[np.CTG_STR], 0)
+            self.assertEqual(first[np.CTG_END], second[np.CTG_STR])
+            self.assertEqual(second[np.CTG_END], first[np.CTG_LEN])
+            self.assertEqual(first[np.CTG_LEN], second[np.CTG_LEN])
+            self.assertEqual(first[np.CTG_STRND], start)
+            self.assertEqual(first[np.CTG_ENDND], start + 1)
+            self.assertEqual(second[np.CTG_STRND], start)
+            self.assertEqual(second[np.CTG_ENDND], start + 1)
+
+        candidates = np.build_unitig_nclose_candidates(
+            np.NCloseCandidateBuildContext(
+                contig_data=list(rows),
+                bnd_contig=set(provenance),
+                repeat_contig_names=set(),
+                repeat_censat_data=defaultdict(list),
+                paf_file_paths=("unitig.aln.paf",),
+                original_paf_paths=("unitig.paf",),
+                telo_set=set(),
+                telo_contig={},
+                chr_len=chr_len,
+                original_contig_names=[[]],
+                synthetic_candidate_provenance=provenance,
+            )
+        ).candidates
+        self.assertEqual(
+            [candidate.contig_name for candidate in candidates],
+            ["debug_forced_nclose_1", "debug_forced_nclose_2"],
+        )
+        self.assertTrue(all(candidate.synthetic for candidate in candidates))
+        self.assertTrue(
+            all(candidate.origin == "debug_forced" for candidate in candidates)
+        )
+
+        kept, rejected = np.apply_initial_nclose_rejections(
+            candidates,
+            {candidates[0].path_pair},
+            set(),
+        )
+        self.assertEqual([candidate.contig_name for candidate in kept], [
+            "debug_forced_nclose_2",
+        ])
+        self.assertEqual(rejected[0].candidate, candidates[0])
+
+    def test_debug_nclose_uses_normal_spatial_compression(self):
+        contig_data = [
+            make_node(
+                "event",
+                "chr1",
+                100,
+                200,
+                index=0,
+                terminal_range=(0, 1),
+            ),
+            make_node(
+                "event",
+                "chr2",
+                300,
+                400,
+                direction="-",
+                index=1,
+                terminal_range=(0, 1),
+            ),
+        ]
+        debug_rows, provenance = np.build_debug_forced_nclose_nodes(
+            contig_data,
+            ((
+                np.DebugNCloseEndpoint("chr1", 250, "+"),
+                np.DebugNCloseEndpoint("chr2", 450, "-"),
+            ),),
+            {"chr1": 5_000_000, "chr2": 5_000_000},
+            defaultdict(list),
+            defaultdict(list),
+        )
+        contig_data.extend(debug_rows)
+        result = np.build_unitig_nclose_candidates(
+            np.NCloseCandidateBuildContext(
+                contig_data=contig_data,
+                bnd_contig={"event", "debug_forced_nclose_1"},
+                repeat_contig_names=set(),
+                repeat_censat_data=defaultdict(list),
+                paf_file_paths=("unitig.aln.paf",),
+                original_paf_paths=("unitig.paf",),
+                telo_set=set(),
+                telo_contig={},
+                chr_len={"chr1": 5_000_000, "chr2": 5_000_000},
+                original_contig_names=[["event"]],
+                synthetic_candidate_provenance=provenance,
+            )
+        )
+        self.assertEqual(
+            [candidate.identity for candidate in result.candidates],
+            [("event", (0, 1))],
+        )
+
+    def test_debug_nclose_validates_reference_and_exact_chromosome_ends(self):
+        valid_second = np.DebugNCloseEndpoint("chr1", 1_000, "+")
+        for endpoint, message in (
+            (np.DebugNCloseEndpoint("chr2", 100, "+"), "Unknown"),
+            (np.DebugNCloseEndpoint("chr1", 5_000_001, "+"), "exceeds"),
+            (np.DebugNCloseEndpoint("chr1", 5_000_000, "-"), "cannot represent"),
+        ):
+            with self.subTest(endpoint=endpoint):
+                with self.assertRaisesRegex(ValueError, message):
+                    np.build_debug_forced_nclose_nodes(
+                        [],
+                        ((endpoint, valid_second),),
+                        {"chr1": 5_000_000},
+                        defaultdict(list),
+                        defaultdict(list),
+                    )
+
+    def test_debug_nclose_is_rejected_in_vcf_mode_before_io(self):
+        endpoint_pair = ((
+            np.DebugNCloseEndpoint("chr1", 100, "+"),
+            np.DebugNCloseEndpoint("chr2", 200, "-"),
+        ),)
+        config = replace(
+            make_config("output"),
+            vcf_input_path="input.vcf",
+            debug_force_ncloses=endpoint_pair,
+        )
+        with self.assertRaisesRegex(ValueError, "assembly mode"):
+            np.run_stage01(config)
+
     def test_unitig_builder_has_one_small_result_contract(self):
         self.assertEqual(
             [field.name for field in fields(np.NCloseCandidateBuildResult)],

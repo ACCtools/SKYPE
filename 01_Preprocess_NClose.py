@@ -9,6 +9,7 @@ import logging
 from nclose_preprocess import (
     NCLOSE_COUNT_DEFAULT_VAF_THRESHOLD,
     Stage01Config,
+    parse_debug_nclose_endpoint,
     run_stage01,
 )
 
@@ -103,6 +104,20 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="FILTER",
         default=("PASS", "."),
     )
+    parser.add_argument(
+        "--debug-force-nclose",
+        "--debug_force_nclose",
+        dest="debug_force_nclose",
+        action="append",
+        nargs=2,
+        type=parse_debug_nclose_endpoint,
+        metavar=("ENDPOINT_A", "ENDPOINT_B"),
+        default=None,
+        help=(
+            "Assembly-only debug injection of one synthetic NClose using two "
+            "1-based chrom:pos:+/- endpoints; repeat the option for more pairs"
+        ),
+    )
     parser.add_argument("--test", action="store_true", help=argparse.SUPPRESS)
     return parser
 
@@ -121,6 +136,10 @@ def main(argv=None) -> int:
         parser.error(
             "assembly mode requires --original-paf-loc with the original "
             "unitig PAF as its last value"
+        )
+    if args.vcf_input is not None and args.debug_force_nclose:
+        parser.error(
+            "--debug-force-nclose is supported only in assembly mode"
         )
 
     logging.info("01_Preprocess_NClose start")
@@ -144,6 +163,10 @@ def main(argv=None) -> int:
         disable_alt_ctg_simple=args.disable_alt_ctg_simple,
         vcf_input_path=args.vcf_input,
         vcf_filter_pass=tuple(args.vcf_filter_pass),
+        debug_force_ncloses=tuple(
+            tuple(endpoint_pair)
+            for endpoint_pair in (args.debug_force_nclose or ())
+        ),
     )
     result = run_stage01(config)
     logging.info(
