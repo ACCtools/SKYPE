@@ -15,7 +15,7 @@ from skype_output_files import build_matrix_column_locations
 SKYPE_ROOT = Path(__file__).resolve().parents[1]
 RUN_NNLS_PATH = SKYPE_ROOT / "23_run_nnls.py"
 SAVE_MATRIX_PATH = SKYPE_ROOT / "22_save_matrix.py"
-BUILD_GRAPH_PATH = SKYPE_ROOT / "02_Build_Breakend_Graph_Limited.py"
+BUILD_GRAPH_PATH = SKYPE_ROOT / "10_Graph_Find_Paths.py"
 
 
 def load_functions(*names):

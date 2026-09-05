@@ -7,12 +7,12 @@ from pathlib import Path
 
 
 BUILD_GRAPH_PATH = (
-    Path(__file__).resolve().parents[1] / "02_Build_Breakend_Graph_Limited.py"
+    Path(__file__).resolve().parents[1] / "nclose_preprocess.py"
 )
 
 
 def load_alt_simple_helpers():
-    """Load the pure simple_ctg_alt helpers without running stage 02."""
+    """Load the pure simple_ctg_alt helpers without running stage 01."""
     function_names = {
         "alt_simple_ref_len",
         "alt_simple_chr_sort_key",

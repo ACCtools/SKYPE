@@ -5,6 +5,9 @@ from __future__ import annotations
 
 import argparse
 import logging
+import sys
+
+from skype_options import save_stage_options, split_stage_options
 
 from nclose_preprocess import (
     NCLOSE_COUNT_DEFAULT_VAF_THRESHOLD,
@@ -118,13 +121,22 @@ def build_parser() -> argparse.ArgumentParser:
             "1-based chrom:pos:+/- endpoints; repeat the option for more pairs"
         ),
     )
-    parser.add_argument("--test", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--option_skype", "--option-skype", default="",
+        help="Quoted SKYPE options; later-stage options are saved for downstream use",
+    )
     return parser
 
 
 def main(argv=None) -> int:
     parser = build_parser()
+    argv = list(sys.argv[1:] if argv is None else argv)
     args = parser.parse_args(argv)
+    try:
+        stage01_options, stage10_options = split_stage_options(args.option_skype)
+    except ValueError as exc:
+        parser.error(str(exc))
+    args = parser.parse_args(argv + stage01_options)
     if args.thread < 1:
         parser.error("--thread must be positive")
     if args.vcf_input is None and args.alt is None:
@@ -169,6 +181,7 @@ def main(argv=None) -> int:
         ),
     )
     result = run_stage01(config)
+    save_stage_options(args.prefix, stage01_options, stage10_options)
     logging.info(
         "01_Preprocess_NClose complete: %d contig node(s), %d NClose pair(s)",
         len(result.contig_data),

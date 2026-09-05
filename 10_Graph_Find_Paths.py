@@ -11,6 +11,8 @@ import shutil
 import sys
 from pathlib import Path
 
+from skype_options import load_stage_options, split_stage_options
+
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from breakend_graph import (  # noqa: E402
@@ -65,6 +67,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--limit-combinations",
         help="Use exactly the integer pair in a limit_combinations.json file",
     )
+    parser.add_argument(
+        "--option_skype", "--option-skype", default=None,
+        help="Replace saved stage-10 options when restarting directly at stage 10",
+    )
     return parser
 
 
@@ -88,7 +94,18 @@ def _remove_stale_stage10_outputs(prefix: Path, verbose: bool) -> Path:
 
 def main(argv=None) -> int:
     parser = build_parser()
+    argv = list(sys.argv[1:] if argv is None else argv)
     args = parser.parse_args(argv)
+    try:
+        if args.option_skype is None:
+            stage_options = load_stage_options(args.prefix, "10")
+        else:
+            stage01_options, stage_options = split_stage_options(args.option_skype)
+            if stage01_options:
+                parser.error("Preprocessing options require restarting at stage 01")
+    except ValueError as exc:
+        parser.error(str(exc))
+    args = parser.parse_args(stage_options + argv)
     if args.thread < 1:
         parser.error("--thread must be positive")
     if args.graph_depth < 0:

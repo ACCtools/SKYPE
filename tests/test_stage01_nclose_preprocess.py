@@ -519,12 +519,6 @@ class Stage01ContractTests(unittest.TestCase):
             .isdisjoint(destinations)
         )
 
-    def test_legacy_stage02_writes_the_new_downstream_nclose_contract(self):
-        source = (SKYPE_ROOT / "02_Build_Breakend_Graph_Limited.py").read_text(
-            encoding="utf-8"
-        )
-        self.assertIn("save_nclose_nodes(PREFIX, nclose_nodes)", source)
-        self.assertNotIn("nclose_chunk_data.pkl", source)
 
     def test_persistence_writes_exact_handoff_and_lightweight_nclose_file(self):
         with tempfile.TemporaryDirectory() as temporary:

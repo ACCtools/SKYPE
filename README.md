@@ -17,7 +17,7 @@ The native pipeline:
 There is no karyotype/variant mode switch, normal-chromosome prior, post-NNLS
 NClose filtering, or clustering stage.
 
-### Stage-01/10 refactor status
+### Stage 01/10 pipeline
 
 `01_Preprocess_NClose.py` now owns contig/telomere preprocessing, NClose
 post-processing, ecDNA discovery, and the exact three-field
@@ -27,8 +27,7 @@ is retained only for command/file-name compatibility: stage 01 reads the
 `--alt` unitig PAF and the last `--original-paf-loc` value, and writes
 unitig-only rows under the primary-named `*.ppc.paf`. It extracts one
 path-ordered terminal NClose from each retained type-1/2 unitig and globally
-clusters those pairs with the same coordinate/direction rules used by the
-legacy stage 02.
+clusters those pairs by coordinate and direction.
 Downstream stages read canonical NCloses from `nclose_nodes.pkl`; the former
 endpoint-compression tuple is no longer an external artifact.
 
@@ -42,8 +41,21 @@ stage-01 driver.
 
 Every run also writes `stage01_nclose_summary.json` with ordered stage counts
 and `stage01_nclose_rejections.tsv` with the first filter/reason that removed
-each candidate. ACCtools runs stages 01 and 10 by default; `--legacy` selects
-the unchanged combined stage 02 route.
+each candidate. ACCtools runs stages 01 and 10 for native assembly/VCF input.
+
+Pass native pipeline options through `--option_skype` (or `--option-skype`):
+
+```bash
+bash run.sh --option_skype="--skip_bam_analysis --add_indel_graph" HCC1937
+```
+
+Stage 01 parses the string using `skype_options.py`, applies preprocessing
+options, and saves the stage settings in `skype_options.json`. Stage 10 loads
+its graph options from that file. A new stage-01 run replaces saved settings;
+a stage-10 restart reuses them. Explicit stage-10 CLI options override saved
+values. A direct stage-10 `--option_skype` replaces the saved graph options for
+that invocation; preprocessing changes require rerunning stage 01.
+The graph handoff remains the same three-field `01_nclose_data.pkl`.
 
 ## Results
 
@@ -52,6 +64,7 @@ All files are written to the SKYPE output directory.
 | Stage | Output | Description |
 | --- | --- | --- |
 | `01_Preprocess_NClose.py` | `01_nclose_data.pkl` | Exact three-field graph handoff: `contig_data`, `nclose_nodes`, and `telo_contig`. |
+| `01_Preprocess_NClose.py` | `skype_options.json` | Options routed to preprocessing and graph search. |
 | `01_Preprocess_NClose.py` | `stage01_nclose_summary.json`, `stage01_nclose_rejections.tsv` | Ordered split/filter counts and first-rejection provenance. |
 | `23_run_nnls.py` | `weight.npy`, `predict_B.npy` | Full-column raw NNLS weights and reconstructed depth from one solve. |
 | `31_depth_analysis.py` | `SV_call_result.vcf` | Native `BND`, `INV`, `DEL`, and `DUP` calls with normalized copy-number support. |

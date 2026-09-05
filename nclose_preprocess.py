@@ -7340,7 +7340,7 @@ def _run_user_exclusion_stage(context, state):
 
 
 def default_nclose_pipeline_stages():
-    """Return the 02-compatible NClose postprocessing sequence."""
+    """Return the stage-01 NClose postprocessing sequence."""
 
     return (
         NClosePipelineStage("initial_rejections", _run_initial_rejection_stage),

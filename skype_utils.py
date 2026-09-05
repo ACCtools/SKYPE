@@ -195,7 +195,7 @@ def save_nclose_nodes(prefix, nclose_nodes):
 
 
 def load_nclose_nodes(prefix):
-    """Load the canonical NClose mapping produced by stage 01 or legacy 02."""
+    """Load the canonical NClose mapping produced by stage 01."""
 
     path = _os.path.join(prefix, NCLOSE_NODES_PKL)
     with open(path, "rb") as handle:

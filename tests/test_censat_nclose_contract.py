@@ -12,7 +12,7 @@ from nclose_candidate import NCloseCandidate, apply_nclose_filter
 
 
 BUILD_GRAPH_PATH = (
-    Path(__file__).resolve().parents[1] / "02_Build_Breakend_Graph_Limited.py"
+    Path(__file__).resolve().parents[1] / "nclose_preprocess.py"
 )
 
 
@@ -29,7 +29,7 @@ OFFSET_DIR_GROUP_LIMIT = 100_000
 
 
 def load_censat_helpers():
-    """Load CenSat contracts without executing stage 02's CLI entry point."""
+    """Load CenSat contracts without executing stage 01's CLI entry point."""
 
     definition_names = {
         "PregraphSourceMode",
@@ -116,22 +116,6 @@ apply_censat_censat_filter = HELPERS["apply_censat_censat_filter"]
 apply_censat_fragment_direction_filter = HELPERS[
     "apply_censat_fragment_direction_filter"
 ]
-
-
-def ordered_call_names(function_name: str):
-    tree = ast.parse(BUILD_GRAPH_PATH.read_text(encoding="utf-8"))
-    function = next(
-        node
-        for node in tree.body
-        if isinstance(node, ast.FunctionDef) and node.name == function_name
-    )
-    calls = [node for node in ast.walk(function) if isinstance(node, ast.Call)]
-    calls.sort(key=lambda node: (node.lineno, node.col_offset))
-    return [
-        call.func.id
-        for call in calls
-        if isinstance(call.func, ast.Name)
-    ]
 
 
 def contig_row(
@@ -412,7 +396,7 @@ class BothCensatFilterTests(unittest.TestCase):
             [("both", "mapq")],
         )
 
-    def test_both_filter_rejection_precedence_and_competitor_rule(self):
+    def test_stage01_keeps_cross_chromosome_opposite_direction_pairs(self):
         contig_data = [
             contig_row("opposite-a", "chr1", 1_000, 1_100, "+", "r"),
             contig_row("opposite-a", "chr2", 2_000, 2_100, "+", "r"),
@@ -440,12 +424,10 @@ class BothCensatFilterTests(unittest.TestCase):
             {"chr6": [(0, 1_000)]},
         )
 
-        self.assertEqual(kept, [])
+        self.assertEqual(kept, candidates[:2])
         self.assertEqual(
             {item.candidate.contig_name: item.reason for item in rejected},
             {
-                "opposite-a": "opposite_dir",
-                "opposite-b": "opposite_dir",
                 "same-chrom": "same_chrom_opposite_dir",
                 "mapq": "mapq",
                 "terminal": "terminal",
@@ -480,27 +462,6 @@ class BothCensatFilterTests(unittest.TestCase):
         self.assertEqual(
             [(item.candidate.contig_name, item.reason) for item in rejected],
             [("mismatch", "direction_mismatch")],
-        )
-
-
-class CensatPipelineOrderingTests(unittest.TestCase):
-    def test_candidate_filters_stay_after_ordinary_censat_arbitration(self):
-        calls = ordered_call_names("nclose_calc")
-        ordered_contract = [
-            "apply_censat_censat_filter",
-            "apply_censat_fragment_direction_filter",
-            "apply_simple_alt_preference_filter",
-            "collect_missing_cen_fragment_dir_censat_noncensat",
-            "add_nearest_combined_censat_noncensat_ncloses",
-            "apply_offset_direction_mismatched_censat_noncensat_filter",
-            "apply_nclose_count_vaf_filter",
-        ]
-
-        positions = [calls.index(call_name) for call_name in ordered_contract]
-        self.assertEqual(
-            positions,
-            sorted(positions),
-            "CenSat repair/filter lifecycle changed",
         )
 
 

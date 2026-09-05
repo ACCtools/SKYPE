@@ -3,6 +3,7 @@ from __future__ import annotations
 import gzip
 import json
 import pickle
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -28,7 +29,7 @@ class VcfAddIndelGraphIntegrationTests(unittest.TestCase):
             censat_bed = root / "censat.bed"
             depth_path = root / "depth.win.stat.gz"
             vcf = root / "input.vcf"
-            native_limits = root / "limit_combinations.json"
+            native_limits = root / "fixed limits.json"
 
             chromosomes = [f"chr{i}" for i in range(1, 23)] + ["chrX"]
             fai.write_text(
@@ -87,7 +88,10 @@ class VcfAddIndelGraphIntegrationTests(unittest.TestCase):
                 str(ins_paf),
                 "--vcf_input",
                 str(vcf),
-                "--skip_bam_analysis",
+                "--option_skype=" + shlex.join([
+                    "--skip_bam_analysis", "--vcf_filter_pass", "PASS", ".",
+                    "--add_indel_graph", "--limit_combinations", str(native_limits),
+                ]),
                 "-t",
                 "1",
             ]
@@ -130,9 +134,6 @@ class VcfAddIndelGraphIntegrationTests(unittest.TestCase):
                     "1",
                     "-d",
                     "0",
-                    "--limit-combinations",
-                    str(native_limits),
-                    "--add-indel-graph",
                     "--main-stat-path",
                     str(depth_path),
                     "--censat-bed-path",

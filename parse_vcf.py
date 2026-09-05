@@ -2,7 +2,7 @@
 
 The module deliberately stops at ``NCloseSpec`` and type4 event dictionaries.
 Synthetic PAF nodes and graph construction remain in
-``02_Build_Breakend_Graph_Limited.py``.
+``01_Preprocess_NClose.py``.
 
 For Severus releases older than 1.7, paired BND ALT fields emitted for mixed
 ``STRANDS`` values were assigned to the wrong endpoints.  Such inputs are

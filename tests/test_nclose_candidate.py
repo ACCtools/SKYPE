@@ -21,7 +21,7 @@ from nclose_candidate import (
 
 
 BUILD_GRAPH_PATH = (
-    Path(__file__).resolve().parents[1] / "02_Build_Breakend_Graph_Limited.py"
+    Path(__file__).resolve().parents[1] / "nclose_preprocess.py"
 )
 
 
@@ -43,7 +43,7 @@ def ordered_direct_calls(function_name):
     ]
 
 
-def load_stage02_function(function_name, **extra_globals):
+def load_stage01_function(function_name, **extra_globals):
     tree = ast.parse(BUILD_GRAPH_PATH.read_text(encoding="utf-8"))
     function = next(
         node
@@ -303,8 +303,13 @@ class NCloseCandidateTests(unittest.TestCase):
             run=Mock(return_value=SimpleNamespace(returncode=0))
         )
         collect_pairs = Mock(return_value={(3, 8)})
-        apply_filter = load_stage02_function(
+        apply_filter = load_stage01_function(
             "apply_raw_virtual_inversion_filter",
+            pd=SimpleNamespace(read_csv=Mock(return_value=Mock())),
+            TYPE2_NOISE_SIGMA_MULTIPLIER=1.5,
+            estimate_type2_global_noise_sigma=Mock(return_value=1.0),
+            import_censat_repeat_data=Mock(return_value={}),
+            CENSAT_PATH="censat.bed",
             SKIP_BAM_ANAL=False,
             JULIA_BAM_THREAD_LIM=2,
             THREAD=4,
@@ -348,7 +353,7 @@ class NCloseCandidateTests(unittest.TestCase):
                 encoding="utf-8",
             )
             logger = Mock()
-            apply_exclusions = load_stage02_function(
+            apply_exclusions = load_stage01_function(
                 "apply_user_nclose_exclusions",
                 args=SimpleNamespace(
                     exclude_nclose_list_loc=str(exclusion_path)
@@ -445,18 +450,7 @@ class NCloseCandidateTests(unittest.TestCase):
         conversion_pos = call_names.index("candidates_to_legacy")
         final_output_pos = call_names.index("finalize_nclose_outputs")
         self.assertLess(conversion_pos, final_output_pos)
-        for candidate_stage in (
-            "apply_offset_direction_mismatched_censat_noncensat_filter",
-            "apply_nclose_count_vaf_filter",
-            "apply_raw_virtual_inversion_filter",
-            "apply_user_nclose_exclusions",
-        ):
-            self.assertIn(candidate_stage, call_names)
-            self.assertLess(
-                call_names.index(candidate_stage),
-                conversion_pos,
-                f"{candidate_stage} must run on Candidate objects",
-            )
+        self.assertLess(call_names.index("run_nclose_pipeline"), conversion_pos)
 
 
 if __name__ == "__main__":
