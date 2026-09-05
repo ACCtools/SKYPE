@@ -23,6 +23,11 @@ from nclose_candidate import (
     candidates_to_legacy,
 )
 from denoised_relative_error import estimate_noise_sigma_by_chromosome
+from censat_fragment import (
+    detect_censat_fragments,
+    nclose_breakend_positions,
+    write_censat_diagnostics,
+)
 from breakend_graph import save_stage10_input
 from raw_translocation_depth import (
     DEPTH_BALANCED_NOISE_SIGMA_MULTIPLIER,
@@ -117,8 +122,6 @@ FORCE_TELOMERE_THRESHOLD = 10*K
 TELOMERE_CLUSTER_THRESHOLD = 500*K
 SUBTELOMERE_LENGTH = 500*K
 MULTI_END_ALIGNMENT_WINDOW = 500*K
-
-CENSAT_OUT_DIFF_RATIO = 0.30
 
 MIN_FLANK_SIZE_BP = 1*M
 
@@ -2884,203 +2887,33 @@ def weighted_avg_meandepth(chrom_df, region_start, region_end):
 
 
 def find_breakend_centromere(
-    repeat_censat_data : dict,
-    chr_len : dict,
-    df : pd.DataFrame,
-    raw_nclose_nodes : dict = None,
-    contig_data : list = None,
-    log_context : str = "",
+    repeat_censat_data: dict,
+    chr_len: dict,
+    df: pd.DataFrame,
+    raw_nclose_nodes: dict = None,
+    contig_data: list = None,
+    log_context: str = "",
+    diagnostics_prefix=None,
 ):
-    # Remove unused Y
-    ydf = df.query('chr == "chrY"')
-    ydepth = np.mean(ydf['meandepth'].to_numpy())
-
-    depth = np.mean(df['meandepth'].to_numpy())
-
-    sd, bd = sorted([depth, ydepth])
-    yratio = bd / sd
-    if yratio > 2:
-        df = df.query('chr != "chrY"')
-
-    meandepth = np.median(df['meandepth'])
-
-    def _node_overlaps_region(node, region_start, region_end):
-        return max(int(node[CHR_STR]), region_start) <= min(int(node[CHR_END]), region_end)
-
-    def _normalized_pair_endpoint_dir(pair, endpoint_order):
-        ctg_dir = contig_data[pair[endpoint_order]][CTG_DIR]
-        if endpoint_order == 0:
-            return ctg_dir
-        return _flip_ctg_dir(ctg_dir)
-
-    def _expected_intervention_dir(side, right_high):
-        # For a right-high jump, chr1:31M+ as pair[1] and chr1:33M- as pair[0]
-        # normalize to '-' on the right flank, while chr1:13M+ normalizes to '+'
-        # on the left flank and can explain the left-side drop. Reverse the roles
-        # for a left-high jump.
-        if right_high:
-            return '+' if side == 'left' else '-'
-        return '-' if side == 'left' else '+'
-
-    def _has_depth_compatible_raw_nclose(chrom, rep_start_0, rep_end_0, flank_bp, right_high):
-        if raw_nclose_nodes is None or contig_data is None:
-            return False
-
-        left_start = max(1, (rep_start_0 + 1) - flank_bp)
-        left_end = rep_start_0
-        right_start = rep_end_0 + 1
-        right_end = min(chr_len[chrom], rep_end_0 + flank_bp)
-
-        for pair_list in raw_nclose_nodes.values():
-            for pair in pair_list:
-                for endpoint_order, node_idx in enumerate(pair):
-                    node = contig_data[node_idx]
-                    if node[CHR_NAM] != chrom:
-                        continue
-
-                    side = None
-                    if left_end >= left_start and _node_overlaps_region(node, left_start, left_end):
-                        side = 'left'
-                    elif right_end >= right_start and _node_overlaps_region(node, right_start, right_end):
-                        side = 'right'
-                    if side is None:
-                        continue
-
-                    norm_dir = _normalized_pair_endpoint_dir(pair, endpoint_order)
-                    if norm_dir == _expected_intervention_dir(side, right_high):
-                        return True
-        return False
-
-    depth_diff_data = dict()
-    depth_dir_data = dict()
-    relaxed_depth_chroms = set()
-    for chrom, intervals in repeat_censat_data.items():
-        chrom_length = chr_len.get(chrom)
-        if chrom_length is None:
-            continue
-        chrom_df = df[df['chr'] == chrom]
-        if chrom_df.empty:
-            continue
-
-        rep_start_0, rep_end_0 = intervals[0]  # 0-indexed 좌표
-
-        if rep_start_0 == 0 or rep_end_0 == chrom_length - 1:
-            continue
-
-        tmp_depth_data = []
-        for FLANK_SIZE_BP in [1*M, 5*M, 10*M]:
-            # 좌측 flanking: repeat의 1-indexed 시작은 rep_start_0 + 1
-            if rep_start_0 > 0:
-                left_flank_end = rep_start_0  # repeat 시작 전 마지막 base (1-indexed)
-                left_flank_start = max(1, (rep_start_0 + 1) - FLANK_SIZE_BP)
-
-                if left_flank_end < left_flank_start or (left_flank_end - left_flank_start + 1) < FLANK_SIZE_BP:
-                    left_flank_start = None
-                    left_flank_end = None
-                    left_weighted = None
-                else:
-                    left_weighted = weighted_avg_meandepth(chrom_df, left_flank_start, left_flank_start + FLANK_SIZE_BP)
-            else:
-                left_flank_start = None
-                left_flank_end = None
-                left_weighted = None
-
-            # 우측 flanking: repeat의 끝 이후 첫 base부터
-            if rep_end_0 < chrom_length:
-                right_flank_start = rep_end_0 + 1
-                right_flank_end = min(chrom_length, rep_end_0 + FLANK_SIZE_BP)
-
-                if right_flank_end < right_flank_start or (right_flank_end - right_flank_start + 1) < FLANK_SIZE_BP:
-                    right_flank_start = None
-                    right_flank_end = None
-                    right_weighted = None
-                else:
-                    right_weighted = weighted_avg_meandepth(chrom_df, right_flank_end - FLANK_SIZE_BP, right_flank_end)
-            else:
-                right_flank_start = None
-                right_flank_end = None
-                right_weighted = None
-
-            if not (right_weighted is None or left_weighted is None):
-                tmp_depth_data.append(right_weighted - left_weighted)
-            else:
-                break
-
-        if not tmp_depth_data or tmp_depth_data[0] == 0:
-            continue
-
-        first_sign = tmp_depth_data[0] > 0
-
-        rules = [(1, 0.20), (2, 0.15), (3, 0.10)]
-
-        for k, thr in rules:
-            if len(tmp_depth_data) < k:
-                continue
-
-            head = tmp_depth_data[:k]
-            if any(x == 0 for x in head):
-                continue
-
-            same_sign = all((x > 0) == first_sign for x in head)
-            strong_enough = all(abs(x) >= abs(thr * meandepth) for x in head)
-            any_strong = any(abs(x) >= abs(thr * meandepth) for x in head)
-            localized = all(
-                abs(x - tmp_depth_data[0]) <= abs(CENSAT_OUT_DIFF_RATIO * meandepth)
-                for x in head[1:]
-            )
-
-            if same_sign and strong_enough and localized:
-                depth_diff_data[chrom] = abs(tmp_depth_data[0])
-                depth_dir_data[chrom] = first_sign
-                break
-            elif raw_nclose_nodes is not None and contig_data is not None and k > 1 and same_sign and any_strong and localized:
-                # A compatible breakpoint outside the inner 5 Mb can still change
-                # the 5 Mb average by altering the segment toward the censat edge.
-                nclose_flank_bp = 10*M
-                has_nclose_intervention = _has_depth_compatible_raw_nclose(
-                    chrom,
-                    rep_start_0,
-                    rep_end_0,
-                    nclose_flank_bp,
-                    first_sign,
-                )
-                if not has_nclose_intervention:
-                    depth_diff_data[chrom] = max(
-                        abs(x) for x in head if abs(x) >= abs(thr * meandepth)
-                    )
-                    depth_dir_data[chrom] = first_sign
-                    relaxed_depth_chroms.add(chrom)
-                    break
-
-
-    cen_fragment_meta = {}
-    for chrom, diff in depth_diff_data.items():
-        intervals = repeat_censat_data[chrom]
-        rep_start_0, rep_end_0 = intervals[0]
-        mid_censat = (rep_start_0 + rep_end_0) // 2
-
-        cen_fragment_meta[chrom] = {
-            "dir": depth_dir_data[chrom],
-            "mid": mid_censat,
-            "depth_diff": diff,
-            "chr_len": chr_len[chrom],
-        }
-
-    # censat(centromere) breakend 로 인식된 염색체 목록을 로그로 출력
-    detected_summary = ', '.join(sorted(cen_fragment_meta, key=chr2int))
-    log_prefix = f'{log_context} ' if log_context else ''
-    logging.info(
-        f'{log_prefix}Censat breakend chromosome: '
-        f'{detected_summary if cen_fragment_meta else "(none)"}'
+    """Separate flank depth changes before admitting a CEN-SAT arm fragment."""
+    metadata, report = detect_censat_fragments(
+        df,
+        repeat_censat_data,
+        chr_len,
+        breakends=nclose_breakend_positions(contig_data, raw_nclose_nodes),
     )
-    if relaxed_depth_chroms:
-        relaxed_summary = ', '.join(sorted(relaxed_depth_chroms, key=chr2int))
-        logging.info(
-            f'{log_prefix}Censat breakend chromosome relaxed by raw nclose direction: '
-            f'{relaxed_summary}'
-        )
-
-    return cen_fragment_meta
+    if diagnostics_prefix is not None:
+        write_censat_diagnostics(diagnostics_prefix, report)
+    logging.info(
+        "%s Censat breakend chromosome (adjacent plateau): %s",
+        log_context,
+        ", ".join(sorted(metadata, key=chr2int)) or "(none)",
+    )
+    logging.info(
+        "Censat locus decisions: %s",
+        dict(Counter(row["status"] for row in report["loci"])),
+    )
+    return metadata
 
 def break_double_telomere_contig(contig_data : list, telo_connected_set : set):
     s = 0
@@ -6248,6 +6081,7 @@ def build_vcf_mode_inputs(context):
         raw_nclose_nodes=raw_nclose_nodes,
         contig_data=contig_data,
         log_context="VCF mode",
+        diagnostics_prefix=context.prefix,
     )
     with open(f"{context.prefix}/cen_fragment_data.pkl", "wb") as f:
         pkl.dump(cen_fragment_meta, f)
@@ -7513,7 +7347,8 @@ def nclose_calc(
         depth_df,
         raw_nclose_nodes=raw_nclose_nodes,
         contig_data=contig_data,
-        log_context="Raw-nclose adjusted",
+        log_context="NClose-informed flank segmentation",
+        diagnostics_prefix=context.prefix,
     )
     with open(f'{context.prefix}/cen_fragment_data.pkl', 'wb') as f:
         pkl.dump(cen_fragment_meta, f)
@@ -7713,6 +7548,8 @@ _INVALIDATED_STAGE01_OUTPUTS = (
     "virtual_ordinary_contig.txt",
     "conjoined_type4_ins_del.pkl",
     "cen_fragment_data.pkl",
+    "cen_fragment_diagnostics.json",
+    "cen_fragment_diagnostics.tsv",
     "telomere_connected_list.txt",
     "telomere_connected_list_readable.txt",
     "indel_exclude_idx_set.pkl",
