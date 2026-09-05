@@ -586,17 +586,17 @@ def trim_nclose_terminal_pair(contig_data, start, end, max_gap=0):
             contig_data[cursor][CHR_NAM],
         )
         if state == start_state:
+            cut_ratio, _ = calculate_single_contig_ref_ratio(
+                contig_data[start:cursor + 1]
+            )
+            if abs(cut_ratio - 1) > BND_CONTIG_BOUND:
+                break
             trimmed_start = cursor
             gap = 0
         else:
             gap += 1
             if gap > max_gap:
                 break
-        cut_ratio, _ = calculate_single_contig_ref_ratio(
-            contig_data[start:trimmed_start + 1]
-        )
-        if abs(cut_ratio - 1) > BND_CONTIG_BOUND:
-            break
         cursor += 1
 
     gap = 0
@@ -608,17 +608,17 @@ def trim_nclose_terminal_pair(contig_data, start, end, max_gap=0):
             contig_data[cursor][CHR_NAM],
         )
         if state == end_state:
+            cut_ratio, _ = calculate_single_contig_ref_ratio(
+                contig_data[cursor:end + 1]
+            )
+            if abs(cut_ratio - 1) > BND_CONTIG_BOUND:
+                break
             trimmed_end = cursor
             gap = 0
         else:
             gap += 1
             if gap > max_gap:
                 break
-        cut_ratio, _ = calculate_single_contig_ref_ratio(
-            contig_data[trimmed_end:end + 1]
-        )
-        if abs(cut_ratio - 1) > BND_CONTIG_BOUND:
-            break
         cursor -= 1
 
     return trimmed_start, trimmed_end
@@ -6582,46 +6582,7 @@ def apply_censat_censat_filter(
     chr_len,
     repeat_censat_data,
 ):
-    """Apply terminal, direction, competitor, then MAPQ CENSAT rules."""
-
-    mapq60_groups = defaultdict(list)
-    for candidate in candidates:
-        pair = candidate.path_pair
-        if classify_censat_pair(contig_data, pair) != CensatPairClass.BOTH:
-            continue
-        if (
-            contig_data[pair[0]][CTG_MAPQ] < 60
-            or contig_data[pair[1]][CTG_MAPQ] < 60
-        ):
-            continue
-        pair_info = _canonical_censat_pair_info(contig_data, pair)
-        mapq60_groups[pair_info["chroms"]].append((candidate, pair_info))
-
-    opposite_pairs = set()
-    for items in mapq60_groups.values():
-        for i in range(len(items)):
-            candidate_i, info_i = items[i]
-            node_a_i, node_b_i = info_i["idxs"]
-            for j in range(i + 1, len(items)):
-                candidate_j, info_j = items[j]
-                if not (
-                    info_i["dirs"][0] != info_j["dirs"][0]
-                    and info_i["dirs"][1] != info_j["dirs"][1]
-                ):
-                    continue
-                node_a_j, node_b_j = info_j["idxs"]
-                if (
-                    distance_checker(
-                        contig_data[node_a_i],
-                        contig_data[node_a_j],
-                    ) <= NCLOSE_COMPRESS_LIMIT
-                    and distance_checker(
-                        contig_data[node_b_i],
-                        contig_data[node_b_j],
-                    ) <= NCLOSE_COMPRESS_LIMIT
-                ):
-                    opposite_pairs.add(candidate_i.identity)
-                    opposite_pairs.add(candidate_j.identity)
+    """Apply terminal, direction, then MAPQ CENSAT rules."""
 
     def reject_reason(candidate):
         pair = candidate.path_pair
@@ -6649,8 +6610,6 @@ def apply_censat_censat_filter(
             != contig_data[pair[1]][CTG_DIR]
         ):
             return "same_chrom_opposite_dir"
-        if candidate.identity in opposite_pairs:
-            return "opposite_dir"
         if (
             contig_data[pair[0]][CTG_MAPQ] < 60
             or contig_data[pair[1]][CTG_MAPQ] < 60
@@ -6667,8 +6626,7 @@ def apply_censat_censat_filter(
     logging.info(
         f'Removed {removal_counts["mapq"]} censat-censat nclose where either endpoint MAPQ < 60, '
         f'{removal_counts["terminal"]} censat-censat nclose with a terminal-censat endpoint, '
-        f'{removal_counts["same_chrom_opposite_dir"]} same-chromosome opposite-direction censat-censat nclose, '
-        f'{removal_counts["opposite_dir"]} opposite-direction censat-censat nclose'
+        f'{removal_counts["same_chrom_opposite_dir"]} same-chromosome opposite-direction censat-censat nclose'
     )
     return kept, rejections
 
@@ -7388,22 +7346,9 @@ def default_nclose_pipeline_stages():
         NClosePipelineStage("initial_rejections", _run_initial_rejection_stage),
         NClosePipelineStage("censat_pair", _run_censat_pair_stage),
         NClosePipelineStage(
-            "censat_fragment_direction",
-            _run_censat_fragment_direction_stage,
-        ),
-        NClosePipelineStage(
-            "simple_alt_preference",
-            _run_simple_alt_preference_stage,
-        ),
-        NClosePipelineStage(
-            "combined_censat_noncensat",
-            _run_combined_censat_noncensat_stage,
-        ),
-        NClosePipelineStage(
             "subtelomeric_orientation",
             _run_subtelomeric_orientation_stage,
         ),
-        NClosePipelineStage("offset_direction", _run_offset_direction_stage),
         NClosePipelineStage("raw_count_vaf", _run_raw_count_vaf_stage),
         NClosePipelineStage(
             "raw_translocation_artifact",

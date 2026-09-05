@@ -7,8 +7,6 @@ import argparse
 import json
 import os
 import pickle
-import threading
-import webbrowser
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -18,7 +16,7 @@ import numpy as np
 
 
 BIN_SIZE = 100_000
-HOST = "127.0.0.1"
+HOST = "0.0.0.0"
 CANONICAL_CHROMS = tuple(
     [f"chr{index}" for index in range(1, 23)] + ["chrX", "chrY"]
 )
@@ -314,15 +312,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("run_dir", help="SKYPE result directory")
     parser.add_argument(
+        "--host",
+        default=HOST,
+        help=f"bind address (default: {HOST})",
+    )
+    parser.add_argument(
         "--port",
         type=int,
         default=3000,
-        help="localhost port (default: 3000)",
-    )
-    parser.add_argument(
-        "--no-open",
-        action="store_true",
-        help="do not open the URL in the default browser",
+        help="server port (default: 3000)",
     )
     return parser
 
@@ -332,22 +330,24 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         data = load_viewer_data(args.run_dir)
-        server = create_server(data, args.port)
+        server = create_server(data, args.port, args.host)
     except ViewerDataError as exc:
         parser.error(str(exc))
     except OSError as exc:
-        parser.error(f"Could not bind {HOST}:{args.port}: {exc}")
+        parser.error(f"Could not bind {args.host}:{args.port}: {exc}")
 
     actual_port = server.server_address[1]
-    url = f"http://{HOST}:{actual_port}"
+    local_host = "127.0.0.1" if args.host == "0.0.0.0" else args.host
+    local_url = f"http://{local_host}:{actual_port}"
     print(
         f"SKYPE depth viewer: {data.sample} "
         f"({data.clean_bins:,}/{data.total_bins:,} clean bins, {data.reference})"
     )
-    print(f"Open {url}")
+    print(f"Listening on {args.host}:{actual_port}")
+    print(f"Open {local_url}")
+    if args.host == "0.0.0.0":
+        print(f"Remote URL: http://<server-ip>:{actual_port}")
     print("Press Ctrl-C to stop.")
-    if not args.no_open:
-        threading.Timer(0.25, webbrowser.open, args=(url,)).start()
 
     try:
         server.serve_forever()
