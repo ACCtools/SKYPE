@@ -832,11 +832,7 @@ class Stage01ContractTests(unittest.TestCase):
                 [
                     "initial_rejections",
                     "censat_pair",
-                    "censat_fragment_direction",
-                    "simple_alt_preference",
-                    "combined_censat_noncensat",
                     "subtelomeric_orientation",
-                    "offset_direction",
                     "raw_count_vaf",
                     "raw_translocation_artifact",
                     "raw_virtual_inversion",
