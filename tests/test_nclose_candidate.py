@@ -192,13 +192,13 @@ class NCloseCandidateTests(unittest.TestCase):
         candidate = NCloseCandidate(
             "combined_ctg",
             (20, 21),
-            origin="combined_censat_noncensat",
+            origin="synthetic_combined_test",
             synthetic=True,
             provenance={"parent_event_keys": ((3, 8),), "type2_query": "utg7"},
         )
 
         self.assertTrue(candidate.synthetic)
-        self.assertEqual(candidate.origin, "combined_censat_noncensat")
+        self.assertEqual(candidate.origin, "synthetic_combined_test")
         self.assertEqual(candidate.provenance["parent_event_keys"], ((3, 8),))
 
     def test_append_and_remove_are_stable_for_duplicates_and_synthetic_provenance(self):
@@ -217,7 +217,7 @@ class NCloseCandidateTests(unittest.TestCase):
         combined = NCloseCandidate(
             "combined-owner",
             (20, 21),
-            origin="combined_censat_noncensat",
+            origin="synthetic_combined_test",
             synthetic=True,
             provenance={"parent_event_keys": ((3, 8),)},
         )
@@ -245,7 +245,7 @@ class NCloseCandidateTests(unittest.TestCase):
             "synthetic_filter",
             lambda candidate: (
                 "combined"
-                if candidate.origin == "combined_censat_noncensat"
+                if candidate.origin == "synthetic_combined_test"
                 else None
             ),
         )
@@ -372,7 +372,7 @@ class NCloseCandidateTests(unittest.TestCase):
             survivor = NCloseCandidate(
                 "owner-c",
                 (7, 8),
-                origin="combined_censat_noncensat",
+                origin="synthetic_combined_test",
                 synthetic=True,
             )
 

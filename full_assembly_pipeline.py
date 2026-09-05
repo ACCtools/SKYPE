@@ -909,7 +909,6 @@ def draw_full_assembly_virtual_sky(
         grouped_norm_data=grouped_norm_data,
         display_indel=defaultdict(list),
         virtual_inv_display=[],
-        fragment_display=[],
         maxh=maxh,
         path_depth_n=path_depth_n,
         path_karyotype=path_karyotype,

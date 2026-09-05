@@ -494,7 +494,6 @@ class Stage01ContractTests(unittest.TestCase):
         )
         self.assertEqual(source.paf_file_paths, ("unitig.aln.paf",))
         self.assertEqual(source.original_paf_paths, ("unitig.paf",))
-        self.assertEqual(source.secondary_candidate_paf, "unitig.aln.paf")
         with self.assertRaisesRegex(ValueError, "requires --alt"):
             np.resolve_pregraph_source(
                 np.PregraphSourceMode.CONFIGURED_PAF,

@@ -212,64 +212,6 @@ def plot_indel(
     ax.axis("off")
 
 
-def plot_centromere_fragment(
-    ax, frag, maxh, cell_col, default_cell_col, chromosome_length_norm, label=None
-) -> None:
-    chrom, side, midpoint, chromosome_length = frag
-    x_center = 0
-    width = 10
-    radius = width / 2.0
-    round_radius = (
-        min(radius, chromosome_length_norm / 4)
-        if chromosome_length_norm > 0 else radius
-    )
-    clip_patch = patches.FancyBboxPatch(
-        (x_center - radius, 0), width, chromosome_length_norm,
-        boxstyle=f"round,pad=0,rounding_size={round_radius}",
-        facecolor="none", edgecolor="none",
-    )
-    ax.add_patch(clip_patch)
-    ax.add_patch(
-        patches.FancyBboxPatch(
-            (x_center - radius, 0), width, chromosome_length_norm,
-            boxstyle=f"round,pad=0,rounding_size={round_radius}",
-            facecolor="white", edgecolor="black", linestyle="dashed",
-            linewidth=1.2, clip_on=False,
-        )
-    )
-    midpoint_norm = midpoint / chromosome_length * chromosome_length_norm
-    y1, y2 = (
-        (midpoint_norm, chromosome_length_norm)
-        if side == "right" else (0, midpoint_norm)
-    )
-    rect = patches.Rectangle(
-        (x_center - radius, y1), width, y2 - y1,
-        facecolor=CHR_COLORS.get(chrom, "gray"), edgecolor="none",
-    )
-    rect.set_clip_path(clip_patch)
-    ax.add_patch(rect)
-    middle_y = (y1 + y2) / 2
-    x_start = x_center + radius
-    x_end = x_center + 2 * radius
-    ax.plot([x_start, x_end], [y1, middle_y], linewidth=1, color="black")
-    ax.plot([x_start, x_end], [y2, middle_y], linewidth=1, color="black")
-    arm = "q" if side == "right" else "p"
-    text = ax.text(
-        x_end + radius / 5, middle_y, f"{chrom}{arm}",
-        ha="left", va="center", fontsize=10, color="black",
-    )
-    mark_overlapping_texts_with_arrows(ax, [text], min_gap=5)
-    if label:
-        ax.text(x_center, -5, label, ha="center", va="top", fontsize=10)
-    ax.text(
-        x_center, -10, f"i({chrom_to_iscn(chrom)})({arm}10)",
-        ha="center", va="top", fontsize=10,
-    )
-    ax.set_xlim(0, 60 * cell_col / default_cell_col)
-    ax.set_ylim(0, 100)
-    ax.axis("off")
-
-
 def plot_scale_bar(ax, chrom, maxh, chromosome_lengths: Mapping[str, int]) -> None:
     ax.set_xlim(-5, 5)
     ax.axis(True)
@@ -307,7 +249,6 @@ def render_karyotype_diagram(
     grouped_norm_data,
     display_indel,
     virtual_inv_display,
-    fragment_display,
     maxh,
     path_depth_n,
     path_karyotype,
@@ -325,8 +266,6 @@ def render_karyotype_diagram(
     for chrom in display_chroms:
         count = len(grouped_norm_data.get(chrom, [])) + len(display_indel.get(chrom, []))
         rows += (count - 1) // columns + 1 if count else 0
-    if fragment_display:
-        rows += (len(fragment_display) - 1) // columns + 1
     if virtual_inv_display:
         rows += (len(virtual_inv_display) - 1) // columns + 1
     rows = max(rows, 1)
@@ -400,25 +339,6 @@ def render_karyotype_diagram(
                 "virtual inv", maxh, chromosome_lengths,
             )
 
-    if fragment_display:
-        first_row = current_row
-        plot_chromosome_name(axes[current_row][0], "cen frag")
-        for index, fragment in enumerate(fragment_display):
-            chrom, side, midpoint, chromosome_length, depth_n = fragment
-            plot_centromere_fragment(
-                axes[index // columns + current_row][index % columns + len(prefix_ratios)],
-                (chrom, side, midpoint, chromosome_length),
-                maxh, cell_col, default_cell_col,
-                chromosome_length / maxh * 100,
-                label=f"{round(depth_n, 2)}N",
-            )
-        current_row += (len(fragment_display) - 1) // columns + 1
-        for row_index in range(first_row, current_row):
-            plot_scale_bar(
-                axes[row_index][len(prefix_ratios) - 1],
-                "cen", maxh, chromosome_lengths,
-            )
-
     legend_handles = [
         patches.Patch(
             facecolor=color, edgecolor="black", linewidth=0.5, label=chrom
@@ -465,10 +385,6 @@ def render_karyotype_diagram(
             karyotype_rows.append(
                 (f"{virtual_event_label(event_type)}({chrom_to_iscn(chrom)})", depth_n)
             )
-    for chrom, side, _midpoint, _length, depth_n in fragment_display:
-        arm = "q" if side == "right" else "p"
-        karyotype_rows.append((f"i({chrom_to_iscn(chrom)})({arm}10)", depth_n))
-
     karyotype_path = os.path.join(output_prefix, f"karyotype{fig_prefix}.txt")
     with open(karyotype_path, "wt", encoding="utf-8") as handle:
         handle.write("karyotype\tdepth\n")
