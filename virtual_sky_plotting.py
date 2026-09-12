@@ -5,6 +5,11 @@ from __future__ import annotations
 import os
 from typing import Mapping
 
+import matplotlib
+
+# Save figures without probing an SSH/X11 display.
+matplotlib.use("Agg")
+
 import matplotlib.patches as patches
 import matplotlib.pyplot as plt
 from matplotlib.ticker import MultipleLocator

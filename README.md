@@ -25,9 +25,47 @@ post-processing, ecDNA discovery, and the exact three-field
 usable through the split stages. In assembly mode the positional primary PAF
 is retained only for command/file-name compatibility: stage 01 reads the
 `--alt` unitig PAF and the last `--original-paf-loc` value, and writes
-unitig-only rows under the primary-named `*.ppc.paf`. It extracts one
-path-ordered terminal NClose from each retained type-1/2 unitig and globally
-clusters those pairs by coordinate and direction.
+unitig-only rows under the primary-named `*.ppc.paf`.
+
+Before any trimming, raw unitigs are partitioned by their two outer aligned
+terminal bases against **all** CEN-SAT BED intervals (0-based, half-open).
+Non-CEN-SAT-pair unitigs follow the existing preprocessing, one terminal pair
+per retained type-1/2 unitig, and coordinate/direction clustering and filters.
+Route membership is fixed even if later trimming changes endpoint labels.
+
+CEN-SAT-pair unitigs follow `censat_endpoints.py` independently. Same-chromosome,
+same-strand endpoints are excluded. Both remaining ends must have only matching
+chromosome/strand assignments among raw P+S alignments covering at least 50%
+of each original end chunk. Passing ends are traced through `xi:Z:P_<index>`
+to raw PAF query intervals, extracted
+without reverse complementation, and realigned to the whole reference with
+`minimap2 --cs -x asm20 --no-long-join -r2k -K10G -N 5000 -p 0.5`.
+The same original-chunk 50% test is repeated after restoring query offsets.
+`A_`, missing, or inconsistent source traces are excluded and reported.
+Missing qualifying alignments never count as consistent evidence.
+
+Accepted unitigs retain their original endpoint chunks and internal rows;
+graph breakpoints use the existing junction-facing coordinate convention.
+They bypass legacy stage-01 trimming, clustering, and filters, and are merged
+only after the other route finishes. The old BOTH-CEN-SAT terminal/MAPQ/strand
+filter and CEN-SAT-locus pair deduplication have been removed. Stage 10 and
+later graph/path processing remain in effect for the merged candidates.
+
+ACCtools `SKYPE.py` prepares `<sample>.utg.censat_endpoints/` beside the source
+PAFs and passes `--censat-endpoints-dir` to stage 01 (required for direct
+assembly-stage invocation). This cache contains the partition, candidate
+metadata, source-coordinate manifest, extracted FASTA, and realignment PAF.
+It is reused across SKYPE result directories when assembly/PAF/reference/BED
+signatures, workflow implementation, minimap2 version, and options match.
+`--skype_force` alone reuses the alignment cache; alignment `--force` rebuilds
+it. VCF and full-assembly modes keep their separate input paths.
+
+Default SKYPE and VCF-input runs exclude new telomere connections whose
+telomere-facing aligned base lies inside chromosome-end CEN-SAT. Stage 01
+removes these candidates before graph handoff, including fallback telomere
+edges; reference telomere anchors are retained. Full-assembly input uses its
+separate workflow and does not enter this filtering logic.
+
 Downstream stages read canonical NCloses from `nclose_nodes.pkl`; the former
 endpoint-compression tuple is no longer an external artifact.
 
@@ -66,6 +104,7 @@ All files are written to the SKYPE output directory.
 | `01_Preprocess_NClose.py` | `01_nclose_data.pkl` | Exact three-field graph handoff: `contig_data`, `nclose_nodes`, and `telo_contig`. |
 | `01_Preprocess_NClose.py` | `skype_options.json` | Options routed to preprocessing and graph search. |
 | `01_Preprocess_NClose.py` | `stage01_nclose_summary.json`, `stage01_nclose_rejections.tsv` | Ordered split/filter counts and first-rejection provenance. |
+| `01_Preprocess_NClose.py` | `censat_endpoint_summary.json`, `censat_endpoint_candidates.tsv` | Fixed partition counts and independent endpoint consistency decisions. |
 | `23_run_nnls.py` | `weight.npy`, `predict_B.npy` | Full-column raw NNLS weights and reconstructed depth from one solve. |
 | `31_depth_analysis.py` | `SV_call_result.vcf` | Native `BND`, `INV`, `DEL`, and `DUP` calls with normalized copy-number support. |
 | `31_depth_analysis.py` | `SKYPE_result.bed` | Simplified native breakend, indel, centromere-fragment, amplicon, and virtual-inversion calls. |

@@ -39,6 +39,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("prefix", help="Stage output directory")
     parser.add_argument("read_bam_path", help="Raw-read alignment BAM")
     parser.add_argument(
+        "--censat-endpoints-dir",
+        help="Sample/reference endpoint alignment cache prepared by SKYPE.py",
+    )
+    parser.add_argument(
         "--alt",
         help=(
             "Required aligned unitig PAF in assembly mode; optional VCF INS "
@@ -149,6 +153,8 @@ def main(argv=None) -> int:
             "assembly mode requires --original-paf-loc with the original "
             "unitig PAF as its last value"
         )
+    if args.vcf_input is None and not args.censat_endpoints_dir:
+        parser.error("assembly mode requires --censat-endpoints-dir prepared by SKYPE.py")
     if args.vcf_input is not None and args.debug_force_nclose:
         parser.error(
             "--debug-force-nclose is supported only in assembly mode"
@@ -164,6 +170,7 @@ def main(argv=None) -> int:
         main_stat_path=args.main_stat_path,
         prefix=args.prefix,
         read_bam_path=args.read_bam_path,
+        censat_endpoints_dir=args.censat_endpoints_dir,
         alt_path=args.alt,
         original_paf_paths=tuple(args.original_paf_loc),
         thread=args.thread,

@@ -13,9 +13,13 @@ from typing import Mapping, Sequence
 
 import numpy as np
 import pandas as pd
+import matplotlib as mpl
+
+# Save figures without probing an SSH/X11 display.
+mpl.use("Agg")
+
 import seaborn as sns
 import matplotlib.pyplot as plt
-import matplotlib as mpl
 from pycirclize import Circos
 from matplotlib.lines import Line2D
 from matplotlib.projections.polar import PolarAxes

@@ -1089,9 +1089,9 @@ def build_dimension_graph(
 def _to_graph_tool(nx_graph: nx.DiGraph):
     """Convert topology only, retaining Python node objects out of band."""
 
-    import graph_tool.all as gt
+    from graph_tool import Graph, topology as gt
 
-    graph = gt.Graph(directed=True)
+    graph = Graph(directed=True)
     node_to_vertex = {}
     vertex_to_node = {}
     for node in nx_graph.nodes:

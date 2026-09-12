@@ -1,9 +1,9 @@
 """Stage-01 NClose/telomere preprocessing shared by the native SKYPE CLI.
 
-Assembly NCloses deliberately follow a small pipeline: legacy telomere/source
-preprocessing, repeat trimming, one terminal pair per type-1/2 unitig, and one
-global coordinate/direction clustering pass.  The graph-facing handoff remains
-limited to ``contig_data``, ``nclose_nodes``, and ``telo_contig``.
+Assembly input is partitioned before preprocessing. Non-CEN-SAT-pair unitigs
+follow legacy telomere/repeat trimming and type-1/2 clustering/filtering.
+Independently verified CEN-SAT-pair unitigs enter only at the final merge.
+The graph handoff remains ``contig_data``, ``nclose_nodes``, and ``telo_contig``.
 """
 
 import os
@@ -33,6 +33,7 @@ from raw_translocation_depth import (
     DEPTH_BALANCED_NOISE_SIGMA_MULTIPLIER,
     breakpoint_is_depth_balanced,
 )
+from censat_endpoints import evaluate_inputs, read_bed as read_endpoint_bed, write_tsv
 
 import subprocess
 import csv
@@ -50,7 +51,8 @@ import ast
 import copy
 import bisect
 
-import graph_tool.all as gt
+from graph_tool import Graph
+from graph_tool.topology import all_circuits
 import networkx as nx
 
 from collections import defaultdict, Counter
@@ -169,14 +171,6 @@ class PafSourceKind(Enum):
     SECONDARY = "secondary"
 
 
-class CensatPairClass(Enum):
-    """Number of CEN-SAT-labelled endpoints in one path-ordered NClose."""
-
-    NONE = 0
-    ONE = 1
-    BOTH = 2
-
-
 @dataclass(frozen=True)
 class NCloseSourceConfig:
     """Resolved PAF inputs for one pregraph build attempt."""
@@ -203,6 +197,9 @@ class PregraphBuildContext:
     asm2cov: object
     disable_alt_ctg_simple: bool
     debug_force_ncloses: tuple = ()
+    excluded_censat_unitigs: frozenset = frozenset()
+    censat_candidates: tuple = ()
+    censat_summary: dict = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -246,6 +243,7 @@ class ContigPreprocessResources:
     repeat_censat_data: object
     depth_df: object
     no_chrY: bool
+    censat_data: object = None
 
 
 @dataclass
@@ -518,6 +516,7 @@ class Stage01Config:
     main_stat_path: str
     prefix: str
     read_bam_path: str
+    censat_endpoints_dir: str | None = None
     alt_path: str | None = None
     original_paf_paths: tuple[str, ...] = ()
     thread: int = 1
@@ -725,28 +724,15 @@ def nclose_cluster_candidate_matches(
     )
 
 
-def _contained_censat_locus(node, repeat_censat_data):
-    for interval_idx, interval in enumerate(
-        repeat_censat_data[node[CHR_NAM]]
-    ):
-        if inclusive_checker_tuple(
-            interval,
-            (node[CHR_STR], node[CHR_END]),
-        ):
-            return f"{node[CHR_NAM]}.{interval_idx}"
-    return None
-
-
 def cluster_unitig_nclose_pairs(
     contig_data,
     extracted,
     repeat_contig_names,
     repeat_censat_data,
 ):
-    """Apply global spatial clustering and the legacy CEN-SAT-locus dedup."""
+    """Apply spatial/direction clustering to the legacy-route candidates."""
 
     representatives_by_bucket = defaultdict(list)
-    seen_censat_pairs = set()
     kept = []
 
     for candidate in extracted:
@@ -796,24 +782,6 @@ def cluster_unitig_nclose_pairs(
                 break
         if duplicate:
             continue
-
-        outer_start = contig_data[candidate.outer_pair[0]]
-        outer_end = contig_data[candidate.outer_pair[1]]
-        if node_is_censat(outer_start) and node_is_censat(outer_end):
-            start_locus = _contained_censat_locus(
-                start_node,
-                repeat_censat_data,
-            )
-            end_locus = _contained_censat_locus(
-                end_node,
-                repeat_censat_data,
-            )
-            if start_locus is not None and end_locus is not None:
-                # Preserve the legacy path-ordered, direction-agnostic key.
-                censat_key = (("=", start_locus), ("=", end_locus))
-                if censat_key in seen_censat_pairs:
-                    continue
-                seen_censat_pairs.add(censat_key)
 
         representatives.append(
             NCloseClusterRepresentative(
@@ -1717,7 +1685,22 @@ def label_repeat_node(contig_data: list, repeat_data : dict, chr_len : dict) -> 
 
     return labels
 
-def preprocess_telo(contig_data : list, node_label : list) -> tuple :
+def telomere_in_terminal_censat(node, side, censat_data):
+    """Check the telomere-facing aligned base in contiguous terminal censat."""
+    point = node[CHR_STR] if side == 'f' else node[CHR_END] - 1
+    merged = []
+    for start, end in sorted(censat_data.get(node[CHR_NAM], ())):
+        if merged and start <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], end)
+        else:
+            merged.append([start, end])
+    return any(
+        (start <= 0 or end >= node[CHR_LEN] - 1) and start <= point < end
+        for start, end in merged
+    )
+
+
+def preprocess_telo(contig_data : list, node_label : list, censat_data=None) -> tuple :
     telo_preprocessed_contig = []
     telo_connect_info = {}
     semi_telomere_contig = []
@@ -1887,6 +1870,18 @@ def preprocess_telo(contig_data : list, node_label : list) -> tuple :
             # initialize
             curr_contig_st = curr_contig_ed+1
     contig_data = contig_data[0:-1]
+    if censat_data is not None:
+        excluded = {
+            idx for idx, name in telo_connect_info.items()
+            if node_label[idx][0] == '0'
+            and telomere_in_terminal_censat(contig_data[idx], name[-1], censat_data)
+        }
+        for idx in excluded:
+            del telo_connect_info[idx]
+        for case in ('A', 'B', 'C'):
+            report_case[case] = [row for row in report_case[case] if row[1] not in excluded]
+        if excluded:
+            logging.info("Excluded %d new telomere candidates inside terminal censat", len(excluded))
     return telo_preprocessed_contig, report_case, telo_connect_info
 
 def subtelo_cut(contig_data : list, node_label : list, subnode_label : list) -> list :
@@ -2115,7 +2110,7 @@ def initial_graph_build(contig_data : list, telo_data : dict, no_chrY : bool) ->
 
 def edge_optimization(contig_data : list, contig_adjacency : list, telo_dict : dict,
                       asm2cov : dict, original_contig_names : list,
-                      excluded_telomere_origins=None) -> tuple :
+                      excluded_telomere_origins=None, censat_data=None) -> tuple :
 
     contig_data_size = len(contig_data)
     excluded_telomere_origins = excluded_telomere_origins or set()
@@ -2179,6 +2174,13 @@ def edge_optimization(contig_data : list, contig_adjacency : list, telo_dict : d
             now_edge = [-1, 0, 0]
             curr_coverage = 0
             for edge in optimized_adjacency[j][i]:
+                node = contig_data[edge[1]]
+                if censat_data is not None and (
+                    node[CHR_END] < telo_range[0] or node[CHR_STR] > telo_range[1]
+                ) and telomere_in_terminal_censat(node, telo_name[-1], censat_data):
+                    if node[CTG_TELCON] == telo_name:
+                        node[CTG_TELCON] = '0'
+                    continue
                 cl_ind, c_ind = map(int, contig_data[edge[1]][CTG_GLOBALIDX].split('.'))
                 if (cl_ind, c_ind) in excluded_telomere_origins:
                     excluded_candidate_nodes.add(edge[1])
@@ -2267,13 +2269,6 @@ def node_is_censat(node):
     """Return whether preprocessing labelled a node as overlapping CEN-SAT."""
 
     return node[CTG_CENSAT] != '0'
-
-
-def classify_censat_pair(contig_data, pair):
-    """Classify an NClose without losing its biologically meaningful path order."""
-
-    censat_count = sum(node_is_censat(contig_data[node_idx]) for node_idx in pair)
-    return CensatPairClass(censat_count)
 
 
 def iter_nclose_owner_pairs(nclose_source):
@@ -2676,6 +2671,10 @@ def alt_preprocess_contig(contig_data : list, telo_label : list, ref_qry_ratio :
     return [using_contig_list, using_type3_contig_list, contig_type, contig_terminal_node, len_count]
 
 def preprocess_repeat(contig_data : list) -> list:
+    """Trim low-MAPQ terminal repeats, retaining one beside each stop chunk.
+
+    Both non-repeat and MAPQ >= 60 repeat chunks stop the inward scan.
+    """
     repeat_preprocessed_contig = []
     contig_data_size = len(contig_data)
     curr_contig_st = 0
@@ -2698,15 +2697,13 @@ def preprocess_repeat(contig_data : list) -> list:
                   and contig_data[front_repeat_bound][CTG_MAPQ] < MAPQ_BOUND:
                 front_repeat_bound+=1
             if front_repeat_bound <= curr_contig_ed and front_repeat_bound > front_telo_bound:
-                if contig_data[front_repeat_bound][CTG_RPTCHR] == '0':
-                    front_repeat_bound-=1
+                front_repeat_bound-=1
             while end_repeat_bound>=curr_contig_st \
                   and contig_data[end_repeat_bound][CTG_RPTCHR] != '0' \
                   and contig_data[end_repeat_bound][CTG_MAPQ] < MAPQ_BOUND:
                 end_repeat_bound-=1
             if end_repeat_bound >= curr_contig_st and end_repeat_bound < end_telo_bound:
-                if contig_data[end_repeat_bound][CTG_RPTCHR] == '0':
-                    end_repeat_bound+=1
+                end_repeat_bound+=1
             if front_repeat_bound >= front_telo_bound:
                 st = front_repeat_bound
             if end_repeat_bound <= end_telo_bound:
@@ -2861,7 +2858,7 @@ def break_type34_contig(contig_data : list):
         s = e+1
     return vtg_list, broken_contig_set
 
-def pass_pipeline(pre_contig_data, telo_dict, telo_bound_dict, repeat_data, repeat_censat_data, telo_ppc_passed, chr_len):
+def pass_pipeline(pre_contig_data, telo_dict, telo_bound_dict, repeat_data, repeat_censat_data, telo_ppc_passed, chr_len, censat_data=None):
     if not telo_ppc_passed:
         if len(pre_contig_data)==0:
             return []
@@ -2874,7 +2871,9 @@ def pass_pipeline(pre_contig_data, telo_dict, telo_bound_dict, repeat_data, repe
 
         repeat_label = label_repeat_node(contig_data, repeat_data, chr_len)
 
-        telo_preprocessed_contig, report_case, telo_connect_info = preprocess_telo(contig_data, node_label)
+        telo_preprocessed_contig, report_case, telo_connect_info = preprocess_telo(
+            contig_data, node_label, censat_data
+        )
 
         new_contig_data = []
         telcon_set = set()
@@ -3316,7 +3315,7 @@ def build_ecdna_circuits(contig_rows, raw_nclose_nodes, all_nclose_comp):
         ecdna_nclose_nodes,
     )
     nx_graph = make_inversion_nx_graph(adjacency, contig_rows)
-    tool_graph = gt.Graph(directed=True)
+    tool_graph = Graph(directed=True)
     node_to_vertex = {}
     vertex_to_node = {}
     for node in nx_graph.nodes:
@@ -3327,7 +3326,7 @@ def build_ecdna_circuits(contig_rows, raw_nclose_nodes, all_nclose_comp):
         tool_graph.add_edge(node_to_vertex[source], node_to_vertex[target])
 
     circuit_candidates = set()
-    for circuit in gt.all_circuits(tool_graph, max_length=4):
+    for circuit in all_circuits(tool_graph, max_length=4):
         if len(circuit) != 4:
             continue
         circuit_candidates.add(
@@ -3405,15 +3404,20 @@ def load_contig_preprocess_resources(context):
         repeat_censat_data=repeat_censat_data,
         depth_df=depth_df,
         no_chrY=no_chrY,
+        censat_data=bed_data,
     )
 
 
-def _prepare_paf_source_rows(resources, paf_path, policy):
+def _prepare_paf_source_rows(resources, paf_path, policy, excluded_unitigs=()):
     """Run the source-independent PAF/telomere labelling prefix."""
 
     contig_data = import_data(paf_path)
     original_node_count = len(contig_data)
+    contig_data = [row for row in contig_data if row[CTG_NAM] not in excluded_unitigs]
+    if not contig_data:
+        return [], set(), set(), original_node_count
     excluded_contigs, excluded_rows = find_multi_end_aligned_contigs(contig_data)
+    excluded_origins = {contig_data[idx][10] for idx in excluded_rows}
     if excluded_contigs:
         logging.info(
             f"Detected {len(excluded_contigs)} multi-end-aligned contigs "
@@ -3424,6 +3428,7 @@ def _prepare_paf_source_rows(resources, paf_path, policy):
     telo_preprocessed_contig, _, telo_connect_info = preprocess_telo(
         contig_data,
         node_label,
+        resources.censat_data,
     )
     excluded_telo_candidates = sum(
         row_idx in excluded_rows for row_idx in telo_connect_info
@@ -3450,7 +3455,7 @@ def _prepare_paf_source_rows(resources, paf_path, policy):
             row.append("0")
         new_contig_data.append(row)
 
-    return new_contig_data, telcon_set, excluded_rows, original_node_count
+    return new_contig_data, telcon_set, excluded_origins, original_node_count
 
 
 def _append_source_row(
@@ -3508,7 +3513,11 @@ def preprocess_paf_source(
         telcon_set,
         excluded_rows,
         original_node_count,
-    ) = _prepare_paf_source_rows(resources, paf_path, policy)
+    ) = _prepare_paf_source_rows(
+        resources, paf_path, policy, context.excluded_censat_unitigs,
+    )
+    if not new_contig_data:
+        return PafPreprocessResult([], set(), original_node_count, set())
     new_node_telo_label = label_node(new_contig_data, resources.telo_dict)
     new_node_repeat_label = label_repeat_node(
         new_contig_data,
@@ -3576,8 +3585,16 @@ def preprocess_paf_source(
                 policy.global_index_prefix,
             )
 
+    if not first_pass_rows:
+        return PafPreprocessResult([], set(), original_node_count, {
+            (policy.source_index, row_idx) for row_idx in excluded_rows
+        })
     first_pass_rows = _attach_mainflow(first_pass_rows)
     final_contig = preprocess_repeat(first_pass_rows)
+    if not final_contig:
+        return PafPreprocessResult([], set(), original_node_count, {
+            (policy.source_index, row_idx) for row_idx in excluded_rows
+        })
     final_repeat_label = label_repeat_node(
         final_contig,
         resources.repeat_data,
@@ -3712,6 +3729,7 @@ def _build_telomere_split_contigs(
         context.asm2cov,
         context.ori_ctg_name_data,
         excluded_telomere_origins,
+        resources.censat_data,
     )
     break_contig = break_double_telomere_contig(contigs, telo_connected_node)
 
@@ -3724,6 +3742,7 @@ def _build_telomere_split_contigs(
             resources.repeat_censat_data,
             False,
             resources.chr_len,
+            resources.censat_data,
         )
         if break_contig
         else []
@@ -3737,6 +3756,7 @@ def _build_telomere_split_contigs(
             resources.repeat_censat_data,
             True,
             resources.chr_len,
+            resources.censat_data,
         )
         if subtelo_ppc_node
         else []
@@ -4045,6 +4065,7 @@ def finalize_preprocessed_contigs(
         context.asm2cov,
         context.ori_ctg_name_data,
         excluded_telomere_origins,
+        resources.censat_data,
     )
     telo_edges = [
         (telo_name, tuple(edge))
@@ -5100,7 +5121,7 @@ def compress_paf_telomere_candidates(raw_rows, telo_connect_info, telo_dict,
 
 
 def build_paf_telomere_nodes(paf_path, telo_data, repeat_censat_data,
-                             chr_len, base_idx):
+                             chr_len, base_idx, censat_data=None):
     """Build telomere nodes from PAF alignments without consulting VCF calls."""
     raw_rows = import_data(paf_path)
     if not raw_rows:
@@ -5112,6 +5133,7 @@ def build_paf_telomere_nodes(paf_path, telo_data, repeat_censat_data,
     _, preprocess_report, telo_connect_info = preprocess_telo(
         raw_rows,
         raw_telo_labels,
+        repeat_censat_data if censat_data is None else censat_data,
     )
     # preprocess_telo appends a sentinel in-place while scanning contig groups.
     raw_rows.pop()
@@ -5516,6 +5538,7 @@ def build_vcf_mode_inputs(context):
                 repeat_censat_data,
                 chr_len,
                 len(contig_data),
+                censat_data=import_bed(context.censat_bed_path),
             )
         contig_data.extend(telomere_paf_nodes)
         telo_edges.extend(telomere_paf_edges)
@@ -5844,78 +5867,6 @@ def apply_initial_nclose_rejections(candidates, rejected_pairs, rescued_pairs):
             else None
         ),
     )
-
-
-def _censat_at_chromosome_end(
-    contig_data,
-    chr_len,
-    repeat_censat_data,
-    node_idx,
-):
-    chrom = contig_data[node_idx][CHR_NAM]
-    chromosome_length = chr_len.get(chrom, 0)
-    chunk_start = contig_data[node_idx][CHR_STR]
-    chunk_end = contig_data[node_idx][CHR_END]
-    for interval_start, interval_end in repeat_censat_data.get(chrom, []):
-        if max(interval_start, chunk_start) < min(interval_end, chunk_end):
-            if interval_start == 0 or interval_end == chromosome_length:
-                return True
-    return False
-
-
-def apply_censat_censat_filter(
-    candidates,
-    contig_data,
-    chr_len,
-    repeat_censat_data,
-):
-    """Apply terminal, direction, then MAPQ CENSAT rules."""
-
-    def reject_reason(candidate):
-        pair = candidate.path_pair
-        if classify_censat_pair(contig_data, pair) != CensatPairClass.BOTH:
-            return None
-        if (
-            _censat_at_chromosome_end(
-                contig_data,
-                chr_len,
-                repeat_censat_data,
-                pair[0],
-            )
-            or _censat_at_chromosome_end(
-                contig_data,
-                chr_len,
-                repeat_censat_data,
-                pair[1],
-            )
-        ):
-            return "terminal"
-        if (
-            contig_data[pair[0]][CHR_NAM]
-            == contig_data[pair[1]][CHR_NAM]
-            and contig_data[pair[0]][CTG_DIR]
-            != contig_data[pair[1]][CTG_DIR]
-        ):
-            return "same_chrom_opposite_dir"
-        if (
-            contig_data[pair[0]][CTG_MAPQ] < 60
-            or contig_data[pair[1]][CTG_MAPQ] < 60
-        ):
-            return "mapq"
-        return None
-
-    kept, rejections = apply_nclose_filter(
-        candidates,
-        "censat_censat",
-        reject_reason,
-    )
-    removal_counts = Counter(rejection.reason for rejection in rejections)
-    logging.info(
-        f'Removed {removal_counts["mapq"]} censat-censat nclose where either endpoint MAPQ < 60, '
-        f'{removal_counts["terminal"]} censat-censat nclose with a terminal-censat endpoint, '
-        f'{removal_counts["same_chrom_opposite_dir"]} same-chromosome opposite-direction censat-censat nclose'
-    )
-    return kept, rejections
 
 
 def apply_subtelomeric_orientation_filter(
@@ -6360,19 +6311,6 @@ def _run_initial_rejection_stage(context, state):
     )
 
 
-def _run_censat_pair_stage(context, state):
-    return _store_nclose_filter_result(
-        state,
-        apply_censat_censat_filter(
-            state.candidates,
-            context.contig_data,
-            context.chr_len,
-            context.repeat_censat_data,
-        ),
-        "censat_pair",
-    )
-
-
 def _run_subtelomeric_orientation_stage(context, state):
     return _store_nclose_filter_result(
         state,
@@ -6449,7 +6387,6 @@ def default_nclose_pipeline_stages():
 
     return (
         NClosePipelineStage("initial_rejections", _run_initial_rejection_stage),
-        NClosePipelineStage("censat_pair", _run_censat_pair_stage),
         NClosePipelineStage(
             "subtelomeric_orientation",
             _run_subtelomeric_orientation_stage,
@@ -6526,6 +6463,50 @@ def default_stage01_pipeline():
         contig_stages=default_contig_pipeline_stages(),
         nclose_stages=default_nclose_pipeline_stages(),
     )
+
+
+def append_censat_endpoint_candidates(context, contig_data, chr_len):
+    """Import accepted original unitigs after all legacy-route filters.
+
+    Keep internal chunks for downstream path length accounting and use the
+    original endpoint chunks in query order. No terminal trimming/clustering.
+    """
+    if not context.censat_candidates:
+        return []
+    candidates_by_name = {c["unitig"]: c for c in context.censat_candidates}
+    grouped = defaultdict(list)
+    for row in import_data(context.source.paf_file_paths[0]):
+        if row[CTG_NAM] in candidates_by_name:
+            grouped[row[CTG_NAM]].append(row)
+    repeat_data = import_repeat_data_00(context.repeat_bed_path)
+    censat_data = read_endpoint_bed(context.censat_bed_path)
+    added_candidates = []
+    first_added = len(contig_data)
+    for name, candidate in candidates_by_name.items():
+        rows = sorted(grouped[name], key=lambda row: (row[CTG_STR], row[CTG_END], row[10]))
+        start, end = len(contig_data), len(contig_data) + len(rows) - 1
+        index_map = {row[10]: start + idx for idx, row in enumerate(rows)}
+        pair = (index_map[candidate["left"]["index"]], index_map[candidate["right"]["index"]])
+        contig_type = 1 if candidate["left"]["chrom"] != candidate["right"]["chrom"] else 2
+        repeat_labels = label_repeat_node(rows, repeat_data, chr_len)
+        censat_labels = label_repeat_node(rows, censat_data, chr_len)
+        flow = Counter()
+        for row in rows:
+            flow[row[CTG_DIR], row[CHR_NAM]] += row[CHR_END] - row[CHR_STR]
+        flow_dir, flow_chrom = flow.most_common(1)[0][0]
+        for row, repeat_label, censat_label in zip(rows, repeat_labels, censat_labels):
+            contig_data.append(row[:10] + [
+                contig_type, start, end, '0', '0', '0',
+                repeat_label[0], repeat_label[1], censat_label[1],
+                flow_dir, flow_chrom, f'0.{row[10]}',
+            ])
+        added_candidates.append(NCloseCandidate(
+            name, pair, origin="censat_endpoint_consistency",
+            provenance={"left_original_index": candidate["left"]["index"],
+                        "right_original_index": candidate["right"]["index"]},
+        ))
+    append_ppc_rows(context.preprocessed_paf_path, contig_data[first_added:])
+    return added_candidates
 
 
 def nclose_calc(
@@ -6686,6 +6667,40 @@ def nclose_calc(
     chr_rev_corr = nclose_pipeline_state.chr_rev_corr
     indel_exclude_idx_set = nclose_pipeline_state.indel_exclude_idx_set
 
+    # Route membership was fixed before telomere/repeat preprocessing. Merge
+    # only now so no accepted CEN-SAT candidate sees a legacy post-filter.
+    censat_candidates = append_censat_endpoint_candidates(context, contig_data, chr_len)
+    nclose_candidates.extend(censat_candidates)
+    for candidate in censat_candidates:
+        raw_nclose_nodes[candidate.contig_name].append(candidate.path_pair)
+        chrom_pair = tuple(contig_data[idx][CHR_NAM] for idx in candidate.path_pair)
+        all_nclose_comp[chrom_pair].append(candidate.path_pair)
+    if context.censat_summary:
+        nclose_pipeline_state.stage_records.append({
+            "name": "censat_endpoint_merge",
+            "before_candidates": len(nclose_candidates) - len(censat_candidates),
+            "after_candidates": len(nclose_candidates),
+            "added_candidates": len(censat_candidates),
+            "removed_candidates": 0, "recorded_rejections": 0,
+            "metadata": context.censat_summary,
+        })
+    if censat_candidates:
+        contig_data_size = len(contig_data)
+        chr_corr, chr_rev_corr = chr_correlation_maker(contig_data)
+        rpt_con = extract_all_repeat_contig(contig_data, repeat_data, CTG_RPTCASE, NON_REPEAT_NOISE_RATIO)
+        bnd_contig = extract_bnd_contig(contig_data)
+        uncomp_node_count = write_nclose_nodes_list(
+            f"{context.prefix}/all_nclose_nodes_list.txt",
+            group_nclose_nodes_by_chrom(contig_data, all_nclose_comp), contig_data, rpt_con,
+        )
+        cen_fragment_meta = find_breakend_centromere(
+            repeat_censat_data, chr_len, depth_df,
+            raw_nclose_nodes=raw_nclose_nodes, contig_data=contig_data,
+            log_context="Merged-route flank segmentation", diagnostics_prefix=context.prefix,
+        )
+        with open(f'{context.prefix}/cen_fragment_data.pkl', 'wb') as f:
+            pkl.dump(cen_fragment_meta, f)
+
     nclose_nodes = candidates_to_legacy(nclose_candidates)
     transloc_nclose_pair_count, nclose_node_count = finalize_nclose_outputs(
         nclose_nodes,
@@ -6832,6 +6847,8 @@ _INVALIDATED_STAGE01_OUTPUTS = (
     VCF_TELOMERE_PAF_NODES_TSV,
     STAGE01_SUMMARY_JSON,
     STAGE01_REJECTIONS_TSV,
+    "censat_endpoint_summary.json",
+    "censat_endpoint_candidates.tsv",
 )
 
 
@@ -6895,6 +6912,21 @@ def _make_stage01_context(config: Stage01Config, source: NCloseSourceConfig):
         if source.mode == PregraphSourceMode.VCF
         else get_ori_ctg_name_data(list(source.paf_file_paths))
     )
+    excluded, candidates, summary = set(), [], {}
+    if source.mode != PregraphSourceMode.VCF:
+        if not config.censat_endpoints_dir:
+            raise ValueError("Assembly stage 01 requires the CEN-SAT endpoint cache from SKYPE.py")
+        excluded, candidates, diagnostics, summary = evaluate_inputs(
+            config.censat_endpoints_dir, source.paf_file_paths[0],
+            source.original_paf_paths[-1], config.censat_bed_path,
+        )
+        with open(os.path.join(config.prefix, "censat_endpoint_summary.json"), "w") as handle:
+            json.dump(summary, handle, indent=2)
+            handle.write("\n")
+        write_tsv(os.path.join(config.prefix, "censat_endpoint_candidates.tsv"), diagnostics,
+                  ["unitig", "status", "left_hits", "right_hits", "left_conflicts", "right_conflicts"])
+        logging.info("CEN-SAT fixed partition: %d legacy, %d censat; %d accepted",
+                     summary["legacy_unitigs"], len(excluded), len(candidates))
     return PregraphBuildContext(
         source=source,
         ori_ctg_name_data=ori_names,
@@ -6908,6 +6940,9 @@ def _make_stage01_context(config: Stage01Config, source: NCloseSourceConfig):
         asm2cov=asm2cov,
         disable_alt_ctg_simple=config.disable_alt_ctg_simple,
         debug_force_ncloses=config.debug_force_ncloses,
+        excluded_censat_unitigs=frozenset(excluded),
+        censat_candidates=tuple(candidates),
+        censat_summary=summary,
     )
 
 

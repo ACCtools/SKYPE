@@ -456,7 +456,7 @@ class Stage01ContractTests(unittest.TestCase):
             after="telomere_children",
         ).with_nclose_stage(
             nclose_stage,
-            after="censat_pair",
+            after="initial_rejections",
         )
 
         self.assertEqual(
@@ -465,7 +465,7 @@ class Stage01ContractTests(unittest.TestCase):
         )
         nclose_names = [stage.name for stage in pipeline.nclose_stages]
         self.assertEqual(
-            nclose_names[nclose_names.index("censat_pair") + 1],
+            nclose_names[nclose_names.index("initial_rejections") + 1],
             "future_nclose_filter",
         )
 
@@ -769,6 +769,13 @@ class Stage01ContractTests(unittest.TestCase):
                 "200000\t60\ttp:A:P\tcs:Z::200000\n",
                 encoding="utf-8",
             )
+            from censat_endpoints import prepare_inputs
+            dummy_fasta = root / "unused.fa"
+            dummy_fasta.write_text(">dummy\nACGT\n")
+            cache_dir = root / "censat_endpoints"
+            prepare_inputs(unitig_path, unitig_path, dummy_fasta, dummy_fasta,
+                           SKYPE_ROOT / "public_data/chm13v2.0_censat_v2.1.m.bed",
+                           cache_dir)
             result = subprocess.run(
                 [
                     sys.executable,
@@ -781,6 +788,8 @@ class Stage01ContractTests(unittest.TestCase):
                     str(SKYPE_ROOT / "public_data/CHM13.win.stat.gz"),
                     str(prefix),
                     str(root / "unused.bam"),
+                    "--censat-endpoints-dir",
+                    str(cache_dir),
                     "--alt",
                     str(unitig_path),
                     "--original-paf-loc",
@@ -824,12 +833,12 @@ class Stage01ContractTests(unittest.TestCase):
                 [stage["name"] for stage in stage_summary["nclose_stages"]],
                 [
                     "initial_rejections",
-                    "censat_pair",
                     "subtelomeric_orientation",
                     "raw_count_vaf",
                     "raw_translocation_artifact",
                     "raw_virtual_inversion",
                     "user_exclusion",
+                    "censat_endpoint_merge",
                 ],
             )
             handoff = load_pipeline_input(prefix)
