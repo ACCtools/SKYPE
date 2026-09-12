@@ -19,6 +19,15 @@ NClose filtering, or clustering stage.
 
 ### Stage 01/10 pipeline
 
+ACCtools `SKYPE.py` prepares references and assembly alignments, then calls
+`pipeline.py` once for native assembly and VCF-input runs. `pipeline.py` owns
+normalization, CEN-SAT endpoint preparation, stages 01/10/11/21/22/23/31,
+completion checks, and partial restarts. Existing ACCtools options and output
+locations are preserved; `--print_args` still prints the individual stage
+commands. Run `python deps/SKYPE/pipeline.py --help` from the workspace root
+for direct invocation with prepared input paths. Full-assembly runs continue
+to use `full_assembly_pipeline.py`.
+
 `01_Preprocess_NClose.py` now owns contig/telomere preprocessing, NClose
 post-processing, ecDNA discovery, and the exact three-field
 `01_nclose_data.pkl` handoff consumed by `10_Graph_Find_Paths.py`. VCF input is
@@ -51,7 +60,7 @@ only after the other route finishes. The old BOTH-CEN-SAT terminal/MAPQ/strand
 filter and CEN-SAT-locus pair deduplication have been removed. Stage 10 and
 later graph/path processing remain in effect for the merged candidates.
 
-ACCtools `SKYPE.py` prepares `<sample>.utg.censat_endpoints/` beside the source
+SKYPE `pipeline.py` prepares `<sample>.utg.censat_endpoints/` beside the source
 PAFs and passes `--censat-endpoints-dir` to stage 01 (required for direct
 assembly-stage invocation). This cache contains the partition, candidate
 metadata, source-coordinate manifest, extracted FASTA, and realignment PAF.
@@ -79,7 +88,7 @@ stage-01 driver.
 
 Every run also writes `stage01_nclose_summary.json` with ordered stage counts
 and `stage01_nclose_rejections.tsv` with the first filter/reason that removed
-each candidate. ACCtools runs stages 01 and 10 for native assembly/VCF input.
+each candidate. SKYPE `pipeline.py` runs stages 01 and 10 for native assembly/VCF input.
 
 Pass native pipeline options through `--option_skype` (or `--option-skype`):
 
