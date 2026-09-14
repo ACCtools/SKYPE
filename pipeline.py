@@ -9,6 +9,9 @@ import logging
 import os
 import shlex
 import subprocess
+import shutil
+import json
+from pathlib import Path
 
 import psutil
 
@@ -44,12 +47,27 @@ def run_skype(CELL_LINE, PREFIX, ctg_paf, ctg_aln_paf, utg_paf, utg_aln_paf,
               benchmark_vcf_loc=None, vcf_ins_aln_paf=None,
               unitig_fasta=None, alignment_force=False, *,
               alignasm_ref, chr_fai, tel_bed, rpt_bed, rcs_bed, cyt_bed,
-              ref_stat=None):
+              ref_stat=None, raw_rescue_method=None, raw_rescue_options=None):
     # Execute the core SKYPE analysis scripts.
     dep_folder = os.path.abspath(dep_folder)
     skype_folder_loc = os.path.dirname(os.path.abspath(__file__))
 
-    valid_start_stages = {0, 1, 10, 11, 21, 22, 23, 31}
+    rescue_parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
+    rescue_parser.add_argument('--raw-rescue-method', '--raw_rescue_method',
+                               choices=('off', 'read', 'olc'), default=None)
+    rescue_parser.add_argument('--raw-rescue-options', default='')
+    rescue_options, remaining_options = rescue_parser.parse_known_args(
+        normalize_extra_args(option_skype)
+    )
+    raw_rescue_method = raw_rescue_method or rescue_options.raw_rescue_method
+    previous_rescue = Path(PREFIX) / '24_raw_rescue' / 'summary.json'
+    if raw_rescue_method is None and skype_start_at > 1 and previous_rescue.exists():
+        raw_rescue_method = json.loads(previous_rescue.read_text())['method']
+    raw_rescue_method = raw_rescue_method or ('off' if benchmark_vcf_loc else 'read')
+    rescue_args = shlex.split(rescue_options.raw_rescue_options if raw_rescue_options is None else raw_rescue_options)
+    option_skype = shlex.join(remaining_options)
+
+    valid_start_stages = {0, 1, 10, 11, 21, 22, 23, 24, 31}
     if skype_start_at not in valid_start_stages:
         valid_text = ", ".join(map(str, sorted(valid_start_stages)))
         raise SkypeArgumentError(
@@ -104,7 +122,7 @@ def run_skype(CELL_LINE, PREFIX, ctg_paf, ctg_aln_paf, utg_paf, utg_aln_paf,
         restart_requirements = {
             10: [
                 "01_nclose_data.pkl",
-                "pipeline_input.pkl",
+                "pipeline_mode.pkl",
                 os.path.basename(PPC_PAF_LOC),
             ],
             11: [
@@ -119,6 +137,7 @@ def run_skype(CELL_LINE, PREFIX, ctg_paf, ctg_aln_paf, utg_paf, utg_aln_paf,
             ],
             22: ["path_data.pkl", "contig_pat_vec_data.pkl"],
             23: ["23_input.pkl"],
+            24: ["01_nclose_data.pkl", "23_input.pkl", "B.npy", "predict_B.npy", "paf_file_path.pkl"],
             31: [
                 "B.npy",
                 "weight.npy",
@@ -192,55 +211,91 @@ def run_skype(CELL_LINE, PREFIX, ctg_paf, ctg_aln_paf, utg_paf, utg_aln_paf,
                     utg_paf,
                 ])
             subprocess_run(preprocess_cmd + EXTRA_SKYPE + PROGRESS, check=True)
+            if not print_args:
+                rescue_dir = Path(PREFIX) / '24_raw_rescue'
+                if rescue_dir.exists():
+                    shutil.rmtree(rescue_dir)
 
-        if skype_start_at <= 10:
-            graph_cmd = [
-                "python",
-                os.path.join(skype_folder_loc, "10_Graph_Find_Paths.py"),
-                os.path.join(PREFIX, "01_nclose_data.pkl"),
-                CHR_FAI,
-                PREFIX,
-                "-t",
-                THREAD,
-                "-d",
-                str(graph_depth),
-                "--main-stat-path",
-                MAIN_STAT_NORM_LOC,
-                "--censat-bed-path",
-                RCS_BED,
+        def run_fit(start_at):
+            if start_at <= 10:
+                graph_cmd = [
+                    "python",
+                    os.path.join(skype_folder_loc, "10_Graph_Find_Paths.py"),
+                    os.path.join(PREFIX, "01_nclose_data.pkl"),
+                    CHR_FAI,
+                    PREFIX,
+                    "-t",
+                    THREAD,
+                    "-d",
+                    str(graph_depth),
+                    "--main-stat-path",
+                    MAIN_STAT_NORM_LOC,
+                    "--censat-bed-path",
+                    RCS_BED,
+                ]
+                if skype_start_at == 10 and option_skype:
+                    graph_cmd.extend(EXTRA_SKYPE)
+                subprocess_run(graph_cmd + PROGRESS, check=True)
+
+            if start_at <= 11:
+                subprocess_run([
+                    "python", os.path.join(skype_folder_loc, "11_Ref_Outlier_Contig_Modify.py"),
+                    CHR_FAI, PPC_PAF_LOC, PREFIX,
+                ], check=True)
+
+            if start_at <= 21:
+                free_mem_gb = psutil.virtual_memory().available * MEM_SAFE_RATIO / (1024 ** 3)
+                thread_lim = int(free_mem_gb / 6)
+
+                subprocess_run([
+                    "python", os.path.join(skype_folder_loc, "21_run_depth.py"),
+                    PPC_PAF_LOC, PREFIX,
+                    "--pandepth_loc", os.path.join(dep_folder, 'PanDepth', 'bin', 'pandepth'),
+                    "-t", str(max(min(thread_lim, thread), 1))
+                ] + PROGRESS, check=True)
+
+            if start_at <= 22:
+                subprocess_run([
+                    "python", os.path.join(skype_folder_loc, "22_save_matrix.py"),
+                    RCS_BED, MAIN_STAT_NORM_LOC,
+                    PREFIX, "-t", THREAD
+                ] + PROGRESS, check=True)
+
+            if start_at <= 23:
+                subprocess_run([
+                    "python", "23_run_nnls.py", os.path.abspath(PREFIX)
+                ], check=True, cwd=skype_folder_loc)
+
+        run_fit(skype_start_at)
+
+        if skype_start_at <= 24 and raw_rescue_method != 'off':
+            rescue_dir = Path(PREFIX) / '24_raw_rescue'
+            rescue_cmd = [
+                'python', os.path.join(skype_folder_loc, '24_raw_nclose_rescue.py'),
+                os.path.abspath(PREFIX), '--method', raw_rescue_method,
+                '--bam', READ_BAM_LOC, '--reference', alignasm_ref,
+                '--censat-bed', RCS_BED, '--repeat-bed', RPT_BED,
+                '--ppc-paf', PPC_PAF_LOC, '-t', THREAD,
             ]
-            if skype_start_at == 10 and option_skype:
-                graph_cmd.extend(EXTRA_SKYPE)
-            subprocess_run(graph_cmd + PROGRESS, check=True)
-
-        if skype_start_at <= 11:
-            subprocess_run([
-                "python", os.path.join(skype_folder_loc, "11_Ref_Outlier_Contig_Modify.py"),
-                CHR_FAI, PPC_PAF_LOC, PREFIX,
-            ], check=True)
-
-        if skype_start_at <= 21:
-            free_mem_gb = psutil.virtual_memory().available * MEM_SAFE_RATIO / (1024 ** 3)
-            thread_lim = int(free_mem_gb / 6)
-
-            subprocess_run([
-                "python", os.path.join(skype_folder_loc, "21_run_depth.py"),
-                PPC_PAF_LOC, PREFIX,
-                "--pandepth_loc", os.path.join(dep_folder, 'PanDepth', 'bin', 'pandepth'),
-                "-t", str(max(min(thread_lim, thread), 1))
-            ] + PROGRESS, check=True)
-
-        if skype_start_at <= 22:
-            subprocess_run([
-                "python", os.path.join(skype_folder_loc, "22_save_matrix.py"),
-                RCS_BED, MAIN_STAT_NORM_LOC,
-                PREFIX, "-t", THREAD
-            ] + PROGRESS, check=True)
-
-        if skype_start_at <= 23:
-            subprocess_run([
-                "python", "23_run_nnls.py", os.path.abspath(PREFIX)
-            ], check=True, cwd=skype_folder_loc)
+            subprocess_run(rescue_cmd + rescue_args, check=True)
+            if not print_args:
+                summary = json.loads((rescue_dir / 'summary.json').read_text())
+                round_path = rescue_dir / 'round.json'
+                round_state = json.loads(round_path.read_text()) if round_path.exists() else {}
+                if summary['added_count'] and not round_state.get('refit_complete'):
+                    augmented = Path(summary['augmented_dir'])
+                    before = rescue_dir / 'before'
+                    # Installing the same prepared snapshot again is safe after
+                    # an interrupted copy. Discovery never runs a second time.
+                    for filename in summary['install_files']:
+                        target = Path(PREFIX) / filename
+                        if target.exists() and not (before / filename).exists():
+                            shutil.copyfile(target, before / filename)
+                        shutil.copyfile(augmented / filename, target)
+                    round_path.write_text(json.dumps(dict(applied=True, refit_complete=False, rounds=1), indent=2)+'\n')
+                    logging.info('Stage 24 added %d NClose(s); rerunning stages 10--23 once', summary['added_count'])
+                    run_fit(10)
+                    round_path.write_text(json.dumps(dict(applied=True, refit_complete=True, rounds=1), indent=2)+'\n')
 
         if skype_start_at <= 31:
             subprocess_run([
@@ -279,6 +334,8 @@ def build_parser():
     parser.add_argument("--option-skype", "--option_skype", default="")
     parser.add_argument("--skype-start-at", "--skype_start_at", type=int, default=0)
     parser.add_argument("--print-args", "--print_args", action="store_true")
+    parser.add_argument('--raw-rescue-method', choices=('off', 'read', 'olc'))
+    parser.add_argument('--raw-rescue-options')
     return parser
 
 

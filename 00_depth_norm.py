@@ -6,6 +6,7 @@ from skype_utils import *
 
 import numpy as np
 import pandas as pd
+from scipy.ndimage import gaussian_filter1d
 from collections import defaultdict 
 import argparse
 
@@ -85,6 +86,31 @@ ref_df = ref_df.assign(
     offset = ref_df['meandepth'] / ref_meandepth
 )
 
+# Smooth only the log control factors: sigma=1 bin (100 kb), kernel +/-4 bins.
+# Keep chromosome boundaries, coordinate gaps, and normalization exemptions
+# separate so they cannot contribute to a neighboring factor.
+offsets = ref_df['offset'].to_numpy(copy=True)
+excluded = np.array([
+    is_in_repeat(row.chr, row.st, row.nd, censat_repeat_data)
+    for row in ref_df.itertuples(index=False)
+], dtype=bool)
+eligible = (~excluded) & np.isfinite(offsets) & (offsets > 0)
+indices = np.flatnonzero(eligible)
+chroms = ref_df['chr'].to_numpy()
+starts = ref_df['st'].to_numpy(dtype=np.int64)
+ends = ref_df['nd'].to_numpy(dtype=np.int64)
+breaks = np.flatnonzero(
+    (np.diff(indices) != 1)
+    | (chroms[indices[1:]] != chroms[indices[:-1]])
+    | (starts[indices[1:]] != ends[indices[:-1]] + 1)
+) + 1
+for block in np.split(indices, breaks):
+    if len(block):
+        offsets[block] = np.exp(gaussian_filter1d(
+            np.log(offsets[block]), sigma=1.0, mode='reflect', truncate=4.0
+        ))
+ref_df['offset'] = offsets
+
 # --- main_df에 offset 적용 ---
 # 1) ref의 offset을 (chr,st,nd) 기준으로 매핑할 dict 생성
 offset_dict = {
@@ -94,13 +120,13 @@ offset_dict = {
     )
 }
 
-# 2) main_df에 보정값이 있으면 빼고, 없으면 0으로 처리
+# 2) main_df를 보정 계수로 나누고, 대응 control이 없으면 계수 1 사용
 def apply_offset(row):
     key = (row['chr'], row['st'], row['nd'])
     # 1) 이 bin 이 repeat 구간에 속하면 보정하지 않음
     if is_in_repeat(row['chr'], row['st'], row['nd'], censat_repeat_data):
         return row['meandepth']
-    # 2) 아닐 경우, ref offset 이 있으면 빼고, 없으면 0
+    # 2) 아닐 경우, smoothed ref offset으로 나누고, 없으면 계수 1 사용
     return row['meandepth'] / offset_dict.get(key, 1.0)
 
 main_df['meandepth'] = main_df.apply(apply_offset, axis=1).astype(float)
@@ -118,4 +144,3 @@ main_df.to_csv(
     index=False,
     compression='gzip'
 )
-

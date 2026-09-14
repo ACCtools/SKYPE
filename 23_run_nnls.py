@@ -134,7 +134,7 @@ def main(argv=None):
             f"{len(chr_filt_st_list)} != {len(target_depth)}"
         )
 
-    # This is the only optimizer invocation in the native SKYPE pipeline.
+    # One solve per pass; stage 24 may request one additional graph/fit pass.
     solver_matrix = feature_depth.T
     weights = fit_raw_nnls(solver_matrix, target_depth)
     predict_depth = solver_matrix.dot(weights)
