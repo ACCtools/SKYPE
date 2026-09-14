@@ -318,6 +318,20 @@ def node_is_censat(node: Sequence) -> bool:
     return node[CTG_CENSAT] != "0"
 
 
+def node_is_chromosome_end(node: Sequence) -> bool:
+    """Reference-end telomere anchor, including a synthetic missing-end anchor.
+
+    TELCON alone also includes new telomeres at internal reference positions.
+    Require the reference telomere annotation and its matching terminal label.
+    """
+    side = str(node[CTG_TELDIR])[:1]
+    return (
+        side in ("f", "b")
+        and node[CTG_TELCHR] == node[CHR_NAM]
+        and node[CTG_TELCON] == f"{node[CHR_NAM]}{side}"
+    )
+
+
 def calculate_single_contig_ref_ratio(contig_data: Sequence) -> tuple[float, int]:
     total_ref_len = sum(
         int(node[CHR_END]) - int(node[CHR_STR]) for node in contig_data
@@ -1147,6 +1161,12 @@ def _path_is_acceptable(
         return False, [], Counter()
 
     contig_data = context.contig_data
+    if source_name == target_name and not all(
+        node_is_chromosome_end(contig_data[node[1]])
+        and contig_data[node[1]][CTG_TELCON] == source_name
+        for node in (path[1], path[-2])
+    ):
+        return False, [], Counter()
     path_counter = Counter()
     if (
         contig_data[path[1][1]][CTG_NAM]
@@ -1172,7 +1192,14 @@ def _path_is_acceptable(
         next_idx = path[node_offset + 1][1]
         contig_visits[node_idx] += 1
         if contig_visits[node_idx] >= BND_OVERUSE_CNT:
-            return False, [], Counter()
+            # A chromosome-end anchor can represent both ends of a fold-back
+            # path. Internal/new telomeres and ordinary NClose nodes retain
+            # the original no-revisit rule; a third anchor visit still fails.
+            if (
+                contig_visits[node_idx] > BND_OVERUSE_CNT
+                or not node_is_chromosome_end(contig_data[node_idx])
+            ):
+                return False, [], Counter()
 
         current = contig_data[node_idx]
         following = contig_data[next_idx]
@@ -1407,6 +1434,14 @@ def run_path_search(
 
     contig_data_size = len(stage_input.contig_data)
     _, chr_rev_corr = chr_correlation_maker(stage_input.contig_data)
+    chromosome_end_terminals = {
+        name for name, edges in stage_input.telo_contig.items()
+        if any(
+            node_is_chromosome_end(stage_input.contig_data[edge[1]])
+            and stage_input.contig_data[edge[1]][CTG_TELCON] == name
+            for edge in edges
+        )
+    }
     terminal_pairs = [
         (source, target)
         for source in range(
@@ -1414,9 +1449,10 @@ def run_path_search(
             contig_data_size + 2 * CHROMOSOME_COUNT,
         )
         for target in range(
-            source + 1,
+            source,
             contig_data_size + 2 * CHROMOSOME_COUNT,
         )
+        if source != target or chr_rev_corr[source] in chromosome_end_terminals
     ]
     nclose_node_count = count_nclose_nodes(stage_input.nclose_nodes)
     combinations, combination_idx = _limit_combinations(

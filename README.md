@@ -105,6 +105,15 @@ values. A direct stage-10 `--option_skype` replaces the saved graph options for
 that invocation; preprocessing changes require rerunning stage 01.
 The graph handoff remains the same three-field `01_nclose_data.pkl`.
 
+Stage 10 permits two visits to a reference chromosome-end telomere anchor,
+including a synthetic `virtual_telo_*` anchor for a missing reference end.
+It uses the reference telomere annotation plus the matching terminal label;
+an internal newly detected telomere does not qualify merely by having a
+`TELCON` label. Ordinary NClose nodes keep the no-revisit rule, and a third
+visit to a chromosome-end anchor is rejected. Same-terminal paths (for example
+`chr1f -> chr1f`) are searched when such anchors exist and require reference-end
+anchors at both ends. Other path filters and search limits are unchanged.
+
 ### Stage 24: one raw-read rescue pass
 
 Stage 00 smooths the **log CHM13 correction factors**, using a Gaussian sigma
