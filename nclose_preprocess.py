@@ -133,8 +133,7 @@ MAX_OVERLAP_SCORE = 3
 SPLIT_CTG_LEN_LIMIT = 100 * K
 TRUST_SPLIT_CTG_LEN_LIMIT = 20 * K
 
-TYPE2_CHUKJI_AS_TYPE4 = 5 * M
-TYPE2_CONJOIN_COMPRESS_LIMIT = 1 * M
+TYPE2_CONJOIN_COMPRESS_LIMIT = 5 * M
 TYPE2_DIST_FLIP_THRESHOLD = 100 * K
 
 RAW_TRANSLOCATION_CANDIDATE_PKL = 'raw_translocation_candidates.pkl'
@@ -4276,8 +4275,12 @@ def similar_centromere_nclose_cluster(nclose_dict : dict, contig_data : list, re
 
 def conjoined_type4(contig_data, type2_nclose_node):
     """
-    Detect type4 insertions/deletions by pairing type2 nodes within each chromosome.
-    If a contig's internal span >= 100 kb, also test its flipped orientation in a nested loop.
+    Pair filtered same-chromosome NCloses A->B and C->D.
+
+    Accept a short B-C bridge, or two inversion junctions whose corresponding
+    ends A-C and B-D are close. Keep all four nodes so the existing signed
+    INDEL depth column also represents an inversion with flanking deletions.
+    NCloses spanning >=100 kb are also considered in reverse-complement order.
     """
     conjoined_type4_ins = set()
     conjoined_type4_del = set()
@@ -4302,7 +4305,7 @@ def conjoined_type4(contig_data, type2_nclose_node):
                 c2f = contig_data[c2fi]
                 c2b = contig_data[c2bi]
 
-                # Internal spans; switch to CHR_END if that's your convention
+                # Preserve the existing reference-start span used for RC eligibility.
                 len_c1 = abs(c1f[CHR_STR] - c1b[CHR_STR])
                 len_c2 = abs(c2f[CHR_STR] - c2b[CHR_STR])
 
@@ -4318,13 +4321,23 @@ def conjoined_type4(contig_data, type2_nclose_node):
                 # Test all combinations (original/flip × original/flip)
                 for c1f_use, c1fi_, c1b_use, c1bi_ in c1_flips:
                     for c2f_use, c2fi_, c2b_use, c2bi_ in c2_flips:
-                        # Forward direction
+                        # Directions are compared after each selected RC transform.
                         if c1b_use[CTG_DIR] == c2f_use[CTG_DIR]:
-                            dist_for = distance_checker(c1b_use, c2f_use)
-                            if dist_for is not None and dist_for < TYPE2_CONJOIN_COMPRESS_LIMIT:
-                                ratio, total_ref_len = calculate_single_contig_ref_ratio([c1f_use, c2b_use])
-                                abs_estimated = total_ref_len * abs(ratio)
-                                if abs(ratio - 1) > BND_CONTIG_BOUND and abs_estimated > TYPE2_CHUKJI_AS_TYPE4:
+                            indel_layout = (
+                                distance_checker(c1b_use, c2f_use)
+                                < TYPE2_CONJOIN_COMPRESS_LIMIT
+                            )
+                            inversion_layout = (
+                                c1f_use[CTG_DIR] != c1b_use[CTG_DIR]
+                                and c2f_use[CTG_DIR] != c2b_use[CTG_DIR]
+                                and distance_checker(c1f_use, c2f_use)
+                                < TYPE2_CONJOIN_COMPRESS_LIMIT
+                                and distance_checker(c1b_use, c2b_use)
+                                < TYPE2_CONJOIN_COMPRESS_LIMIT
+                            )
+                            if indel_layout or inversion_layout:
+                                ratio, _ = calculate_single_contig_ref_ratio([c1f_use, c2b_use])
+                                if abs(ratio - 1) > BND_CONTIG_BOUND:
                                     # Insertion
                                     if ratio < 0:
                                         if contig_data[c1fi_][CHR_STR] > contig_data[c2bi_][CHR_STR]:
@@ -6617,9 +6630,6 @@ def nclose_calc(
         depth_df,
     )
 
-    with open(f"{context.prefix}/conjoined_type4_ins_del.pkl", "wb") as f:
-        pkl.dump(conjoined_type4(contig_data, type2_nclose_node), f)
-
     virtual_ordinary_contig = make_virtual_ord_ctg(contig_data, vctg_dict)
     write_virtual_ordinary_contig(
         f"{context.prefix}/virtual_ordinary_contig.txt",
@@ -6666,6 +6676,21 @@ def nclose_calc(
     chr_corr = nclose_pipeline_state.chr_corr
     chr_rev_corr = nclose_pipeline_state.chr_rev_corr
     indel_exclude_idx_set = nclose_pipeline_state.indel_exclude_idx_set
+
+    # Conjoined candidates must not reintroduce NCloses rejected by the legacy
+    # filters. CEN-SAT endpoints have a separate route and are merged below.
+    kept_pairs = {candidate.path_pair for candidate in nclose_candidates}
+    filtered_type2_nodes = {
+        chrom: [pair for pair in pairs if pair in kept_pairs]
+        for chrom, pairs in type2_nclose_node.items()
+    }
+    logging.info(
+        "Conjoined type2 input after NClose filters: %d -> %d",
+        sum(map(len, type2_nclose_node.values())),
+        sum(map(len, filtered_type2_nodes.values())),
+    )
+    with open(f"{context.prefix}/conjoined_type4_ins_del.pkl", "wb") as f:
+        pkl.dump(conjoined_type4(contig_data, filtered_type2_nodes), f)
 
     # Route membership was fixed before telomere/repeat preprocessing. Merge
     # only now so no accepted CEN-SAT candidate sees a legacy post-filter.

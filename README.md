@@ -105,6 +105,21 @@ values. A direct stage-10 `--option_skype` replaces the saved graph options for
 that invocation; preprocessing changes require rerunning stage 01.
 The graph handoff remains the same three-field `01_nclose_data.pkl`.
 
+Stage 01 builds `conjoined_type4_ins_del.pkl` from same-chromosome type-2
+NCloses that survive the legacy NClose filters, before the independent CEN-SAT
+endpoint merge. For two oriented NCloses `A -> B` and `C -> D`, their inner
+directions must agree. A candidate then needs either `distance(B, C) < 5 Mb`,
+or two inversion junctions with both `distance(A, C) < 5 Mb` and
+`distance(B, D) < 5 Mb`. Distances are gaps between reference alignment
+intervals; overlaps have distance zero. Reverse-complement combinations are
+also checked when the NClose's reference-start span is at least 100 kb.
+The outer `abs(reference_ratio - 1) > 0.1` check remains; there is no minimum
+estimated outer span. The existing insertion/deletion tuple format is kept
+for both geometries. Stages 11 and 21 retain selected secondary anchors and
+internal alignment pieces so a long inversion can preserve its middle depth
+while the same signed correction column represents its flanking deletions.
+Existing runs need a stage-01 restart to regenerate their conjoined candidates.
+
 Stage 10 permits two visits to a reference chromosome-end telomere anchor,
 including a synthetic `virtual_telo_*` anchor for a missing reference end.
 It uses the reference telomere annotation plus the matching terminal label;

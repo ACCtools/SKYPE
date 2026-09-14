@@ -873,7 +873,13 @@ def create_final_depth_paf_type2(type2_ins_del, PREFIX):
         assert(len(circuit) == 4)
         data = []
         s1, e1, s2, e2 = circuit
-        data.append((BND_TYPE, ((DIR_FOR, e1), (DIR_FOR, s2))))
+        first_dir = DIR_FOR if s1 < e1 else DIR_BAK
+        second_dir = DIR_FOR if s2 < e2 else DIR_BAK
+        # Preserve both NCloses' internal pieces and their RC traversal when
+        # constructing the bridge between their inner anchors.
+        data.append((CTG_IN_TYPE, ((first_dir, s1), (first_dir, e1))))
+        data.append((BND_TYPE, ((first_dir, e1), (second_dir, s2))))
+        data.append((CTG_IN_TYPE, ((second_dir, s2), (second_dir, e2))))
         ins_paf = []
         skipped_rows = 0
         for (key_type, key_val) in data:
@@ -929,7 +935,9 @@ def create_final_depth_paf_type2(type2_ins_del, PREFIX):
         )
         with open(output_path, 'wt') as f:
             for i in ins_paf:
-                print(i, file=f)
+                # These are selected path pieces, including inverted anchors;
+                # PanDepth must not discard them because of source tp:A:S.
+                print(i.replace('\ttp:A:S', '\ttp:A:P'), file=f)
 
 
 def rev_dir(d):

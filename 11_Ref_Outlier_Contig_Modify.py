@@ -226,6 +226,13 @@ def node_original_or_synthetic_paf_row(node):
     return node_to_paf_row(node)
 
 
+def conjoined_anchor_paf_row(node):
+    # This alignment is selected by the conjoined path. Retain its coverage
+    # even when the source mapper labelled it as a secondary alignment.
+    return ["tp:A:P" if item == "tp:A:S" else item
+            for item in node_original_or_synthetic_paf_row(node)]
+
+
 def row_with_cigar(row):
     row = list(row)
     cs_tag = next((str(item) for item in reversed(row) if str(item).startswith("cs:Z:")), None)
@@ -545,7 +552,7 @@ for s1, e1, s2, e2 in type4_ins:
     cntbj+=1
     write_rows_as_paf(
         f"{TYPE_4_VECTOR_PATH}/back_jump/{cntbj}_type2_merge_{type2_indel_cnt}.paf",
-        [node_original_or_synthetic_paf_row(contig_data[i]) for i in (s1, e2)]
+        [conjoined_anchor_paf_row(contig_data[i]) for i in (s1, e2)]
     )
         
     with open(f"{TYPE_4_VECTOR_PATH}/back_jump/{cntbj}_base.paf", "wt") as f:
@@ -575,7 +582,7 @@ for s1, e1, s2, e2 in type4_del:
     cntfj+=1
     write_rows_as_paf(
         f"{TYPE_4_VECTOR_PATH}/front_jump/{cntfj}_type2_merge_{type2_indel_cnt}.paf",
-        [node_original_or_synthetic_paf_row(contig_data[i]) for i in (s1, e2)]
+        [conjoined_anchor_paf_row(contig_data[i]) for i in (s1, e2)]
     )
         
     with open(f"{TYPE_4_VECTOR_PATH}/front_jump/{cntfj}_base.paf", "wt") as f:
