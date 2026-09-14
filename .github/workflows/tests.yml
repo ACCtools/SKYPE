@@ -51,6 +51,7 @@ jobs:
             tqdm
             graph-tool
             vcfpy
+            minimap2
             _x86_64-microarch-level=3
 
       - name: Run test suite
