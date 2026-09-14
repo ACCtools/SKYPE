@@ -26,6 +26,11 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
+      - name: Install alignment tool
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends minimap2
+
       - name: Create minimal test environment
         uses: mamba-org/setup-micromamba@v3
         with:
@@ -51,7 +56,6 @@ jobs:
             tqdm
             graph-tool
             vcfpy
-            minimap2
             _x86_64-microarch-level=3
 
       - name: Run test suite
