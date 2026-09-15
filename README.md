@@ -166,6 +166,16 @@ at least 100 kb, matching `VCF_TYPE4_MIN_SPAN`. Smaller candidates are recorded
 as `below_min_indel_span` before compression and are not installed. The 1 kb
 alignment-splitting threshold remains separate, so short internal indels can
 still support a compound NClose. Exactly 100 kb passes the addition threshold.
+These same-chromosome, same-strand chains are handed off as type 4, not as
+ordinary BND pairs. Stage 24 compares DEL and DUP separately against existing
+type-4 nodes and the stage-11 INDEL catalog using the same 10 kb endpoint
+tolerance as stage 11. New type-4 chains retain all their alignment pieces in
+the PPC/PAF handoff; stage 11 creates their INDEL depth columns and catalog
+entries. BND discovery/compression remains the route for other chains.
+The candidate TSV records `handoff_type` and `indel_event_type`; the summary
+separates `added_type4_count` and `added_bnd_count` within `added_count`.
+Completed stage-24 snapshots are not migrated automatically. Evaluate this
+change from a pre-rescue baseline in a separate output directory.
 
 - `read` uses complete raw molecules, primary/SA discovery and whole-reference
   realignment, then selects each molecule's two reliable outer alignments.

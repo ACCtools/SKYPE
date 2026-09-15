@@ -27,6 +27,17 @@ VCF_TYPE4_OUTLIER_INDEX_PKL = "vcf_type4_outlier_index.pkl"
 INDEL_MERGE_TOLERANCE = 10_000
 NCLOSE_ID_PREFIX = "SKYPE.nclose."
 
+
+def make_indel_candidate(event_type, chrom, ref_a, ref_b, source):
+    st, nd = sorted((int(ref_a), int(ref_b)))
+    return dict(event_type=event_type, chrom=chrom, st=st, nd=nd, source=source)
+
+
+def same_indel_candidate(a, b, tolerance=INDEL_MERGE_TOLERANCE):
+    return (a['event_type'] == b['event_type'] and a['chrom'] == b['chrom']
+            and abs(a['st'] - b['st']) <= tolerance
+            and abs(a['nd'] - b['nd']) <= tolerance)
+
 REPORT_COLUMNS = (
     "nclose_id",
     "start_chr", "start_pos", "start_dir",

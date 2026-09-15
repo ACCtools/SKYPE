@@ -2593,18 +2593,19 @@ def alt_preprocess_contig(contig_data : list, telo_label : list, ref_qry_ratio :
             elif curr_contig_first_fragment[CTG_DIR] != curr_contig_end_fragment[CTG_DIR]:
                 checker = 2
             else:
-                if is_telo:
+                if is_front_back_repeat:
+                    bound = RPT_BND_CONTIG_BOUND
+                else:
+                    bound = BND_CONTIG_BOUND
+
+                # Preserve internal INDELs even when an endpoint connects to
+                # a telomere; type 5 keeps only the connected anchor rows.
+                if abs(ref_qry_ratio[curr_contig_name]-1) >= bound:
+                    checker = 4
+                elif is_telo:
                     checker = 5
                 else:
-                    if is_front_back_repeat:
-                        bound = RPT_BND_CONTIG_BOUND
-                    else:
-                        bound = BND_CONTIG_BOUND
-
-                    if abs(ref_qry_ratio[curr_contig_name]-1) >= bound:
-                        checker = 4
-                    else:
-                        checker = 3
+                    checker = 3
 
             if chrM_flag:
                 checker = 0

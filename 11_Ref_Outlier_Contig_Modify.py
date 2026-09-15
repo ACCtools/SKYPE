@@ -4,7 +4,10 @@ import pickle as pkl
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from skype_utils import *
-from nclose_tracking import replace_catalog_indels
+from nclose_tracking import (
+    replace_catalog_indels, make_indel_candidate, same_indel_candidate,
+    INDEL_MERGE_TOLERANCE,
+)
 
 import re
 import logging
@@ -38,7 +41,6 @@ CTG_MAINFLOWCHR = 20
 CTG_GLOBALIDX = 21
 
 CHUKJI_LIMIT = 100*K
-INDEL_MERGE_TOLERANCE = 10*K
 
 def import_origin_data(file_path : list) -> list :
     contig_data = []
@@ -119,24 +121,6 @@ def inclusive_checker(tuple_a : tuple, tuple_b : tuple) -> bool :
     else:
         return False
 
-def make_indel_candidate(event_type, chrom, ref_a, ref_b, source):
-    st, nd = sorted((int(ref_a), int(ref_b)))
-    return {
-        'event_type': event_type,
-        'chrom': chrom,
-        'st': st,
-        'nd': nd,
-        'source': source,
-    }
-
-def same_indel_candidate(a, b, tolerance=INDEL_MERGE_TOLERANCE):
-    return (
-        a['event_type'] == b['event_type'] and
-        a['chrom'] == b['chrom'] and
-        abs(a['st'] - b['st']) <= tolerance and
-        abs(a['nd'] - b['nd']) <= tolerance
-    )
-    
 def cs_to_cigar(cs_tag: str) -> str:
    """
    cs:Z: 태그의 값(접두어 "cs:Z:" 제외)을 받아서 표준 CIGAR 문자열로 변환합니다.

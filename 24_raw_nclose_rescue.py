@@ -521,6 +521,7 @@ def event_table_row(event):
         bam_support=len(event.get('bam_support_reads',[])),
         olc_input_reads=event.get('olc_input_reads',0),extension_bp=event.get('extension_bp',0),
         status=event.get('status','candidate'),duplicate_of=event.get('duplicate_of',''),
+        handoff_type=event.get('handoff_type',''),indel_event_type=event.get('indel_event_type',''),
         indel_span_bp=event.get('indel_span_bp',''),
         support_reads=','.join(event.get('support_reads',[])))
 
@@ -698,11 +699,26 @@ def prepare_augmented_handoff(prefix, outdir, candidates, args):
     from breakend_graph import load_stage10_input, save_stage10_input
     from nclose_tracking import load_event_catalog, save_event_catalog, build_bnd_event_catalog
     from skype_utils import save_nclose_nodes
+    from nclose_tracking import make_indel_candidate, same_indel_candidate, nclose_event_id_by_key
 
     filter_small_indel_candidates(candidates)
     stage=load_stage10_input(prefix/'01_nclose_data.pkl')
     nodes=list(stage.contig_data)
     ncloses={owner:list(pairs) for owner,pairs in stage.nclose_nodes.items()}
+    catalog=load_event_catalog(str(prefix))
+    event_ids=nclose_event_id_by_key(catalog)
+    indel_representatives=[dict(e,source=event_ids[tuple(e['event_key'])])
+                          for e in catalog if e['kind']=='indel']
+    def indel_layout(first, last, source):
+        # Same breakpoint geometry and DEL/DUP sign as stage 11, including RC.
+        a=first[8] if first[4]=='+' else first[7]
+        b=last[7] if last[4]=='+' else last[8]
+        signed_span=(b-a) if first[4]=='+' else (a-b)
+        return make_indel_candidate('front_jump' if signed_span>0 else 'back_jump',
+                                    first[5],a,b,source)
+    for i,node in enumerate(nodes):
+        if node[10]==4 and node[11]==i:
+            indel_representatives.append(indel_layout(node,nodes[node[12]],node[0]))
     repeats=pre.import_repeat_data_00(args.repeat_bed) if args.repeat_bed else {}
     censat=pre.import_censat_repeat_data(args.censat_bed)
     chr_lengths={row[5]:int(row[6]) for row in nodes}
@@ -730,6 +746,9 @@ def prepare_augmented_handoff(prefix, outdir, candidates, args):
             continue
         start=len(nodes); owner=f"raw_rescue_{args.method}_{event['candidate_id']}"
         chain=event['chain']; end=start+len(chain)-1
+        is_type4=len({(row['chrom'],row['strand']) for row in chain})==1
+        handoff_type=4 if is_type4 else 1 if len({row['chrom'] for row in chain})>1 else 2
+        event['handoff_type']=handoff_type
         chrom_span=defaultdict(int)
         for row in chain:
             chrom_span[(row['chrom'],row['strand'])] += row['end0']-row['start0']
@@ -737,41 +756,49 @@ def prepare_augmented_handoff(prefix, outdir, candidates, args):
         current=[]
         for i,row in enumerate(chain):
             node=[owner,row['qlen'],row['qstart'],row['qend'],row['strand'],row['chrom'],row['chrom_length'],
-                  row['start0'],row['end0'],row['mapq'],1 if len({r['chrom'] for r in chain}) > 1 else 2,
+                  row['start0'],row['end0'],row['mapq'],handoff_type,
                   start,end,'0','0','0','0','0','0',main_dir,main_chrom,f'{len(original_pafs)}.{len(paf_rows)+i}']
             label=pre.label_repeat_node([node],repeats,chr_lengths)[0]
             node[16],node[17]=label
             node[18]=pre.label_repeat_node([node],censat,chr_lengths)[0][1]
             current.append(tuple(node))
+        if is_type4:
+            indel=indel_layout(current[0],current[-1],owner)
+            event['indel_event_type']=indel['event_type']
+            duplicate=next((r for r in indel_representatives if same_indel_candidate(indel,r)),None)
+            if duplicate is not None:
+                event.update(status='compressed_duplicate',duplicate_of=duplicate['source'])
+                continue
+            indel_representatives.append(indel)
         nodes.extend(current)
         pair=(start,end)
-        # Use exactly the same repeat classification and interval-distance /
-        # canonical-direction comparison as stage 01, with old representatives
-        # first. An overlapping anchor has distance zero in that contract.
-        local_nodes=[list(n) for n in current]
-        for n in local_nodes:
-            n[11],n[12]=0,len(local_nodes)-1
-        is_repeat=owner in pre.extract_all_repeat_contig(local_nodes,repeats,pre.CTG_RPTCASE,pre.NON_REPEAT_NOISE_RATIO)
-        bucket,stored,directions=layout(pair)
-        duplicate=None
-        for representative in representatives[bucket]:
-            limit=pre.ALL_REPEAT_NCLOSE_COMPRESS_LIMIT if is_repeat and representative.contig_name in repeat_names else pre.NCLOSE_COMPRESS_LIMIT
-            if pre.nclose_cluster_candidate_matches(nodes,stored,directions,representative,limit):
-                duplicate=representative.contig_name
-                break
-        if duplicate:
-            del nodes[start:]
-            event.update(status='compressed_duplicate',duplicate_of=duplicate)
-            continue
-        if is_repeat:
-            repeat_names.add(owner)
-        representatives[bucket].append(pre.NCloseClusterRepresentative(owner,pair,stored,directions))
-        ncloses[owner]=[pair]
+        if not is_type4:
+            # BNDs retain stage 01's repeat-aware anchor-interval compression.
+            local_nodes=[list(n) for n in current]
+            for n in local_nodes:
+                n[11],n[12]=0,len(local_nodes)-1
+            is_repeat=owner in pre.extract_all_repeat_contig(local_nodes,repeats,pre.CTG_RPTCASE,pre.NON_REPEAT_NOISE_RATIO)
+            bucket,stored,directions=layout(pair)
+            duplicate=None
+            for representative in representatives[bucket]:
+                limit=pre.ALL_REPEAT_NCLOSE_COMPRESS_LIMIT if is_repeat and representative.contig_name in repeat_names else pre.NCLOSE_COMPRESS_LIMIT
+                if pre.nclose_cluster_candidate_matches(nodes,stored,directions,representative,limit):
+                    duplicate=representative.contig_name
+                    break
+            if duplicate:
+                del nodes[start:]
+                event.update(status='compressed_duplicate',duplicate_of=duplicate)
+                continue
+            if is_repeat:
+                repeat_names.add(owner)
+            representatives[bucket].append(pre.NCloseClusterRepresentative(owner,pair,stored,directions))
+            ncloses[owner]=[pair]
         for row in chain:
             fields=row['paf'].split('\t'); fields[0]=owner
             # Stage 21 expects cs to be the final PAF tag.
             cs=[x for x in fields[12:] if x.startswith('cs:Z:')]
-            tags=[x for x in fields[12:] if not x.startswith(('cs:Z:','cg:Z:'))]
+            tags=['tp:A:P' if x=='tp:A:S' else x for x in fields[12:]
+                  if not x.startswith(('cs:Z:','cg:Z:'))]
             paf_rows.append('\t'.join(fields[:12]+tags+cs))
         event.update(status='added',owner=owner,node_pair=list(pair))
         added.append(event)
@@ -792,7 +819,6 @@ def prepare_augmented_handoff(prefix, outdir, candidates, args):
     groups=pre.group_nclose_nodes_by_chrom(nodes,ncloses)
     pre.write_nclose_nodes_list(str(augmented/'compressed_nclose_nodes_list.txt'),groups,nodes,repeat_names)
     pre.write_nclose_nodes_index(str(augmented/'nclose_nodes_index.txt'),ncloses,nodes)
-    catalog=load_event_catalog(str(prefix))
     old_keys={tuple(e['event_key']) for e in catalog}
     for event in build_bnd_event_catalog(groups,nodes):
         if tuple(event['event_key']) not in old_keys:
@@ -876,6 +902,8 @@ def main(argv=None):
     added,files=prepare_augmented_handoff(prefix,outdir,candidates,args) if candidates else ([],[])
     summary=dict(method=args.method,query_regions=len(queries),raw_candidates=len(candidates),
         added_count=len(added),added_ids=[e['candidate_id'] for e in added],
+        added_type4_count=sum(e['handoff_type']==4 for e in added),
+        added_bnd_count=sum(e['handoff_type']!=4 for e in added),
         compressed_duplicates=sum(e['status'] == 'compressed_duplicate' for e in candidates),
         insufficient_support=sum(e['status'] == 'insufficient_raw_support' for e in candidates),
         minimum_indel_span=VCF_TYPE4_MIN_SPAN,
