@@ -15,7 +15,7 @@ class CensatEndpointTests(unittest.TestCase):
         self.assertEqual(terminal_position(row, 'left'), 199)
         self.assertEqual(terminal_position(row, 'right'), 100)
 
-    def test_partition_uses_all_bed_intervals_and_excludes_same_state_owners(self):
+    def test_partition_uses_all_bed_intervals_and_excludes_same_chrom_owners(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             bed = root / 'censat.bed'
@@ -29,11 +29,17 @@ class CensatEndpointTests(unittest.TestCase):
                 'both\t1000\t100\t200\t+\tchr1\t10000\t100\t200\t100\t100\t0\n'
                 'both\t1000\t300\t400\t+\tchr3\t10000\t500\t600\t100\t100\t0\n'
                 'same\t100\t0\t100\t+\tchr1\t10000\t100\t200\t100\t100\t60\n'
+                'inversion\t200\t0\t100\t+\tchr1\t10000\t100\t200\t100\t100\t60\n'
+                'inversion\t200\t100\t200\t-\tchr1\t10000\t100\t200\t100\t100\t60\n'
                 'legacy\t100\t0\t100\t+\tchr1\t10000\t150\t250\t100\t100\t60\n'
             )
             partition, candidates = partition_unitigs(paf, bed)
         self.assertEqual({r['unitig']: r['route'] for r in partition},
-                         {'both': 'censat', 'same': 'censat', 'legacy': 'legacy'})
+                         {'both': 'censat', 'same': 'censat',
+                          'inversion': 'censat', 'legacy': 'legacy'})
+        reasons = {r['unitig']: r['reason'] for r in partition}
+        self.assertEqual(reasons['same'], 'same_chrom')
+        self.assertEqual(reasons['inversion'], 'same_chrom')
         self.assertEqual([r['unitig'] for r in candidates], ['both'])
         self.assertEqual(candidates[0]['left']['index'], 1)
         self.assertEqual(candidates[0]['right']['index'], 0)

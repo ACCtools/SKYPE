@@ -89,8 +89,8 @@ def partition_unitigs(paf, bed):
                        for start, end in intervals[row["chrom"]])
                    for side, row in pair.items())
         left, right = pair["left"], pair["right"]
-        same = (left["chrom"], left["strand"]) == (right["chrom"], right["strand"])
-        reason = ("same_chrom_same_strand" if same else "candidate") if both else "legacy"
+        same = left["chrom"] == right["chrom"]
+        reason = ("same_chrom" if same else "candidate") if both else "legacy"
         partition.append(dict(unitig=name, route="censat" if both else "legacy",
                               reason=reason, left_index=left["index"],
                               right_index=right["index"]))
@@ -238,7 +238,10 @@ def evaluate_inputs(outdir, aln_paf, raw_paf, bed):
     accepted, diagnostics = [], []
     for candidate in candidates:
         results = []
-        if candidate["raw_status"] != "consistent":
+        # Enforce the same rule when stage 01 reads an older prepared cache.
+        if candidate["left"]["chrom"] == candidate["right"]["chrom"]:
+            status = "same_chrom"
+        elif candidate["raw_status"] != "consistent":
             status = "raw_" + candidate["raw_status"]
         elif candidate["trace_reason"]:
             status = candidate["trace_reason"]
