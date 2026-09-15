@@ -15,6 +15,7 @@ import json
 import logging
 from pathlib import Path
 import subprocess
+from reference_indexes import ensure_reference_index
 
 
 ALIGN_OPTIONS = ["--cs", "-x", "asm20", "--no-long-join", "-r2k", "-K10G",
@@ -131,7 +132,8 @@ def trace_source(chunk, sources):
     return source, None
 
 
-def prepare_inputs(aln_paf, raw_paf, fasta, reference, bed, outdir, thread=1, force=False):
+def prepare_inputs(aln_paf, raw_paf, fasta, reference, bed, outdir, thread=1, force=False,
+                   reference_index_cache=None):
     """Cache expensive preparation independently of a SKYPE result directory."""
     outdir = Path(outdir)
     outdir.mkdir(parents=True, exist_ok=True)
@@ -208,8 +210,9 @@ def prepare_inputs(aln_paf, raw_paf, fasta, reference, bed, outdir, thread=1, fo
         len(candidates), len(manifest) // 2,
     )
     if manifest:
+        index = ensure_reference_index(reference, "asm20", thread, reference_index_cache)
         subprocess.run(["minimap2", *ALIGN_OPTIONS, "-t", str(thread),
-                        str(reference), str(fa_path), "-o", str(paf_path)], check=True)
+                        index, str(fa_path), "-o", str(paf_path)], check=True)
     else:
         paf_path.write_text("")
     write_json(meta_path, metadata)
@@ -270,6 +273,7 @@ def main():
         parser.add_argument("--" + name, required=True)
     parser.add_argument("-t", "--thread", type=int, default=1)
     parser.add_argument("--force", action="store_true")
+    parser.add_argument("--reference-index-cache")
     args = parser.parse_args()
     prepare_inputs(**vars(args))
 

@@ -29,6 +29,7 @@ import pysam
 
 from local_olc import OLCConfig, assemble
 from skype_utils import VCF_TYPE4_MIN_SPAN
+from reference_indexes import ensure_reference_index
 
 BIN = 100000
 
@@ -496,7 +497,9 @@ def align_sequences(fasta, paf, args, outdir):
     if not Path(fasta).stat().st_size:
         Path(paf).write_text('')
         return {}
-    index = Path(args.reference_index) if args.reference_index else outdir/'reference.mmi'
+    index = Path(args.reference_index) if args.reference_index else Path(
+        ensure_reference_index(args.reference, args.minimap_preset, args.thread,
+                               getattr(args, 'reference_index_cache', None)))
     if not index.exists():
         with (outdir/'reference_index.log').open('w') as log:
             subprocess.run(['minimap2','-x',args.minimap_preset,'-t',str(args.thread),
@@ -836,6 +839,7 @@ def build_parser():
     parser.add_argument('--bam')
     parser.add_argument('--reference')
     parser.add_argument('--reference-index')
+    parser.add_argument('--reference-index-cache')
     parser.add_argument('--censat-bed')
     parser.add_argument('--repeat-bed',default='')
     parser.add_argument('--ppc-paf')

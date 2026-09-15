@@ -50,6 +50,12 @@ of each original end chunk. Passing ends are traced through `xi:Z:P_<index>`
 to raw PAF query intervals, extracted
 without reverse complementation, and realigned to the whole reference with
 `minimap2 --cs -x asm20 --no-long-join -r2k -K10G -N 5000 -p 0.5`.
+
+CEN-SAT and raw-read/OLC realignments share minimap2 indexes with
+ACCtools-pipeline under `deps/reference_indexes`. Indexes are created on demand
+and keyed by reference FASTA signature, preset, and minimap2 version. The native
+pipeline, CEN-SAT CLI, and rescue CLI accept `--reference-index-cache` to select
+a different cache directory; rescue's explicit `--reference-index` overrides it.
 The same original-chunk 50% test is repeated after restoring query offsets.
 `A_`, missing, or inconsistent source traces are excluded and reported.
 Missing qualifying alignments never count as consistent evidence.

@@ -47,9 +47,12 @@ def run_skype(CELL_LINE, PREFIX, ctg_paf, ctg_aln_paf, utg_paf, utg_aln_paf,
               benchmark_vcf_loc=None, vcf_ins_aln_paf=None,
               unitig_fasta=None, alignment_force=False, *,
               alignasm_ref, chr_fai, tel_bed, rpt_bed, rcs_bed, cyt_bed,
-              ref_stat=None, raw_rescue_method=None, raw_rescue_options=None):
+              ref_stat=None, raw_rescue_method=None, raw_rescue_options=None,
+              reference_index_cache=None):
     # Execute the core SKYPE analysis scripts.
     dep_folder = os.path.abspath(dep_folder)
+    reference_index_cache = os.path.abspath(
+        reference_index_cache or os.path.join(dep_folder, 'reference_indexes'))
     skype_folder_loc = os.path.dirname(os.path.abspath(__file__))
 
     rescue_parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
@@ -195,6 +198,7 @@ def run_skype(CELL_LINE, PREFIX, ctg_paf, ctg_aln_paf, utg_paf, utg_aln_paf,
                     "--raw-paf", utg_paf,
                     "--fasta", unitig_fasta,
                     "--reference", alignasm_ref,
+                    "--reference-index-cache", reference_index_cache,
                     "--bed", RCS_BED,
                     "--outdir", censat_dir,
                     "-t", THREAD,
@@ -274,6 +278,7 @@ def run_skype(CELL_LINE, PREFIX, ctg_paf, ctg_aln_paf, utg_paf, utg_aln_paf,
                 'python', os.path.join(skype_folder_loc, '24_raw_nclose_rescue.py'),
                 os.path.abspath(PREFIX), '--method', raw_rescue_method,
                 '--bam', READ_BAM_LOC, '--reference', alignasm_ref,
+                '--reference-index-cache', reference_index_cache,
                 '--censat-bed', RCS_BED, '--repeat-bed', RPT_BED,
                 '--ppc-paf', PPC_PAF_LOC, '-t', THREAD,
             ]
@@ -336,6 +341,7 @@ def build_parser():
     parser.add_argument("--print-args", "--print_args", action="store_true")
     parser.add_argument('--raw-rescue-method', choices=('off', 'read', 'olc'))
     parser.add_argument('--raw-rescue-options')
+    parser.add_argument('--reference-index-cache')
     return parser
 
 
