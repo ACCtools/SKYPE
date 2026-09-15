@@ -839,6 +839,7 @@ class Stage01ContractTests(unittest.TestCase):
                     "raw_virtual_inversion",
                     "user_exclusion",
                     "censat_endpoint_merge",
+                    "short_anchor",
                 ],
             )
             handoff = load_pipeline_input(prefix)

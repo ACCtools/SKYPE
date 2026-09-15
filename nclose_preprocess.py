@@ -6313,6 +6313,25 @@ def make_nclose_filter_stage(name, filter_candidates):
     return NClosePipelineStage(name=name, run=run)
 
 
+def filter_short_nclose_anchors(context, candidates):
+    """Require both final assembly anchors to span more than 1,000 ref bp.
+
+    Run after the CEN-SAT merge. Raw-read rescue adds its candidates in
+    stage 24, after this stage-01 filter, so those candidates are unaffected.
+    """
+    def reject_reason(candidate):
+        lengths = [
+            context.contig_data[idx][CHR_END]
+            - context.contig_data[idx][CHR_STR]
+            for idx in candidate.path_pair
+        ]
+        if min(lengths) <= 1000:
+            return "endpoint_ref_span_le_1000bp"
+        return None
+
+    return apply_nclose_filter(candidates, "short_anchor", reject_reason)
+
+
 def _run_initial_rejection_stage(context, state):
     return _store_nclose_filter_result(
         state,
@@ -6678,21 +6697,6 @@ def nclose_calc(
     chr_rev_corr = nclose_pipeline_state.chr_rev_corr
     indel_exclude_idx_set = nclose_pipeline_state.indel_exclude_idx_set
 
-    # Conjoined candidates must not reintroduce NCloses rejected by the legacy
-    # filters. CEN-SAT endpoints have a separate route and are merged below.
-    kept_pairs = {candidate.path_pair for candidate in nclose_candidates}
-    filtered_type2_nodes = {
-        chrom: [pair for pair in pairs if pair in kept_pairs]
-        for chrom, pairs in type2_nclose_node.items()
-    }
-    logging.info(
-        "Conjoined type2 input after NClose filters: %d -> %d",
-        sum(map(len, type2_nclose_node.values())),
-        sum(map(len, filtered_type2_nodes.values())),
-    )
-    with open(f"{context.prefix}/conjoined_type4_ins_del.pkl", "wb") as f:
-        pkl.dump(conjoined_type4(contig_data, filtered_type2_nodes), f)
-
     # Route membership was fixed before telomere/repeat preprocessing. Merge
     # only now so no accepted CEN-SAT candidate sees a legacy post-filter.
     censat_candidates = append_censat_endpoint_candidates(context, contig_data, chr_len)
@@ -6726,6 +6730,29 @@ def nclose_calc(
         )
         with open(f'{context.prefix}/cen_fragment_data.pkl', 'wb') as f:
             pkl.dump(cen_fragment_meta, f)
+
+    # Apply the final anchor cutoff to both assembly routes before any final
+    # NClose handoff. Raw-read rescue enters separately in stage 24.
+    nclose_pipeline_state = run_nclose_pipeline(
+        nclose_pipeline_context,
+        nclose_pipeline_state,
+        (make_nclose_filter_stage("short_anchor", filter_short_nclose_anchors),),
+    )
+    nclose_candidates = nclose_pipeline_state.candidates
+
+    # Conjoined candidates must not reintroduce filtered NCloses.
+    kept_pairs = {candidate.path_pair for candidate in nclose_candidates}
+    filtered_type2_nodes = {
+        chrom: [pair for pair in pairs if pair in kept_pairs]
+        for chrom, pairs in type2_nclose_node.items()
+    }
+    logging.info(
+        "Conjoined type2 input after NClose filters: %d -> %d",
+        sum(map(len, type2_nclose_node.values())),
+        sum(map(len, filtered_type2_nodes.values())),
+    )
+    with open(f"{context.prefix}/conjoined_type4_ins_del.pkl", "wb") as f:
+        pkl.dump(conjoined_type4(contig_data, filtered_type2_nodes), f)
 
     nclose_nodes = candidates_to_legacy(nclose_candidates)
     transloc_nclose_pair_count, nclose_node_count = finalize_nclose_outputs(
