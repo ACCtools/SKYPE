@@ -144,6 +144,7 @@ RAW_TRANSLOCATION_MIN_SAME_CHROM_SPAN = 10 * M
 NCLOSE_COUNT_CANDIDATE_PKL = 'nclose_count_candidates.pkl'
 NCLOSE_COUNT_RESULT_PKL = 'nclose_count_result.pkl'
 NCLOSE_COUNT_DEFAULT_VAF_THRESHOLD = 0.1
+NCLOSE_DEFAULT_MIN_REF_SPAN = 1000
 
 STAGE01_SUMMARY_JSON = "stage01_nclose_summary.json"
 STAGE01_REJECTIONS_TSV = "stage01_nclose_rejections.tsv"
@@ -199,6 +200,7 @@ class PregraphBuildContext:
     excluded_censat_unitigs: frozenset = frozenset()
     censat_candidates: tuple = ()
     censat_summary: dict = field(default_factory=dict)
+    nclose_min_ref_span: int = NCLOSE_DEFAULT_MIN_REF_SPAN
 
 
 @dataclass(frozen=True)
@@ -530,6 +532,7 @@ class Stage01Config:
     debug_force_ncloses: tuple[
         tuple[DebugNCloseEndpoint, DebugNCloseEndpoint], ...
     ] = ()
+    nclose_min_ref_span: int = NCLOSE_DEFAULT_MIN_REF_SPAN
 
 
 def iter_contig_ranges(contig_data):
@@ -6314,19 +6317,23 @@ def make_nclose_filter_stage(name, filter_candidates):
 
 
 def filter_short_nclose_anchors(context, candidates):
-    """Require both final assembly anchors to span more than 1,000 ref bp.
+    """Require both final assembly anchors to exceed the configured ref span.
 
     Run after the CEN-SAT merge. Raw-read rescue adds its candidates in
     stage 24, after this stage-01 filter, so those candidates are unaffected.
     """
+    threshold = context.build.nclose_min_ref_span
+    if threshold == 0:
+        return list(candidates), []
+
     def reject_reason(candidate):
         lengths = [
             context.contig_data[idx][CHR_END]
             - context.contig_data[idx][CHR_STR]
             for idx in candidate.path_pair
         ]
-        if min(lengths) <= 1000:
-            return "endpoint_ref_span_le_1000bp"
+        if min(lengths) <= threshold:
+            return f"endpoint_ref_span_le_{threshold}bp"
         return None
 
     return apply_nclose_filter(candidates, "short_anchor", reject_reason)
@@ -6996,6 +7003,7 @@ def _make_stage01_context(config: Stage01Config, source: NCloseSourceConfig):
         excluded_censat_unitigs=frozenset(excluded),
         censat_candidates=tuple(candidates),
         censat_summary=summary,
+        nclose_min_ref_span=config.nclose_min_ref_span,
     )
 
 

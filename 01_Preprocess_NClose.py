@@ -11,6 +11,7 @@ from skype_options import save_stage_options, split_stage_options
 
 from nclose_preprocess import (
     NCLOSE_COUNT_DEFAULT_VAF_THRESHOLD,
+    NCLOSE_DEFAULT_MIN_REF_SPAN,
     Stage01Config,
     parse_debug_nclose_endpoint,
     run_stage01,
@@ -88,6 +89,15 @@ def build_parser() -> argparse.ArgumentParser:
         dest="nclose_count_vaf_threshold",
         type=float,
         default=NCLOSE_COUNT_DEFAULT_VAF_THRESHOLD,
+    )
+    parser.add_argument(
+        "--nclose-min-ref-span", "--nclose_min_ref_span",
+        type=int,
+        default=NCLOSE_DEFAULT_MIN_REF_SPAN,
+        help=(
+            "Remove assembly NCloses if either endpoint reference span is <= "
+            "this many bp (default: 1000; 0 disables the filter)"
+        ),
     )
     parser.add_argument(
         "--disable-alt-ctg-simple",
@@ -179,6 +189,7 @@ def main(argv=None) -> int:
         skip_bam_analysis=args.skip_bam_analysis,
         check_nclose_count=args.check_nclose_count,
         nclose_count_vaf_threshold=args.nclose_count_vaf_threshold,
+        nclose_min_ref_span=args.nclose_min_ref_span,
         disable_alt_ctg_simple=args.disable_alt_ctg_simple,
         vcf_input_path=args.vcf_input,
         vcf_filter_pass=tuple(args.vcf_filter_pass),

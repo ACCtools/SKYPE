@@ -14,6 +14,8 @@ def normalize_extra_args(extra_args):
 
 
 _STAGE_OPTION_SPECS = {
+    "--nclose-min-ref-span": ("01", "--nclose-min-ref-span", 1),
+    "--nclose_min_ref_span": ("01", "--nclose-min-ref-span", 1),
     "--exclude-nclose-list-loc": ("01", "--exclude-nclose-list-loc", 1),
     "--exclude_nclose_list_loc": ("01", "--exclude-nclose-list-loc", 1),
     "--skip-bam-analysis": ("01", "--skip-bam-analysis", 0),
