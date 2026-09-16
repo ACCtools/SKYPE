@@ -133,7 +133,8 @@ MAX_OVERLAP_SCORE = 3
 SPLIT_CTG_LEN_LIMIT = 100 * K
 TRUST_SPLIT_CTG_LEN_LIMIT = 20 * K
 
-TYPE2_CONJOIN_COMPRESS_LIMIT = 5 * M
+TYPE2_CONJOIN_COMPRESS_LIMIT = 3 * M
+CONJOINED_TYPE4_NOISE_SIGMA_MULTIPLIER = 3.0
 TYPE2_DIST_FLIP_THRESHOLD = 100 * K
 
 RAW_TRANSLOCATION_CANDIDATE_PKL = 'raw_translocation_candidates.pkl'
@@ -4277,17 +4278,56 @@ def similar_centromere_nclose_cluster(nclose_dict : dict, contig_data : list, re
 
     return centromere_nclose_master, slave_dict
 
-def conjoined_type4(contig_data, type2_nclose_node):
+def conjoined_type4(contig_data, filtered_type2_nodes, depth_df, repeat_censat_data, chr_len):
     """
-    Pair filtered same-chromosome NCloses A->B and C->D.
+    Refilter final type2 NCloses at 3 sigma, then pair A->B and C->D.
 
-    Accept a short B-C bridge, or two inversion junctions whose corresponding
-    ends A-C and B-D are close. Keep all four nodes so the existing signed
+    Reject a junction when both breakpoints are depth-balanced, unless the
+    interval between them overlaps CEN-SAT (including flanking endpoints).
+    Accept a B-C bridge below 3 Mb, or two inversion junctions whose corresponding
+    ends A-C and B-D are below 3 Mb. Keep all four nodes so the existing signed
     INDEL depth column also represents an inversion with flanking deletions.
     NCloses spanning >=100 kb are also considered in reverse-complement order.
     """
     conjoined_type4_ins = set()
     conjoined_type4_del = set()
+    absolute_diff_threshold = CONJOINED_TYPE4_NOISE_SIGMA_MULTIPLIER * \
+        estimate_type2_global_noise_sigma(depth_df, repeat_censat_data)
+    depth_by_chrom = depth_df_to_by_chrom(depth_df)
+    type2_nclose_node = defaultdict(list)
+    input_type2_count = 0
+    for pairs in filtered_type2_nodes.values():
+        for s, e in pairs:
+            front, back = contig_data[s], contig_data[e]
+            chrom = front[CHR_NAM]
+            if chrom != back[CHR_NAM]:
+                continue
+            input_type2_count += 1
+            inside_st, inside_nd = sorted((
+                get_breakend_coord(front, 0),
+                get_breakend_coord(back, 1),
+            ))
+            if (
+                breakpoint_is_depth_balanced(
+                    depth_by_chrom, chrom, inside_st, inside_st,
+                    chr_len.get(chrom, 0), absolute_diff_threshold,
+                )
+                and breakpoint_is_depth_balanced(
+                    depth_by_chrom, chrom, inside_nd, inside_nd,
+                    chr_len.get(chrom, 0), absolute_diff_threshold,
+                )
+                and not censat_overlap_check(
+                    repeat_censat_data, chrom, inside_st, inside_nd,
+                )
+            ):
+                continue
+            type2_nclose_node[chrom].append((s, e))
+    logging.info(
+        "Conjoined final type2 after 3-sigma depth filter: %d -> %d "
+        "(absolute threshold: %.4f)",
+        input_type2_count, sum(map(len, type2_nclose_node.values())),
+        absolute_diff_threshold,
+    )
 
     def flip_dir(ctg):
         flipped = list(ctg)
@@ -6750,7 +6790,8 @@ def nclose_calc(
     )
     nclose_candidates = nclose_pipeline_state.candidates
 
-    # Conjoined candidates must not reintroduce filtered NCloses.
+    # Preserve the final NClose filters before applying the stricter
+    # conjoined-specific depth threshold.
     kept_pairs = {candidate.path_pair for candidate in nclose_candidates}
     filtered_type2_nodes = {
         chrom: [pair for pair in pairs if pair in kept_pairs]
@@ -6762,7 +6803,9 @@ def nclose_calc(
         sum(map(len, filtered_type2_nodes.values())),
     )
     with open(f"{context.prefix}/conjoined_type4_ins_del.pkl", "wb") as f:
-        pkl.dump(conjoined_type4(contig_data, filtered_type2_nodes), f)
+        pkl.dump(conjoined_type4(
+            contig_data, filtered_type2_nodes, depth_df, repeat_censat_data, chr_len,
+        ), f)
 
     nclose_nodes = candidates_to_legacy(nclose_candidates)
     transloc_nclose_pair_count, nclose_node_count = finalize_nclose_outputs(
