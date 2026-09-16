@@ -105,7 +105,10 @@ bash run.sh --option_skype="--skip_bam_analysis --add_indel_graph" HCC1937
 
 Use `--nclose-min-ref-span` to set the assembly NClose reference-anchor cutoff
 in bp (default: `1000`; `0` disables it). After the CEN-SAT merge, a pair is
-removed if either endpoint has `ref_end - ref_start <= cutoff`. Stage-24 raw-read
+removed if either endpoint has `ref_end - ref_start <= cutoff`, except candidates
+validated by the separate CEN-SAT endpoint-consistency route
+(`origin == "censat_endpoint_consistency"`). CEN-SAT labels alone do not exempt
+candidates from other routes. Stage-24 raw-read
 rescue candidates are unaffected. Changing this option requires rerunning stage 01.
 
 ```bash

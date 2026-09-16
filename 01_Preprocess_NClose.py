@@ -96,7 +96,9 @@ def build_parser() -> argparse.ArgumentParser:
         default=NCLOSE_DEFAULT_MIN_REF_SPAN,
         help=(
             "Remove assembly NCloses if either endpoint reference span is <= "
-            "this many bp (default: 1000; 0 disables the filter)"
+            "this many bp, except candidates validated by the CEN-SAT "
+            "endpoint-consistency route "
+            "(default: 1000; 0 disables the filter)"
         ),
     )
     parser.add_argument(

@@ -6319,6 +6319,7 @@ def make_nclose_filter_stage(name, filter_candidates):
 def filter_short_nclose_anchors(context, candidates):
     """Require both final assembly anchors to exceed the configured ref span.
 
+    Candidates validated by the CEN-SAT endpoint-consistency route are exempt.
     Run after the CEN-SAT merge. Raw-read rescue adds its candidates in
     stage 24, after this stage-01 filter, so those candidates are unaffected.
     """
@@ -6327,6 +6328,8 @@ def filter_short_nclose_anchors(context, candidates):
         return list(candidates), []
 
     def reject_reason(candidate):
+        if candidate.origin == "censat_endpoint_consistency":
+            return None
         lengths = [
             context.contig_data[idx][CHR_END]
             - context.contig_data[idx][CHR_STR]
