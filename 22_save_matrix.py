@@ -489,3 +489,9 @@ with open(f"{PREFIX}/tot_loc_list.pkl", "wb") as f:
     pkl.dump(tot_loc_list, f)
 
 np.save(f'{PREFIX}/B.npy', B)
+
+# Native output topology is tied to these exact matrix columns. No fitted
+# weights or display thresholds are involved in recording membership.
+if not pipeline_input_is_vcf(load_pipeline_input(PREFIX)):
+    from structure_nclose import build_structure_model, save_structure_model
+    save_structure_model(PREFIX, build_structure_model(PREFIX))

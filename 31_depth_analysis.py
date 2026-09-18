@@ -5,6 +5,11 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from skype_utils import *
 from circos_plotting import render_total_coverage_circos
 from skype_vcf_writer import write_vcf_record_with_fallback
+from structure_nclose import (
+    StructureWeights, add_virtual_structure, load_or_build_structure_model,
+    save_structure_model, set_path_splits, write_structure_reports,
+)
+from native_structure_output import display_events, write_native_bed, write_native_vcf
 from bp_step_depth_ratio import (
     BP_STEP_DEPTH_RATIO_B,
     BP_STEP_DEPTH_RATIO_PREDICT_B,
@@ -440,9 +445,19 @@ def build_vcf_header(contig_lengths):
         ("SVTYPE", 1, "String", "Type of structural variant"),
         ("END", 1, "Integer", "End position of SV"),
         ("SVLEN", 1, "Integer", "Length of the SV"),
-        ("WEIGHT", 1, "Float", "Depth for breakend"),
+        ("WEIGHT", 1, "Float", "Sum of structure weight times original NClose occurrence count, normalized by median depth divided by two"),
         ("CTG_NAME", 1, "String", "Name of contig for supporting variant"),
-        ("SVCLASS", 1, "String", "SKYPE event class"),
+        ("SVCLASS", ".", "String", "SKYPE source event classes"),
+        ("PARENT_IDS", ".", "String", "Contributing structure IDs, linked to structure_report.tsv"),
+        ("PARENT_WEIGHTS", ".", "Float", "Original normalized structure weights in PARENT_IDS order"),
+        ("PARENT_MULTIPLICITY", ".", "Integer", "Number of constituent occurrences with this exact adjacency in each parent, in PARENT_IDS order"),
+        ("NCLOSE_KEYS", ".", "String", "Original NClose node-index pairs, encoded as first:second"),
+        ("NCLOSE_IDS", ".", "String", "Original NClose IDs, linked to nclose_report.tsv"),
+        ("WEIGHT_METHOD", 1, "String", "STRUCTURE_SUM: sum of original structure weights times NClose occurrence counts"),
+        ("MODEL_WEIGHT", 1, "Float", "Sum of unique fitted feature occurrence contributions normalized by median depth divided by two"),
+        ("MODEL_FEATURE_COUNT", 1, "Integer", "Number of distinct positive fitted columns contributing to this BND"),
+        ("MODEL_OCCURRENCE_COUNT", 1, "Integer", "Number of contributing model occurrences across positive columns, after duplicate parent descriptions are removed"),
+        ("VIRTUAL_WEIGHT", 1, "Float", "Sum of virtual-inversion structure occurrence contributions; added to MODEL_WEIGHT"),
         ("STRANDS", 1, "String", "Breakpoint strandedness"),
         ("MATEID", 1, "String", "ID of mate breakend"),
         ("MERGE_MATEID", 1, "String", "ID of merged breakend"),
@@ -450,13 +465,13 @@ def build_vcf_header(contig_lengths):
             BP_STEP_DEPTH_RATIO_B,
             2,
             "Float",
-            "Signed breakpoint depth step divided by raw NClose depth in observed B; order is local,mate for BND and POS,END for symbolic SV",
+            "Signed breakpoint depth step divided by the exported support converted to raw depth in observed B; order is local,mate for BND and POS,END for symbolic SV",
         ),
         (
             BP_STEP_DEPTH_RATIO_PREDICT_B,
             2,
             "Float",
-            "Signed breakpoint depth step divided by raw NClose depth in predict_B; order is local,mate for BND and POS,END for symbolic SV",
+            "Signed breakpoint depth step divided by the exported support converted to raw depth in predict_B; order is local,mate for BND and POS,END for symbolic SV",
         ),
     ):
         header.add_info_line(collections.OrderedDict([
@@ -494,9 +509,12 @@ def write_bnd_vcf_pair(
     filter_str='.',
     merge_mate_ids=None,
     bp_ratio_info=None,
+    extra_info=None,
 ):
-    pos_a = max(1, int(pos_a))
-    pos_b = max(1, int(pos_b))
+    # Arguments are native PAF boundaries (0-based, half-open). VCF POS is
+    # the retained anchor base: left side = boundary, right = boundary + 1.
+    pos_a = int(pos_a) + (dir_a == '-')
+    pos_b = int(pos_b) + (dir_b == '+')
     strands = make_strands(dir_a, dir_b)
     form_a, form_b = choose_alt_forms(dir_a, dir_b)
     sv_id_a = f"{sv_id_base}_1"
@@ -511,13 +529,15 @@ def write_bnd_vcf_pair(
     )):
         info = collections.OrderedDict([
             ("SVTYPE", "BND"),
-            ("WEIGHT", round(weight_N, 2)),
+            ("WEIGHT", float(weight_N)),
             ("CTG_NAME", ctg_name),
-            ("STRANDS", strands),
+            ("STRANDS", strands if record_index == 0 else strands[::-1]),
             ("MATEID", mate_id),
         ])
         if merge_mate_ids:
             info["MERGE_MATEID"] = ",".join(merge_mate_ids)
+        if extra_info:
+            info.update(extra_info)
         add_ratio_info(info, bp_ratio_info, reverse=(record_index == 1))
         writer.write_record(vcfpy.Record(
             CHROM=chrom,
@@ -543,16 +563,19 @@ def write_symbolic_vcf_record(
     ctg_name,
     svclass=None,
     bp_ratio_info=None,
+    extra_info=None,
 ):
     info = collections.OrderedDict([
         ("SVTYPE", svtype),
         ("END", int(end)),
         ("SVLEN", int(svlen)),
-        ("WEIGHT", round(weight, 2)),
+        ("WEIGHT", float(weight)),
         ("CTG_NAME", ctg_name),
     ])
     if svclass is not None:
-        info["SVCLASS"] = svclass
+        info["SVCLASS"] = [svclass]
+    if extra_info:
+        info.update(extra_info)
     add_ratio_info(info, bp_ratio_info)
     writer.write_record(vcfpy.Record(
         CHROM=chrom,
@@ -705,9 +728,11 @@ def get_karyotype_next_state(curr_node, prev_node_name : int, curr_node_name : i
     next_ref = curr_node[CHR_STR] if next_incr == '+' else curr_node[CHR_END]
     return [curr_node[CHR_NAM], next_incr], next_ref
 
-def build_ctg_intype_split_bnds(weights, min_weight):
+def build_ctg_intype_split_bnds(weights, min_weight, include_usage=False):
     split_weight_by_key = defaultdict(float)
     split_parent_weight = defaultdict(float)
+    split_feature_usage = defaultdict(Counter)
+    split_parent_usage = defaultdict(Counter)
 
     for path_idx, (paf_loc, key_int_list) in enumerate(paf_ans_list):
         if path_idx >= len(weights):
@@ -792,6 +817,7 @@ def build_ctg_intype_split_bnds(weights, min_weight):
 
                     if ordered_breaks:
                         split_parent_weight[parent_nclose_idx] += path_weight
+                        split_parent_usage[parent_nclose_idx][path_idx] += 1
                         ctg_name = last_node[CTG_NAM]
                         for split_idx, (left, right) in enumerate(ordered_breaks, start=1):
                             split_key = (
@@ -806,11 +832,14 @@ def build_ctg_intype_split_bnds(weights, min_weight):
                                 ctg_name,
                             )
                             split_weight_by_key[split_key] += path_weight
+                            split_feature_usage[split_key][path_idx] += 1
 
             curr_chr, curr_ref = get_karyotype_next_state(
                 curr_node, prev_node_name, curr_node_name
             )
 
+    if include_usage:
+        return split_weight_by_key, split_parent_weight, split_feature_usage, split_parent_usage
     return split_weight_by_key, split_parent_weight
 
 def parse_optional_float(value):
@@ -1099,7 +1128,8 @@ def record_has_same_chrom_contiguous_span_path(record, prefix, weights, meandept
             return True
     return False
 
-def build_virtual_inv_events(prefix, meandepth, contig_lengths, min_depth_N=0.0, weights=None):
+def build_virtual_inv_events(prefix, meandepth, contig_lengths, min_depth_N=0.0, weights=None,
+                             span_min_depth_N=None):
     result_path = f'{prefix}/{RAW_TRANSLOCATION_RESULT_PKL}'
     if not os.path.isfile(result_path) or meandepth <= 0:
         return []
@@ -1122,7 +1152,9 @@ def build_virtual_inv_events(prefix, meandepth, contig_lengths, min_depth_N=0.0,
             continue
         if not (
             record_has_both_point_spans(record) or
-            record_has_same_chrom_contiguous_span_path(record, prefix, weights, meandepth, min_depth_N)
+            record_has_same_chrom_contiguous_span_path(
+                record, prefix, weights, meandepth,
+                min_depth_N if span_min_depth_N is None else span_min_depth_N)
         ):
             continue
 
@@ -1157,195 +1189,6 @@ def build_virtual_inv_events(prefix, meandepth, contig_lengths, min_depth_N=0.0,
             events.append((chrom_b, interval_b[0], interval_b[1], expected_depth, depth_N, f'RAW_TRANSLOCATION_PAIR_{pair_id}_B'))
 
     return events
-
-def _pairs_to_vcf(nclose_pairs, contig_data, contig_lengths, display_indel, amplicon_events, virtual_inv_events,
-                  split_bnd_weights, out_vcf_path, nclose_cn_std, raw_nclose_depth,
-                  bp_ratio_calculator):
-    with vcfpy.Writer.from_path(out_vcf_path, build_vcf_header(contig_lengths)) as writer:
-        # 2) Translocation, Inversion 처리
-        for nclose in nclose_pairs:
-            # 깊이 유의성(significant_nclose) 기반 PASS/FAIL 구분 제거: balanced(copy-number-neutral)
-            # translocation은 flanking depth 단차가 없어 FAIL로 강등됐지만 실제로는 진짜 junction이므로,
-            # 모든 breakend에 필터를 적용하지 않는다(FILTER='.'). 깊이 값 자체는 INFO의 WEIGHT로 남는다.
-            quality = 60
-            filter_str = '.'
-
-            a_idx, b_idx = nclose
-            bnd_nclose_ind = nclose2idx[nclose]
-            nclose_weight = nclose_cn_std[bnd_nclose_ind]
-
-            a = contig_data[a_idx]
-            b = contig_data[b_idx]
-
-            # Order anchors by contig coordinate so a = arm1 (junction at its contig-3' end)
-            # and b = arm2 (junction at its contig-5' end). The breakend adjacency is symmetric,
-            # so this canonical order yields a valid reciprocal mate pair regardless of how the
-            # derivative path actually traverses the contig (FOR/BAK).
-            if a[CTG_STR] > b[CTG_STR]:
-                a, b = b, a
-
-            dir_a = a[CTG_DIR]
-            dir_b = b[CTG_DIR]
-
-            chr_a, chr_b = a[CHR_NAM], b[CHR_NAM]
-            # Junction base depends on each anchor's SKYPE path direction (CTG_DIR):
-            #   arm1 exits at its contig-3' end  -> CHR_END if '+', else CHR_STR
-            #   arm2 enters at its contig-5' end -> CHR_STR if '+', else CHR_END
-            pos_a = a[CHR_END] if dir_a == '+' else a[CHR_STR]
-            pos_b = b[CHR_STR] if dir_b == '+' else b[CHR_END]
-
-            # if nclose not in nclose_set:
-            #     i1, i2 = conjoined_track_data[nclose]
-            #     merge_mate_id_str = f';MERGE_MATEID=SKYPE.BND.{i1},SKYPE.BND.{i2}'
-            #     ctg_name = f"{a[CTG_NAM]},{b[CTG_NAM]}"
-            # else:
-            ctg_name = a[CTG_NAM]
-
-            bp_ratio_info = bp_ratio_calculator.pair(
-                [
-                    (
-                        chr_a,
-                        pos_a,
-                        bnd_expected_high_side(dir_a, "exit"),
-                    ),
-                    (
-                        chr_b,
-                        pos_b,
-                        bnd_expected_high_side(dir_b, "entry"),
-                    ),
-                ],
-                raw_nclose_depth[nclose],
-            )
-
-            write_bnd_vcf_pair(
-                writer,
-                f"SKYPE.BND.{bnd_nclose_ind}",
-                chr_a,
-                pos_a,
-                dir_a,
-                chr_b,
-                pos_b,
-                dir_b,
-                nclose_weight / N,
-                ctg_name,
-                quality=quality,
-                filter_str=filter_str,
-                bp_ratio_info=bp_ratio_info,
-            )
-
-        for split_key, split_weight in sorted(split_bnd_weights.items()):
-            (
-                parent_nclose_idx,
-                split_idx,
-                chr_a,
-                pos_a,
-                dir_a,
-                chr_b,
-                pos_b,
-                dir_b,
-                ctg_name,
-            ) = split_key
-            write_bnd_vcf_pair(
-                writer,
-                f"SKYPE.BND.{parent_nclose_idx}.{split_idx}",
-                chr_a,
-                pos_a,
-                dir_a,
-                chr_b,
-                pos_b,
-                dir_b,
-                split_weight / N,
-                ctg_name,
-                merge_mate_ids=[
-                    f"SKYPE.BND.{parent_nclose_idx}_1",
-                    f"SKYPE.BND.{parent_nclose_idx}_2",
-                ],
-            )
-
-        # 3) indel 처리
-        #   front_jump -> DEL (reference 구간이 어셈블리에서 사라짐)
-        #   back_jump  -> DUP (reference 구간 [lo,hi]가 추가 카피로 재방문됨 = tandem duplication)
-        # depth 기반 검출은 novel insertion이 아니라 reference 구간의 copy 변화를 보므로,
-        # END/SVLEN은 reference span을 그대로 사용하고 POS<=END가 되도록 정규화한다.
-        dup_counter = 1
-        del_dounter = 1
-
-        for chrom, indel_list in display_indel.items():
-            for indel in indel_list:
-                indel_type, start, end, w, _, indel_idx, raw_depth = indel
-                lo, hi = min(start, end), max(start, end)
-                if indel_type == 'd':
-                    sv_id = f"SKYPE.DEL.{del_dounter}"
-                    svlen = -(hi - lo)
-                    svtype = "DEL"
-                    expected_high_sides = ("left", "right")
-
-                    del_dounter += 1
-                elif indel_type == 'i':
-                    sv_id = f"SKYPE.DUP.{dup_counter}"
-                    svlen = hi - lo
-                    svtype = "DUP"
-                    expected_high_sides = ("right", "left")
-
-                    dup_counter += 1
-                else:
-                    assert(False)
-
-                ctg_name = (
-                    f"INDEL_INDEX_{indel_idx}"
-                    if isinstance(indel_idx, int)
-                    else str(indel_idx)
-                )
-                bp_ratio_info = bp_ratio_calculator.pair(
-                    [
-                        (chrom, lo, expected_high_sides[0]),
-                        (chrom, hi, expected_high_sides[1]),
-                    ],
-                    raw_depth,
-                )
-                write_symbolic_vcf_record(
-                    writer,
-                    chrom,
-                    lo,
-                    sv_id,
-                    svtype,
-                    hi,
-                    svlen,
-                    w,
-                    ctg_name,
-                    bp_ratio_info=bp_ratio_info,
-                )
-
-        for amplicon_counter, (chrom, st, nd, _, depth_N, amplicon_idx) in enumerate(amplicon_events, start=1):
-            pos = max(1, int(min(st, nd)))
-            end = max(pos, int(max(st, nd)))
-            write_symbolic_vcf_record(
-                writer,
-                chrom,
-                pos,
-                f"SKYPE.AMP.{amplicon_counter}",
-                "DUP",
-                end,
-                end - pos,
-                depth_N,
-                f"AMPLICON_INDEX_{amplicon_idx}",
-                svclass="AMPLICON",
-            )
-
-        for inv_counter, (chrom, st, nd, _, depth_N, name) in enumerate(virtual_inv_events, start=1):
-            pos = max(1, int(st))
-            end = max(pos, int(nd))
-            write_symbolic_vcf_record(
-                writer,
-                chrom,
-                pos,
-                f"SKYPE.VINV.{inv_counter}",
-                "INV",
-                end,
-                end - pos,
-                depth_N,
-                name,
-            )
 
 parser = argparse.ArgumentParser(description="SKYPE depth analysis")
 
@@ -1390,6 +1233,8 @@ main_stat_loc = args.main_stat_loc
 TELOMERE_INFO_FILE_PATH = args.telomere_bed_path
 PREPROCESSED_PAF_FILE_PATH = args.ppc_paf_file_path
 pipeline_input_config = load_pipeline_input(PREFIX)
+native_context = None
+native_display_events = None
 
 RATIO_OUTLIER_FOLDER = f"{PREFIX}/11_ref_ratio_outliers/"
 front_contig_path = RATIO_OUTLIER_FOLDER+"front_jump/"
@@ -1626,6 +1471,7 @@ with open(f'{PREFIX}/ecdna_circuit_data.pkl', 'rb') as f:
     ecdna_circuit, _ = pkl.load(file=f)
 
 def build_amplicon_events(weights, min_weight=BREAKEND_REMARKABLE_CN):
+    """Legacy VCF-input display; native output uses StructureWeights."""
     events = []
     ecdna_offset = rpll + fclen // 4 + bclen // 4
     for i in range(rpll, len(weights)):
@@ -2120,117 +1966,131 @@ def draw_circos_plot(fig_prefix=''):
 
     logging.info(f'{msg_prefix} ratio : {round(sum(color_label[miss_B] == 3) / len(B) * 100, 3)}%')
 
-    nclose_cn = aggregate_bnd_weights_by_index(weights)
-    # ecDNA columns use their two circuit BNDs in the common NClose aggregate.
-    # The same ecDNA depth is also rendered as a dedicated dashed Amplicon
-    # link below, so remove only that component from the regular inversion
-    # link in this visualization.  TSV/VCF/BED retain the full aggregate.
-    displayed_ecdna_columns = {
-        ecdna_column_by_index[ecdna_idx]
-        for *_event_data, ecdna_idx in build_amplicon_events(weights)
-    }
-    ecdna_inv_cn = aggregate_bnd_weights_by_index(
-        weights,
-        active_columns=displayed_ecdna_columns,
-    )
-
-    split_bnd_weights, split_parent_weight = build_ctg_intype_split_bnds(
-        weights, BREAKEND_REMARKABLE_CN
-    )
-    adjusted_nclose_cn = defaultdict(float, nclose_cn)
-    for parent_nclose_idx, split_weight in split_parent_weight.items():
-        adjusted_nclose_cn[parent_nclose_idx] = max(
-            0.0, adjusted_nclose_cn[parent_nclose_idx] - split_weight
+    if native_context is not None:
+        rdf = rebin_dataframe(df, 2)
+        fragment_depth_per_chrom = {
+            structure["chrom"]: (structure["side"], structure["raw_weight"])
+            for structure in native_context.structures.values()
+            if structure["kind"] == "CENTROMERE"
+        }
+        telo_cn = defaultdict(float, native_context.telomere_weights)
+        inv_val_list, transloc_val_list, indel_val_list = native_context.cn_lists()
+        bnd_cn_data = [
+            [event["link"][0], event["link"][1], event["weight"], event["link_type"]]
+            for event in native_display_events if "link" in event
+        ]
+    else:
+        nclose_cn = aggregate_bnd_weights_by_index(weights)
+        # ecDNA columns use their two circuit BNDs in the common NClose aggregate.
+        # The same ecDNA depth is also rendered as a dedicated dashed Amplicon
+        # link below, so remove only that component from the regular inversion
+        # link in this visualization.  TSV/VCF/BED retain the full aggregate.
+        displayed_ecdna_columns = {
+            ecdna_column_by_index[ecdna_idx]
+            for *_event_data, ecdna_idx in build_amplicon_events(weights)
+        }
+        ecdna_inv_cn = aggregate_bnd_weights_by_index(
+            weights,
+            active_columns=displayed_ecdna_columns,
         )
+
+        split_bnd_weights, split_parent_weight = build_ctg_intype_split_bnds(
+            weights, BREAKEND_REMARKABLE_CN
+        )
+        adjusted_nclose_cn = defaultdict(float, nclose_cn)
+        for parent_nclose_idx, split_weight in split_parent_weight.items():
+            adjusted_nclose_cn[parent_nclose_idx] = max(
+                0.0, adjusted_nclose_cn[parent_nclose_idx] - split_weight
+            )
     
-    # with open(f"{PREFIX}/nclose_cn.txt", "wt") as f:
-    #     for k, v in nclose_cn.items():
-    #         if v > BREAKEND_REMARKABLE_CN:
-    #             curr_nclose = reverse_nclose_dict[k]
-    #             print(contig_data[curr_nclose[0]], "\n", contig_data[curr_nclose[1]], "\n", v, "\n", file=f)
+        # with open(f"{PREFIX}/nclose_cn.txt", "wt") as f:
+        #     for k, v in nclose_cn.items():
+        #         if v > BREAKEND_REMARKABLE_CN:
+        #             curr_nclose = reverse_nclose_dict[k]
+        #             print(contig_data[curr_nclose[0]], "\n", contig_data[curr_nclose[1]], "\n", v, "\n", file=f)
 
 
-    rdf = rebin_dataframe(df, 2)
+        rdf = rebin_dataframe(df, 2)
 
-    fragment_depth_per_chrom = {}
-    for i, paf_loc in enumerate(tot_loc_list):
-        if paf_loc.split('/')[-3] == '12_cent_fragment':
-            chrom = paf_loc.split('/')[-2]
-            side = paf_loc.split('/')[-1].split('.')[0]
-            fragment_depth_per_chrom[chrom] = (side, float(weights[i]))
+        fragment_depth_per_chrom = {}
+        for i, paf_loc in enumerate(tot_loc_list):
+            if paf_loc.split('/')[-3] == '12_cent_fragment':
+                chrom = paf_loc.split('/')[-2]
+                side = paf_loc.split('/')[-1].split('.')[0]
+                fragment_depth_per_chrom[chrom] = (side, float(weights[i]))
 
-    telo_cn = defaultdict(float)
-    for i, ctr in enumerate(path_telo_usage):
-        for j, v in ctr.items():
-            telo_cn[j] += v*weights[i]
+        telo_cn = defaultdict(float)
+        for i, ctr in enumerate(path_telo_usage):
+            for j, v in ctr.items():
+                telo_cn[j] += v*weights[i]
 
-    inv_val_list = []
-    transloc_val_list = []
-    bnd_cn_data = []
+        inv_val_list = []
+        transloc_val_list = []
+        bnd_cn_data = []
 
-    for k in nclose_cn:
-        v = adjusted_nclose_cn[k]
-        pos1, pos2 = nclose_str_pos[k]
-        idx1, idx2 = idx2nclose[k]
-        chr_nam1 = contig_data[idx1][CHR_NAM]
-        chr_nam2 = contig_data[idx2][CHR_NAM]
+        for k in nclose_cn:
+            v = adjusted_nclose_cn[k]
+            pos1, pos2 = nclose_str_pos[k]
+            idx1, idx2 = idx2nclose[k]
+            chr_nam1 = contig_data[idx1][CHR_NAM]
+            chr_nam2 = contig_data[idx2][CHR_NAM]
 
-        event_type = 'breakend'
-        if chr_nam1 != chr_nam2 and v > BREAKEND_REMARKABLE_CN:
-            transloc_val_list.append(v / meandepth * 2)
-        elif chr_nam1 == chr_nam2 and contig_data[idx1][CTG_DIR] != contig_data[idx2][CTG_DIR]:
-            event_type = 'inversion'
-            ecdna_component = min(v, ecdna_inv_cn[k])
-            if ecdna_component > 0:
-                v -= ecdna_component
-            if v > BREAKEND_REMARKABLE_CN:
-                inv_val_list.append(v / meandepth * 2)
+            event_type = 'breakend'
+            if chr_nam1 != chr_nam2 and v > BREAKEND_REMARKABLE_CN:
+                transloc_val_list.append(v / meandepth * 2)
+            elif chr_nam1 == chr_nam2 and contig_data[idx1][CTG_DIR] != contig_data[idx2][CTG_DIR]:
+                event_type = 'inversion'
+                ecdna_component = min(v, ecdna_inv_cn[k])
+                if ecdna_component > 0:
+                    v -= ecdna_component
+                if v > BREAKEND_REMARKABLE_CN:
+                    inv_val_list.append(v / meandepth * 2)
         
-        if v > BREAKEND_REMARKABLE_CN:
-            bnd_cn_data.append([(chr_nam1, pos1), (chr_nam2, pos2), v, event_type])
+            if v > BREAKEND_REMARKABLE_CN:
+                bnd_cn_data.append([(chr_nam1, pos1), (chr_nam2, pos2), v, event_type])
 
-    for split_key, v in sorted(split_bnd_weights.items()):
-        (
-            _parent_nclose_idx,
-            _split_idx,
-            chr_a,
-            pos_a,
-            dir_a,
-            chr_b,
-            pos_b,
-            dir_b,
-            _ctg_name,
-        ) = split_key
-        if v <= BREAKEND_REMARKABLE_CN:
-            continue
+        for split_key, v in sorted(split_bnd_weights.items()):
+            (
+                _parent_nclose_idx,
+                _split_idx,
+                chr_a,
+                pos_a,
+                dir_a,
+                chr_b,
+                pos_b,
+                dir_b,
+                _ctg_name,
+            ) = split_key
+            if v <= BREAKEND_REMARKABLE_CN:
+                continue
 
-        event_type = 'breakend'
-        if chr_a != chr_b:
-            transloc_val_list.append(v / meandepth * 2)
-        elif dir_a != dir_b:
-            inv_val_list.append(v / meandepth * 2)
-            event_type = 'inversion'
-        bnd_cn_data.append([(chr_a, pos_a), (chr_b, pos_b), v, event_type])
+            event_type = 'breakend'
+            if chr_a != chr_b:
+                transloc_val_list.append(v / meandepth * 2)
+            elif dir_a != dir_b:
+                inv_val_list.append(v / meandepth * 2)
+                event_type = 'inversion'
+            bnd_cn_data.append([(chr_a, pos_a), (chr_b, pos_b), v, event_type])
 
-    indel_val_list = []
-    for event in build_aggregated_indel_events(weights, BREAKEND_REMARKABLE_CN):
-        bnd_cn_data.append([
-            (event["chrom"], event["st"]),
-            (event["chrom"], event["nd"]),
-            event["weight"],
-            'indel',
-        ])
-        indel_val_list.append(event["weight"] / meandepth * 2)
+        indel_val_list = []
+        for event in build_aggregated_indel_events(weights, BREAKEND_REMARKABLE_CN):
+            bnd_cn_data.append([
+                (event["chrom"], event["st"]),
+                (event["chrom"], event["nd"]),
+                event["weight"],
+                'indel',
+            ])
+            indel_val_list.append(event["weight"] / meandepth * 2)
 
-    for chrom, st, nd, raw_weight, _, _ in build_amplicon_events(weights):
-        bnd_cn_data.append([(chrom, st), (chrom, nd), raw_weight, 'amplicon'])
+        for chrom, st, nd, raw_weight, _, _ in build_amplicon_events(weights):
+            bnd_cn_data.append([(chrom, st), (chrom, nd), raw_weight, 'amplicon'])
 
-    virtual_inv_events = build_virtual_inv_events(
-        PREFIX, meandepth, chr_len, min_depth_N=BREAKEND_REMARKABLE_CN / N, weights=weights
-    )
-    for chrom, st, nd, expected_depth, depth_N, _ in virtual_inv_events:
-        bnd_cn_data.append([(chrom, st), (chrom, nd), expected_depth, 'virtual_inv'])
-        inv_val_list.append(depth_N)
+        virtual_inv_events = build_virtual_inv_events(
+            PREFIX, meandepth, chr_len, min_depth_N=BREAKEND_REMARKABLE_CN / N, weights=weights
+        )
+        for chrom, st, nd, expected_depth, depth_N, _ in virtual_inv_events:
+            bnd_cn_data.append([(chrom, st), (chrom, nd), expected_depth, 'virtual_inv'])
+            inv_val_list.append(depth_N)
 
     a = sorted(list(telo_cn.items()), key = lambda t:t[1])
     telo_zorder_dict = {}
@@ -2306,122 +2166,95 @@ def draw_circos_plot(fig_prefix=''):
 
 weights = np.load(f'{PREFIX}/weight.npy')
 
-# Assign report IDs to ecDNA inversion NCloses whose Amplicon is visible in
-# the single raw-weight BED, using its strict >5%-of-median raw-depth gate.
-nclose_stage_weights = {"base": weights}
-visible_ecdna_indices = bed_visible_ecdna_indices_across_stages(
-    nclose_stage_weights,
-    ecdna_column_by_index,
-    BREAKEND_REMARKABLE_CN,
-)
-nclose_event_catalog = replace_catalog_ecdna_events(
-    PREFIX,
-    [ecdna_circuit[ecdna_idx] for ecdna_idx in visible_ecdna_indices],
-    contig_data,
-    circuit_indices=visible_ecdna_indices,
-)
-all_report_bnd_keys = bnd_event_keys(nclose_event_catalog)
-visible_ecdna_index_set = set(visible_ecdna_indices)
-for ecdna_idx, column_idx in ecdna_column_by_index.items():
-    tracked_keys = (
-        all_report_bnd_keys
-        if ecdna_idx in visible_ecdna_index_set
-        else catalog_bnd_keys
+if not pipeline_input_is_vcf(pipeline_input_config):
+    structure_model = load_or_build_structure_model(PREFIX, contig_data)
+    # The path-span qualification keeps its original CN threshold. Only the
+    # display cutoff is deferred until all structure contributions are summed.
+    qualified_virtual_views = build_virtual_inv_events(
+        PREFIX, meandepth, chr_len, min_depth_N=0.0, weights=weights,
+        span_min_depth_N=VCF_FILTER_DEPTH_N,
     )
-    nclose_path_usage[column_idx] = count_ecdna_circuit_events(
-        ecdna_circuit[ecdna_idx], tracked_keys
+    virtual_by_pair = defaultdict(list)
+    for chrom, st, nd, raw_weight, _, name in qualified_virtual_views:
+        pair_id = int(re.fullmatch(r"RAW_TRANSLOCATION_PAIR_(\d+)(?:_[AB])?", name)[1])
+        virtual_by_pair[pair_id].append((chrom, st, nd, raw_weight))
+    if virtual_by_pair:
+        with open(f"{PREFIX}/{RAW_TRANSLOCATION_RESULT_PKL}", "rb") as handle:
+            virtual_records = {int(record["pair_id"]): record for record in pkl.load(handle)}
+        for pair_id, views in sorted(virtual_by_pair.items()):
+            add_virtual_structure(structure_model, virtual_records[pair_id], views[0][3],
+                                  [(c, st, nd) for c, st, nd, _ in views], contig_data)
+    # Split membership is topology, so zero/small fitted coefficients must not
+    # hide it. The helper's temporary weights are discarded; only counts remain.
+    _, _, split_feature_usage, split_parent_usage = build_ctg_intype_split_bnds(
+        np.ones(len(weights)), 0.0, include_usage=True,
     )
-save_path_usage(PREFIX, nclose_path_usage)
-nclose_filter_status = reconcile_filter_status_catalog(
-    nclose_filter_status,
-    nclose_event_catalog,
-    nclose_path_usage,
-)
-save_filter_status(PREFIX, nclose_filter_status)
-nclose_id_by_event_key = nclose_event_id_by_key(nclose_event_catalog)
+    set_path_splits(structure_model, split_feature_usage, split_parent_usage, idx2nclose)
+    native_context = StructureWeights(structure_model, weights, N)
+    save_structure_model(PREFIX, structure_model)
+    write_structure_reports(PREFIX, native_context, nclose_filter_status)
+    native_display_events = display_events(native_context, contig_data, cen_fragment_meta)
+else:
+    # Assign report IDs to ecDNA inversion NCloses whose Amplicon is visible in
+    # the single raw-weight BED, using its strict >5%-of-median raw-depth gate.
+    nclose_stage_weights = {"base": weights}
+    visible_ecdna_indices = bed_visible_ecdna_indices_across_stages(
+        nclose_stage_weights,
+        ecdna_column_by_index,
+        BREAKEND_REMARKABLE_CN,
+    )
+    nclose_event_catalog = replace_catalog_ecdna_events(
+        PREFIX,
+        [ecdna_circuit[ecdna_idx] for ecdna_idx in visible_ecdna_indices],
+        contig_data,
+        circuit_indices=visible_ecdna_indices,
+    )
+    all_report_bnd_keys = bnd_event_keys(nclose_event_catalog)
+    visible_ecdna_index_set = set(visible_ecdna_indices)
+    for ecdna_idx, column_idx in ecdna_column_by_index.items():
+        tracked_keys = (
+            all_report_bnd_keys
+            if ecdna_idx in visible_ecdna_index_set
+            else catalog_bnd_keys
+        )
+        nclose_path_usage[column_idx] = count_ecdna_circuit_events(
+            ecdna_circuit[ecdna_idx], tracked_keys
+        )
+    save_path_usage(PREFIX, nclose_path_usage)
+    nclose_filter_status = reconcile_filter_status_catalog(
+        nclose_filter_status,
+        nclose_event_catalog,
+        nclose_path_usage,
+    )
+    save_filter_status(PREFIX, nclose_filter_status)
+    nclose_id_by_event_key = nclose_event_id_by_key(nclose_event_catalog)
 
-write_nclose_report(
-    PREFIX,
-    nclose_event_catalog,
-    nclose_path_usage,
-    nclose_filter_status,
-    N,
-    nclose_stage_weights,
-    False,
-)
+    write_nclose_report(
+        PREFIX,
+        nclose_event_catalog,
+        nclose_path_usage,
+        nclose_filter_status,
+        N,
+        nclose_stage_weights,
+        False,
+    )
 draw_circos_plot()
 
 # Parse as vcf
 def pairs_to_vcf():
-    weights = np.load(f'{PREFIX}/weight.npy')
-    raw_event_depth = aggregate_nclose_event_weights(weights)
     observed_clean_depth = B[:filter_len]
     predicted_clean_depth = np.load(f'{PREFIX}/predict_B.npy')[:filter_len]
-    bp_ratio_calculator = BreakpointStepDepthRatio(
+    ratios = BreakpointStepDepthRatio(
         chr_filt_st_list,
         observed_clean_depth,
         predicted_clean_depth,
         bed_data,
     )
-    nclose_cn_std = aggregate_bnd_weights_by_index(weights)
-    split_bnd_weights, split_parent_weight = build_ctg_intype_split_bnds(
-        weights, VCF_FILTER_DEPTH_N * N
+    bnd_count, record_count = write_native_vcf(
+        native_context, chr_len, f"{PREFIX}/SV_call_result.vcf", ratios,
+        build_vcf_header, write_bnd_vcf_pair, write_symbolic_vcf_record,
     )
-    adjusted_nclose_cn_std = defaultdict(float, nclose_cn_std)
-    for parent_nclose_idx, split_weight in split_parent_weight.items():
-        adjusted_nclose_cn_std[parent_nclose_idx] = max(
-            0.0, adjusted_nclose_cn_std[parent_nclose_idx] - split_weight
-        )
-
-    type1_nclose_node = set()
-    type2_nclose_node = set()
-
-    for nclose in nclose_set:
-        s, e = nclose
-        if contig_data[s][CHR_NAM] != contig_data[e][CHR_NAM]:
-            type1_nclose_node.add(nclose)
-        else:
-            type2_nclose_node.add(nclose)
-
-    display_indel = defaultdict(list)
-    amplicon_events = build_amplicon_events(weights)
-    virtual_inv_events = build_virtual_inv_events(
-        PREFIX, meandepth, chr_len, min_depth_N=VCF_FILTER_DEPTH_N, weights=weights
-    )
-
-    # Gate must match make_bed_output() so SKYPE_result.bed and SV_call_result.vcf
-    # report the SAME jump (DEL/DUP) call set.  This includes type4 indel graph
-    # edges embedded inside ordinary paths by --add_indel_graph.
-    for event in build_aggregated_indel_events(weights, BREAKEND_REMARKABLE_CN):
-        chrom = event["chrom"]
-        display_indel[chrom].append((
-            event["event_type"],
-            event["st"],
-            event["nd"],
-            event["weight"] / N,
-            chrom,
-            indel_event_source_label(event),
-            event["weight"],
-        ))
-    
-    all_nclose = []
-    for nclose in nclose_set:
-        if adjusted_nclose_cn_std[nclose2idx[nclose]] > VCF_FILTER_DEPTH_N * N:
-            all_nclose.append(nclose)
-                
-    indel_event_count = sum(len(indel_list) for indel_list in display_indel.values())
-    amplicon_event_count = len(amplicon_events)
-    logging.info(
-        f"Total called breakends (DUP, DEL, BND, INV, AMP) : "
-        f"{len(all_nclose) + len(split_bnd_weights) + indel_event_count + amplicon_event_count + len(virtual_inv_events)}"
-    )
-
-    vcf_path = f"{PREFIX}/SV_call_result.vcf"
-    _pairs_to_vcf(
-        all_nclose, contig_data, chr_len, display_indel, amplicon_events, virtual_inv_events,
-        split_bnd_weights, vcf_path, adjusted_nclose_cn_std, raw_event_depth,
-        bp_ratio_calculator
-    )
+    logging.info("Native VCF: %d unique BND adjacencies, %d records", bnd_count, record_count)
 
 if pipeline_input_is_vcf(pipeline_input_config):
     write_annotated_input_vcf(weights)
@@ -2430,107 +2263,8 @@ else:
 
 # Bed output for further analysis
 
-def make_bed_output():
-    weights = np.load(f'{PREFIX}/weight.npy')
-    nclose_cn = aggregate_bnd_weights_by_index(weights)
-
-    split_bnd_weights, split_parent_weight = build_ctg_intype_split_bnds(
-        weights, BREAKEND_REMARKABLE_CN
-    )
-    adjusted_nclose_cn = defaultdict(float, nclose_cn)
-    for parent_nclose_idx, split_weight in split_parent_weight.items():
-        adjusted_nclose_cn[parent_nclose_idx] = max(
-            0.0, adjusted_nclose_cn[parent_nclose_idx] - split_weight
-        )
-
-    def point_interval(pos):
-        pos = int(pos)
-        return max(0, pos - 1), pos
-    
-    with open(f'{PREFIX}/SKYPE_result.bed', 'w') as f:
-        cf = csv.writer(f, delimiter='\t')
-        cf.writerow([
-            '#chrom', 'cordst', 'cordnd', 'type', 'weight (N)', 'nclose_id'
-        ])
-
-    
-        for nclose_ind in nclose_cn:
-            v = adjusted_nclose_cn[nclose_ind]
-            if v > BREAKEND_REMARKABLE_CN:
-                event_key = idx2nclose[nclose_ind]
-                nclose_id = nclose_id_by_event_key[event_key]
-                for ind in event_key:
-                    cf.writerow([contig_data[ind][CHR_NAM], contig_data[ind][CHR_STR], contig_data[ind][CHR_END],
-                                'Breakend', round(v / N, 2), nclose_id])
-
-        for split_key, v in sorted(split_bnd_weights.items()):
-            (
-                parent_nclose_idx,
-                _split_idx,
-                chr_a,
-                pos_a,
-                _dir_a,
-                chr_b,
-                pos_b,
-                _dir_b,
-                _ctg_name,
-            ) = split_key
-            if v > BREAKEND_REMARKABLE_CN:
-                nclose_id = nclose_id_by_event_key[
-                    idx2nclose[parent_nclose_idx]
-                ]
-                st, nd = point_interval(pos_a)
-                cf.writerow([
-                    chr_a, st, nd, 'Breakend', round(v / N, 2), nclose_id
-                ])
-                st, nd = point_interval(pos_b)
-                cf.writerow([
-                    chr_b, st, nd, 'Breakend', round(v / N, 2), nclose_id
-                ])
-
-        for event in build_aggregated_indel_events(weights, BREAKEND_REMARKABLE_CN):
-            cf.writerow([
-                event["chrom"], event["st"], event["nd"],
-                'Deletion' if event["event_type"] == 'd' else 'Duplication',
-                round(event["weight"] / N, 2),
-                nclose_id_by_event_key[event["event_key"]],
-            ])
-
-        for i in range(rpll, min(len(weights), len(tot_loc_list))):
-            v = weights[i]
-            if v <= BREAKEND_REMARKABLE_CN:
-                continue
-
-            paf_loc = tot_loc_list[i]
-            if paf_loc.split('/')[-3] == '12_cent_fragment':
-                chrom = paf_loc.split('/')[-2]
-                info = cen_fragment_meta[chrom]
-                if info["dir"]:
-                    st, nd = info["mid"], info["chr_len"]
-                else:
-                    st, nd = 0, info["mid"]
-                centromere_arm = f'{chrom}{"q" if info["dir"] else "p"}'
-                cf.writerow([
-                    chrom, st, nd, 'Centromere', round(v / N, 2),
-                    centromere_arm,
-                ])
-
-        for chrom, st, nd, _, depth_N, ecdna_idx in build_amplicon_events(weights):
-            cf.writerow([
-                chrom, st, nd, 'Amplicon', round(depth_N, 2),
-                ecdna_nclose_id_text(ecdna_idx),
-            ])
-
-        for chrom, st, nd, _, depth_N, name in build_virtual_inv_events(
-            PREFIX, meandepth, chr_len, min_depth_N=BREAKEND_REMARKABLE_CN / N, weights=weights
-        ):
-            cf.writerow([
-                chrom, st, nd, 'Virtual_inversion', round(depth_N, 2), name
-            ])
-
-
-if not pipeline_input_is_vcf(pipeline_input_config):
-    make_bed_output()
+if native_context is not None:
+    write_native_bed(PREFIX, native_display_events)
 
 matrix_path = f'{PREFIX}/matrix.h5'
 if os.path.isfile(matrix_path):
