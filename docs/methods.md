@@ -11,6 +11,10 @@ workflow described in [usage](usage.md#input-workflows).
 An NClose is the original junction unit tracked through SKYPE's assembly
 processing and depth model. Its alignment chain can contain internal pieces;
 the current output does not generally split that chain into primitive junctions.
+Distinct source pairs with exactly equal BND endpoints and retained sides reuse
+one native accounting identity, preferring an existing compressed-graph NClose.
+Source-specific alignments, path splits and occurrence counts remain separate.
+This does not change the graph's broader spatial compression or AMP eligibility.
 
 | Term | Role |
 | --- | --- |

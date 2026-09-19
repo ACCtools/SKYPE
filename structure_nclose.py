@@ -20,7 +20,7 @@ from nclose_tracking import (
 )
 
 MODEL_FILE = "structure_nclose_model.pkl"
-MODEL_VERSION = 1
+MODEL_VERSION = 2
 
 
 def read_pickle(prefix, name):
@@ -45,7 +45,47 @@ def key_text(key):
     return ":".join(map(str, key))
 
 
-def count_path_members(path, bnd_keys, edge_events, constituents):
+def initialize_nclose_registry(model):
+    """Keep source pairs, but reuse one identity per exact native BND geometry."""
+    if "nclose_sources" in model:
+        return
+    events = list(model["ncloses"].values())
+    model.update(ncloses={}, nclose_sources={}, nclose_aliases={}, bnd_by_endpoints={})
+    # Prefer the existing compressed-graph identity over restored AMP sources.
+    for event in sorted(events, key=lambda e: e.get("source") != "compressed_nclose_nodes_list.txt"):
+        register_nclose(model, event)
+
+
+def register_nclose(model, event):
+    initialize_nclose_registry(model)
+    key = event["event_key"]
+    if key in model["nclose_sources"]:
+        return model["nclose_aliases"][key]
+    geometry = tuple(sorted(event["endpoints"])) if event["kind"] == "bnd" else None
+    canonical = model["bnd_by_endpoints"].get(geometry, key) if geometry is not None else key
+    event = dict(event)
+    if canonical == key:
+        if "nclose_id" not in event:
+            event["nclose_id"] = f"SKYPE.nclose.{model['next_nclose_id']}"
+            model["next_nclose_id"] += 1
+        model["ncloses"][key] = event
+        if geometry is not None:
+            model["bnd_by_endpoints"][geometry] = key
+    model["nclose_sources"][key] = event
+    model["nclose_aliases"][key] = canonical
+    return canonical
+
+
+def set_structure_membership(model, structure, source_counts):
+    """Combine identities after source-position counting; preserve real repeats."""
+    structure["source_nclose_counts"] = Counter(source_counts)
+    counts = Counter()
+    for key, count in source_counts.items():
+        counts[model["nclose_aliases"][key]] += count
+    structure["nclose_counts"] = counts
+
+
+def count_path_members(path, bnd_keys, edge_events, constituents, aliases=None):
     """Count traversals, resolving aliases at the same traversal position.
 
     Distinct positions add, even when they visit the same original NClose.
@@ -65,7 +105,24 @@ def count_path_members(path, bnd_keys, edge_events, constituents):
     for pos, (a, b) in enumerate(zip(path, path[1:])):
         event = edge_events.get((tuple(a[:2]), tuple(b[:2])))
         if event is not None:
-            at_position[pos] |= constituents[event]
+            if aliases is None:
+                at_position[pos] |= constituents[event]
+            else:
+                # Direct and compound descriptions of one traversal can use
+                # different source pairs for the same exact NClose. Take their
+                # maximum multiplicity at this position, not their sum.
+                existing, incoming = Counter(), Counter()
+                for key, count in at_position[pos].items():
+                    existing[aliases[key]] += count
+                for key, count in constituents[event].items():
+                    incoming[aliases[key]] += count
+                for key, count in constituents[event].items():
+                    canonical = aliases[key]
+                    extra = min(max(0, count - at_position[pos][key]),
+                                max(0, incoming[canonical] - existing[canonical]))
+                    if extra:
+                        at_position[pos][key] += extra
+                        existing[canonical] += extra
     total = Counter()
     for counts in at_position.values():
         total.update(counts)
@@ -73,16 +130,15 @@ def count_path_members(path, bnd_keys, edge_events, constituents):
 
 
 def add_bnd_metadata(model, key, nodes, source, layout=None):
+    initialize_nclose_registry(model)
     key = tuple(sorted(key))
-    if key in model["ncloses"]:
-        return
+    if key in model["nclose_sources"]:
+        return model["nclose_aliases"][key]
     event = _build_bnd_event(key, nodes, source)
     endpoints, names = (layout_endpoints(layout) if layout is not None
                         else node_pair_endpoints(nodes, key))
-    event.update(nclose_id=f"SKYPE.nclose.{model['next_nclose_id']}",
-                 endpoints=endpoints, contig_names=names)
-    model["next_nclose_id"] += 1
-    model["ncloses"][key] = event
+    event.update(endpoints=endpoints, contig_names=names)
+    return register_nclose(model, event)
 
 
 def build_structure_model(prefix, nodes=None):
@@ -102,7 +158,7 @@ def build_structure_model(prefix, nodes=None):
                  next_nclose_id=len(catalog) + 1, column_count=len(locations))
     constituents = {}
     event_by_location = {}
-    for original in catalog:
+    for original in sorted(catalog, key=lambda e: e.get("source") != "compressed_nclose_nodes_list.txt"):
         event = dict(original)
         key = event["event_key"]
         if event["kind"] == "indel":
@@ -114,7 +170,7 @@ def build_structure_model(prefix, nodes=None):
         event["nclose_id"] = ids[key]
         if event["kind"] == "bnd":
             event["endpoints"], event["contig_names"] = node_pair_endpoints(nodes, key)
-        model["ncloses"][key] = event
+        register_nclose(model, event)
         constituents[key] = Counter({key: 1})
     # IDs for all original catalog events are reserved, including compound
     # aliases that are now structure metadata rather than actual NClose rows.
@@ -138,7 +194,7 @@ def build_structure_model(prefix, nodes=None):
             path = path_dict[path_loc.parent.name][int(path_loc.stem) - 1][0]
             structure["kind"] = "PATH"
             structure["nclose_counts"] = count_path_members(
-                path, bnd_keys, edge_events, constituents)
+                path, bnd_keys, edge_events, constituents, model["nclose_aliases"])
             # Actual path ends identify telomere-bearing graph nodes.
             structure["telomere_counts"].update([path[1][1], path[-2][1]])
         elif loc.parent.name in {"front_jump", "back_jump"}:
@@ -160,6 +216,7 @@ def build_structure_model(prefix, nodes=None):
                              side=loc.stem)
         else:
             raise ValueError(f"Unknown native matrix feature: {location}")
+        set_structure_membership(model, structure, structure["nclose_counts"])
         model["structures"].append(structure)
     return model
 
@@ -188,20 +245,24 @@ def add_virtual_structure(model, record, raw_weight, views, nodes):
         key = tuple(sorted(record[f"nclose_key_{side}"]))
         add_bnd_metadata(model, key, nodes, "VIRTUAL_INV", record[f"layout_{side}"])
         counts[key] += 1
-    model["structures"].append(dict(
+    structure = dict(
         structure_id=f"SKYPE.STRUCTURE.VIRTUAL_INV.{pair_id}", kind="VIRTUAL_INV",
         feature_index=None, source=f"raw_translocation_result.pkl:{pair_id}",
         legacy_ids=[f"RAW_TRANSLOCATION_PAIR_{pair_id}"], nclose_counts=counts,
-        telomere_counts=Counter(), raw_weight=float(raw_weight), views=views))
+        telomere_counts=Counter(), raw_weight=float(raw_weight), views=views)
+    set_structure_membership(model, structure, counts)
+    model["structures"].append(structure)
 
 
 def set_path_splits(model, feature_usage, parent_usage, idx_to_key):
+    initialize_nclose_registry(model)
     splits = []
     for number, (key, counts) in enumerate(sorted(feature_usage.items()), 1):
         parent, split_index, ca, pa, da, cb, pb, db, name = key
         parent_key = idx_to_key[parent]
+        canonical = model["nclose_aliases"][parent_key]
         splits.append(dict(
-            projection_id=f"{model['ncloses'][parent_key]['nclose_id']}.PATH_SPLIT.{number}",
+            projection_id=f"{model['ncloses'][canonical]['nclose_id']}.PATH_SPLIT.{number}",
             parent_key=parent_key, split_index=split_index, contig_names=(name,),
             endpoints=((ca, int(pa), "L" if da == "+" else "R"),
                        (cb, int(pb), "R" if db == "+" else "L")),
@@ -212,6 +273,7 @@ def set_path_splits(model, feature_usage, parent_usage, idx_to_key):
 
 class StructureWeights:
     def __init__(self, model, weights, n_unit):
+        initialize_nclose_registry(model)
         if len(weights) != model["column_count"]:
             raise ValueError("Structure model and fitted column count differ; rebuild stage 22")
         self.model, self.n_unit = model, float(n_unit)
@@ -221,12 +283,16 @@ class StructureWeights:
         self.by_nclose = defaultdict(list)
         self.telomere_weights = defaultdict(float)
         for structure in self.structures.values():
+            set_structure_membership(model, structure,
+                                     structure.get("source_nclose_counts", structure["nclose_counts"]))
             col = structure["feature_index"]
             if col is not None:
                 structure["raw_weight"] = float(weights[col])
             structure["weight_N"] = structure["raw_weight"] / self.n_unit
             for key, count in structure["nclose_counts"].items():
-                row = self.contribution(structure, key, count)
+                sources = {source: n for source, n in structure["source_nclose_counts"].items()
+                           if model["nclose_aliases"][source] == key}
+                row = self.contribution(structure, key, count, source_counts=sources)
                 self.contributions.append(row)
                 self.by_nclose[key].append(row)
             for node, count in structure["telomere_counts"].items():
@@ -239,7 +305,10 @@ class StructureWeights:
             for key, rows in self.projected_rows.items()}
         model["n_unit"] = self.n_unit
 
-    def contribution(self, structure, key, count, projection_id=None):
+    def contribution(self, structure, key, count, projection_id=None, source_counts=None):
+        source_counts = {key: count} if source_counts is None else source_counts
+        key = self.model["nclose_aliases"][key]
+        sources = sorted(source_counts)
         return dict(structure_id=structure["structure_id"], kind=structure["kind"],
                     feature_index=structure["feature_index"], nclose_key=key,
                     nclose_id=self.ncloses[key]["nclose_id"], occurrence_count=int(count),
@@ -247,7 +316,9 @@ class StructureWeights:
                     structure_weight_N=structure["weight_N"],
                     contribution=int(count) * structure["raw_weight"],
                     contribution_N=int(count) * structure["weight_N"],
-                    projection_id=projection_id or self.ncloses[key]["nclose_id"])
+                    projection_id=projection_id or self.ncloses[key]["nclose_id"],
+                    source_nclose_keys=tuple(sources),
+                    source_occurrence_counts=tuple(int(source_counts[k]) for k in sources))
 
     def _project(self):
         metadata = {e["nclose_id"]: dict(e, projection_id=e["nclose_id"],
@@ -255,19 +326,25 @@ class StructureWeights:
                     for key, e in self.ncloses.items()}
         rows = defaultdict(list)
         removed = self.model.get("split_parent_usage", {})
-        for row in self.contributions:
-            count = row["occurrence_count"] - removed.get(row["nclose_key"], {}).get(row["feature_index"], 0)
-            if count < 0:
-                raise ValueError(f"PATH_SPLIT exceeds original NClose count: {row}")
-            if count:
-                rows[row["projection_id"]].append(self.contribution(
-                    self.structures[row["structure_id"]], row["nclose_key"], count))
+        for structure in self.structures.values():
+            remaining = defaultdict(Counter)
+            for source, original_count in structure["source_nclose_counts"].items():
+                count = original_count - removed.get(source, {}).get(structure["feature_index"], 0)
+                if count < 0:
+                    raise ValueError(f"PATH_SPLIT exceeds source NClose count: {source}")
+                if count:
+                    remaining[self.model["nclose_aliases"][source]][source] = count
+            for key, sources in remaining.items():
+                pid = self.ncloses[key]["nclose_id"]
+                rows[pid].append(self.contribution(structure, key, sum(sources.values()),
+                                                   source_counts=sources))
         by_column = {s["feature_index"]: s for s in self.structures.values()
                      if s["feature_index"] is not None}
         for split in self.model.get("path_splits", []):
             pid = split["projection_id"]
+            canonical = self.model["nclose_aliases"][split["parent_key"]]
             metadata[pid] = dict(split, kind="bnd", is_split=True,
-                                 nclose_id=self.ncloses[split["parent_key"]]["nclose_id"])
+                                 nclose_id=self.ncloses[canonical]["nclose_id"])
             for col, count in split["column_counts"].items():
                 rows[pid].append(self.contribution(by_column[col], split["parent_key"], count, pid))
         return metadata, rows
@@ -319,12 +396,27 @@ def write_structure_reports(prefix, context, status):
                "source", "legacy_ids", "nclose_occurrence_count"], structures)
     usage = []
     for row in context.contributions:
-        usage.append({k: (key_text(v) if k == "nclose_key" else "." if v is None else v)
+        usage.append({k: (key_text(v) if k == "nclose_key" else
+                         ";".join(key_text(key) for key in v) if k == "source_nclose_keys" else
+                         ";".join(map(str, v)) if k == "source_occurrence_counts" else
+                         "." if v is None else v)
                       for k, v in row.items() if k != "projection_id"})
     write_tsv(Path(prefix) / "structure_nclose_usage.tsv",
               ["structure_id", "kind", "feature_index", "nclose_key", "nclose_id",
                "occurrence_count", "structure_weight", "structure_weight_N",
-               "contribution", "contribution_N"], usage)
+               "contribution", "contribution_N", "source_nclose_keys", "source_occurrence_counts"], usage)
+    sources = []
+    for key, event in context.model["nclose_sources"].items():
+        canonical = context.model["nclose_aliases"][key]
+        sources.append(dict(source_nclose_key=key_text(key),
+                            source_nclose_id=event.get("nclose_id", "."),
+                            nclose_id=context.ncloses[canonical]["nclose_id"],
+                            canonical_nclose_key=key_text(canonical), is_alias=int(key != canonical),
+                            contig_names=";".join(event.get("contig_names", ())),
+                            source=event.get("source", ".")))
+    write_tsv(Path(prefix) / "nclose_sources.tsv",
+              ["source_nclose_key", "source_nclose_id", "nclose_id", "canonical_nclose_key",
+               "is_alias", "contig_names", "source"], sources)
     reports = []
     history = status.get("stages", {}).get("base", status.get("stages", {}).get("initial", {})).get("reasons", {})
     for key, event in context.ncloses.items():

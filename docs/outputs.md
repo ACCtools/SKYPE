@@ -13,7 +13,8 @@ separate reporting rules.
 | `SV_call_result.vcf` | A BND mate record or ordinary symbolic DEL/DUP | Variant export. A BND adjacency has two reciprocal records. |
 | `SV_call_result.bnd_weights.tsv` | One structure's contribution to an emitted BND | Reproduce BND weights after PATH_SPLIT and exact geometry merging. |
 | `SKYPE_result.bed` | A NClose endpoint/span or a structure summary span | Inspect genomic intervals with an explicit weight scope. |
-| `nclose_report.tsv` | One original Type 1/2/4 NClose | Inspect the full NClose total and preprocessing history. |
+| `nclose_report.tsv` | One Type 1/2/4 NClose after exact BND identity reuse | Inspect the full NClose total and representative preprocessing history. |
+| `nclose_sources.tsv` | One original source node pair/event | Trace source IDs, unitigs and canonical NClose identities. |
 | `structure_report.tsv` | One structure | Inspect its own coefficient and source. |
 | `structure_nclose_usage.tsv` | One structure–original NClose association | Trace occurrence counts and contributions, including zero-weight structures. |
 | `total_cov.png`, `total_cov.pdf` | Whole-genome plot | Compare observed/fitted depth and inspect displayed junctions/structure summaries. |
@@ -42,8 +43,9 @@ as its own weight. Centromere-only features have no NClose membership.
 Different structures add. Within a path, different traversal positions add,
 while duplicate descriptions of the same occurrence at one position are counted
 once. An already aggregated NClose value is never used as a new structure
-coefficient. Accounting preserves original NClose IDs; it does not introduce
-coordinate clustering.
+coefficient. Exact BND geometry reuses an existing NClose ID, preferring the
+compressed-graph entry. There is no distance tolerance: a different boundary,
+chromosome or retained side remains a different native identity.
 
 ### Worked example
 
@@ -121,14 +123,25 @@ two paths with CN `0.06` that produce the same split can jointly pass the
 `> 0.1` gate. A parent can disappear from the displayed call set after its
 contributions move to children, while its original NClose report remains positive.
 
-### Exact VCF geometry merging
+### Exact native BND identity reuse and VCF geometry merging
 
-VCF output merges exactly matching endpoint/retained-side pairs and aggregates
-their contributions before its output threshold. Distinct original NCloses
-remain distinct in the accounting and original-NClose reports. Their IDs are
-retained together on the merged VCF call. Consequently, VCF junction counts
-and weights need not match the number of rows or one individual row's weight
-in the original-NClose report.
+When AMP, MERGE_TYPE4, VIRTUAL_INV or a legacy catalog supplies a source pair
+with exactly the same unordered endpoint/retained-side pair as an existing BND,
+native accounting reuses that NClose. It prefers compressed-graph IDs, then
+the first registered matching source. Restoring an exact alias does not allocate
+a new ID. Ordinary symbolic Type 4 events retain their existing identities.
+
+Structure weights are unchanged. Counts from different physical occurrences
+add to the shared NClose. Source counts remain available so PATH_SPLIT transfers
+only the occurrences from its original pair, leaving other sources' support
+on the parent. The NClose report, BED and CN lists apply their threshold after
+identity aggregation. `nclose_sources.tsv` preserves original source metadata.
+
+VCF also merges exactly matching projected geometry before its output threshold;
+split projections can therefore still make its junction count differ from the
+NClose report. `NCLOSE_IDS` contains shared identities, while `NCLOSE_KEYS` keeps
+the contributing original source pairs. Source pairs may have different anchor
+spans even when their junction-facing boundaries are identical.
 
 ## Native VCF fields
 
@@ -143,7 +156,7 @@ right side. Records are sorted by reference contig order and position.
 | `SVTYPE`, `END`, `SVLEN` | Variant type and reference span information where applicable. |
 | `WEIGHT` | Final normalized support. For BNDs, equals `MODEL_WEIGHT + VIRTUAL_WEIGHT`. |
 | `WEIGHT_METHOD` | `STRUCTURE_SUM` for current native calls. |
-| `NCLOSE_IDS` | Original IDs joining to `nclose_report.tsv`; available on BND and ordinary Type 4 records. |
+| `NCLOSE_IDS` | Shared native IDs joining to `nclose_report.tsv`; available on BND and ordinary Type 4 records. |
 | `NCLOSE_KEYS` | BND source node-index pairs, encoded as `first:second`. |
 | `PARENT_IDS` | Contributing structure IDs joining to `structure_report.tsv`. |
 | `PARENT_WEIGHTS` | Each structure's own normalized weight, in `PARENT_IDS` order. |
@@ -204,6 +217,7 @@ change fitted-column IDs; these are not globally stable genomic identifiers.
 | `occurrence_count` | Number of uses in this structure. |
 | `structure_weight`, `structure_weight_N` | Own structure weight before multiplying by the count. |
 | `contribution`, `contribution_N` | Count × own weight in raw and normalized units. |
+| `source_nclose_keys`, `source_occurrence_counts` | Semicolon-separated original keys and occurrence counts, in matching order. Their counts sum to `occurrence_count`. |
 
 Summing `contribution_N` by `nclose_id` reproduces `nclose_report.tsv` totals.
 This table describes original membership; the BND contribution TSV describes
@@ -211,8 +225,9 @@ the projected/exported representation.
 
 ### Original NClose report
 
-`nclose_report.tsv` contains original Type 1/2/4 entries. Compound MERGE_TYPE4
-summary rows belong in the structure report, not this table.
+`nclose_report.tsv` contains Type 1/2/4 entries with exact native BND aliases
+sharing one row. Compound MERGE_TYPE4 summary rows belong in the structure report.
+Catalog coordinates and preprocessing history describe the selected representative.
 
 | Columns | Meaning |
 | --- | --- |
@@ -230,11 +245,18 @@ For example, a NClose with `FILTERED_02_NO_ELIGIBLE_PATH` history can have posit
 AMP support. Native reports show that sum and retain the history separately;
 they do not replace the CN with `-1`.
 
-Existing original NClose IDs are preserved when reconstructing a result's
-accounting table. Missing compound constituents receive new IDs, and IDs formerly
-used for compound summaries remain reserved as structure provenance. Numbering
-can therefore contain gaps. Use `NCLOSE_IDS` and `PARENT_IDS` to trace regenerated
-VCF calls; sequential `SKYPE.BND.*` IDs can change when the call set changes.
+Existing representative NClose IDs are preserved when reconstructing a result's
+accounting table. Missing constituents receive new IDs only when their exact BND
+geometry is new. Legacy aliases' IDs and IDs formerly used for compound summaries
+remain reserved, so numbering can contain gaps. Use `NCLOSE_IDS`, `NCLOSE_KEYS`
+and `PARENT_IDS` to trace regenerated VCF calls; sequential `SKYPE.BND.*` IDs can
+change when the call set changes.
+
+`nclose_sources.tsv` joins each `source_nclose_key` and legacy `source_nclose_id`
+to the shared `nclose_id` and `canonical_nclose_key`, with `is_alias`, supporting
+`contig_names` and discovery `source`. A newly restored alias has no separately
+allocated source ID (`.`); its node pair identifies it. This is source provenance,
+not an additional variant count or a change to preprocessing acceptance rules.
 
 ## BED, Circos and CN lists
 
@@ -326,6 +348,7 @@ When updating older native outputs, account for these format/meaning changes:
 | BED | Adds `weight_scope` and `source_id`; numeric weights retain full output precision. |
 | Circos/CN distributions | Full NClose contributions; CN lists exclude compound summaries and split children. |
 | Output selection | Contributions are summed before thresholding; low-weight paths can collectively produce visible PATH_SPLIT calls. |
+| Exact native BND aliases | Reuse a shared NClose ID/report row; original source mappings are in `nclose_sources.tsv`. Version-1 cached structure models are rebuilt. |
 
 These changes can alter exported weights, adjacency sets and sequential BND IDs
 while leaving the fitted coefficients and predicted depth unchanged. They

@@ -10,7 +10,7 @@ from native_bnd import node_pair_endpoints
 from native_structure_output import bnd_calls, display_events, write_native_bed, write_native_vcf
 from nclose_tracking import _build_bnd_event
 from structure_nclose import (
-    StructureWeights, add_virtual_structure, count_path_members,
+    StructureWeights, add_bnd_metadata, add_virtual_structure, count_path_members,
     set_path_splits, write_structure_reports,
 )
 from test_native_bnd import export_namespace, node
@@ -59,6 +59,33 @@ class StructureWeightTests(unittest.TestCase):
                                            {"merged": collections.Counter({PAIR: 1, OTHER: 1})}),
                          {PAIR: 2, OTHER: 2})
 
+    def test_direct_and_compound_exact_alias_at_one_position_is_one_occurrence(self):
+        path = [(0, "tel"), (1, 0), (1, 1), (1, 0), (1, 1), (0, "end")]
+        counts = count_path_members(path, {PAIR}, {((1, 0), (1, 1)): "merged"},
+                                   {"merged": collections.Counter({OTHER: 1})},
+                                   {PAIR: PAIR, OTHER: PAIR})
+        self.assertEqual(counts, {PAIR: 2})
+        # Two physical uses in a compound still count twice per position.
+        counts = count_path_members(path, {PAIR}, {((1, 0), (1, 1)): "merged"},
+                                   {"merged": collections.Counter({PAIR: 1, OTHER: 1})},
+                                   {PAIR: PAIR, OTHER: PAIR})
+        self.assertEqual(counts, {PAIR: 2, OTHER: 2})
+
+    def test_virtual_new_source_reuses_existing_fitted_nclose(self):
+        nodes, model = fixture([dict(kind="PATH", nclose_counts={PAIR: 1})])
+        nodes.extend([node("virtual", 0, 100, "+", "chr1", 100, 200),
+                      node("virtual", 100, 200, "-", "chr1", 400, 500)])
+        layout = dict(ordered_endpoints=(dict(chrom="chr1", coord=200, dir="+", ctg_name="virtual"),
+                                        dict(chrom="chr1", coord=500, dir="-", ctg_name="virtual")))
+        record = dict(pair_id=1, nclose_key_a=(4, 5), nclose_key_b=OTHER, layout_a=layout, layout_b={})
+        add_virtual_structure(model, record, 5., [], nodes)
+        context = StructureWeights(model, [10.], 10.)
+        call = next(c for c in bnd_calls(context) if PAIR in c["keys"])
+        self.assertEqual(call["info"]["NCLOSE_IDS"], ["SKYPE.nclose.1"])
+        self.assertEqual(call["weight"], 1.5)
+        self.assertEqual(call["info"]["MODEL_WEIGHT"], 1.)
+        self.assertEqual(call["info"]["VIRTUAL_WEIGHT"], .5)
+
     def test_compounds_and_repeated_constituents_add_once_per_structure(self):
         _, model = fixture([dict(kind="PATH", nclose_counts={PAIR: 1}),
                             dict(kind="AMP", nclose_counts={PAIR: 2, OTHER: 1}),
@@ -91,14 +118,84 @@ class StructureWeightTests(unittest.TestCase):
         self.assertEqual(len(display_events(context, nodes, {})), 1)
         self.assertEqual(context.cn_lists()[0], [.12])
 
-    def test_exact_geometry_merge_preserves_distinct_original_ids(self):
+    def test_exact_geometry_reuses_identity_and_preserves_both_occurrences(self):
         _, model = fixture([dict(kind="PATH", nclose_counts={PAIR: 1, OTHER: 1})])
         model["ncloses"][OTHER]["endpoints"] = model["ncloses"][PAIR]["endpoints"]
         context = StructureWeights(model, [10.], 10.)
         call, = bnd_calls(context)
         self.assertEqual(call["weight"], 2.)
-        self.assertEqual(call["info"]["NCLOSE_IDS"], ["SKYPE.nclose.1", "SKYPE.nclose.2"])
-        self.assertEqual(context.totals[PAIR], context.totals[OTHER])
+        self.assertEqual(call["info"]["NCLOSE_IDS"], ["SKYPE.nclose.1"])
+        self.assertEqual(call["info"]["NCLOSE_KEYS"], ["0:1", "2:3"])
+        self.assertEqual(call["info"]["PARENT_MULTIPLICITY"], [2])
+        self.assertEqual(context.totals[PAIR], 20.)
+        self.assertNotIn(OTHER, context.ncloses)
+        self.assertEqual(context.cn_lists()[0], [2.])
+        self.assertEqual(model["nclose_aliases"][OTHER], PAIR)
+
+    def test_restored_amp_reuses_exact_reverse_order_geometry_without_allocating_id(self):
+        nodes, model = fixture([dict(kind="PATH", nclose_counts={PAIR: 1})])
+        nodes.extend([node("amp", 0, 100, "+", "chr1", 450, 500),
+                      node("amp", 100, 200, "-", "chr1", 150, 200)])
+        before = model["next_nclose_id"]
+        canonical = add_bnd_metadata(model, (4, 5), nodes, "AMP")
+        self.assertEqual(canonical, PAIR)
+        self.assertEqual(model["next_nclose_id"], before)
+        self.assertEqual(model["nclose_sources"][(4, 5)]["contig_names"], ("amp",))
+
+    def test_nearby_coordinate_or_different_retained_side_is_not_reused(self):
+        nodes, model = fixture([])
+        nodes.extend([node("near", 0, 100, "+", "chr1", 100, 201),
+                      node("near", 100, 200, "-", "chr1", 400, 500),
+                      node("side", 0, 100, "-", "chr1", 200, 300),
+                      node("side", 100, 200, "+", "chr1", 500, 600)])
+        self.assertEqual(add_bnd_metadata(model, (4, 5), nodes, "AMP"), (4, 5))
+        self.assertEqual(add_bnd_metadata(model, (6, 7), nodes, "AMP"), (6, 7))
+        self.assertNotEqual(model["ncloses"][(4, 5)]["nclose_id"], model["ncloses"][PAIR]["nclose_id"])
+
+    def test_compressed_identity_is_preferred_to_earlier_amp_catalog_entry(self):
+        _, model = fixture([dict(kind="AMP", nclose_counts={PAIR: 1})])
+        model["ncloses"][PAIR]["source"] = "ecdna_circuit_data.pkl"
+        model["ncloses"][OTHER]["endpoints"] = tuple(reversed(model["ncloses"][PAIR]["endpoints"]))
+        context = StructureWeights(model, [10.], 10.)
+        self.assertEqual(model["nclose_aliases"][PAIR], OTHER)
+        self.assertEqual(bnd_calls(context)[0]["info"]["NCLOSE_IDS"], ["SKYPE.nclose.2"])
+
+    def test_split_removes_only_its_source_among_exact_aliases(self):
+        _, model = fixture([dict(kind="PATH", nclose_counts={PAIR: 1, OTHER: 1}),
+                            dict(kind="AMP", nclose_counts={OTHER: 1})])
+        model["ncloses"][OTHER]["endpoints"] = model["ncloses"][PAIR]["endpoints"]
+        key = (1, 1, "chr1", 200, "+", "chr2", 300, "+", "u1")
+        set_path_splits(model, {key: {0: 1}}, {1: {0: 1}}, {1: PAIR})
+        context = StructureWeights(model, [10., 20.], 10.)
+        self.assertEqual(context.totals[PAIR], 40.)
+        self.assertEqual(sorted(context.projected_totals.values()), [10., 30.])
+        calls = bnd_calls(context)
+        self.assertEqual(sorted(c["weight"] for c in calls), [1., 3.])
+        self.assertTrue(all(c["info"]["NCLOSE_IDS"] == ["SKYPE.nclose.1"] for c in calls))
+
+    def test_alias_sums_pass_threshold_once_in_report_bed_and_vcf(self):
+        nodes, model = fixture([dict(kind="PATH", nclose_counts={PAIR: 1}),
+                                dict(kind="PATH", nclose_counts={OTHER: 1})])
+        model["ncloses"][OTHER]["endpoints"] = model["ncloses"][PAIR]["endpoints"]
+        context = StructureWeights(model, [.6, .6], 10.)
+        self.assertEqual(bnd_calls(context)[0]["weight"], .12)
+        self.assertEqual(len(display_events(context, nodes, {})), 1)
+        self.assertEqual(context.cn_lists()[0], [.12])
+        with tempfile.TemporaryDirectory() as tmp:
+            write_structure_reports(tmp, context, {})
+            def read(name):
+                with (Path(tmp)/name).open() as handle:
+                    return list(csv.DictReader(handle, delimiter="\t"))
+            reports = read("nclose_report.tsv")
+            sources = read("nclose_sources.tsv")
+            usage = read("structure_nclose_usage.tsv")
+        self.assertEqual([r["nclose_id"] for r in reports], ["SKYPE.nclose.1", "SKYPE.nclose.3"])
+        alias = next(r for r in sources if r["source_nclose_key"] == "2:3")
+        self.assertEqual(alias["source_nclose_id"], "SKYPE.nclose.2")
+        self.assertEqual(alias["nclose_id"], "SKYPE.nclose.1")
+        self.assertEqual(alias["is_alias"], "1")
+        self.assertEqual(usage[1]["source_nclose_keys"], "2:3")
+        self.assertEqual(usage[1]["source_occurrence_counts"], "1")
 
     def test_split_transfers_only_corresponding_path_occurrences(self):
         _, model = fixture([dict(kind="PATH", nclose_counts={PAIR: 2}),

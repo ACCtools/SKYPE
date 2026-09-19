@@ -21,8 +21,12 @@ def bnd_calls(context, min_cn=0.1):
                 continue
             call["rows"][(row["structure_id"], pid)] = row
             call["nclose_ids"].add(row["nclose_id"])
-            call["keys"].add(row["nclose_key"])
-            call["names"].update(event.get("contig_names", ()))
+            call["keys"].update(row["source_nclose_keys"])
+            if event["is_split"]:
+                call["names"].update(event.get("contig_names", ()))
+            else:
+                for key in row["source_nclose_keys"]:
+                    call["names"].update(context.model["nclose_sources"][key].get("contig_names", ()))
             call["classes"].add("PATH_SPLIT" if event["is_split"] else {
                 "PATH": "NCLOSE", "AMP": "AMPLICON", "MERGE_TYPE4": "MERGED_TYPE4",
                 "VIRTUAL_INV": "VIRTUAL_INV", "TYPE4": "NCLOSE",

@@ -57,6 +57,9 @@ its own workflow. See [input workflows](docs/usage.md#input-workflows).
 An **NClose** is SKYPE's tracked assembly-junction unit. It includes Type 1,
 Type 2 and Type 4 events. An NClose can retain several internal alignment
 pieces; it is not necessarily a decomposition into primitive junctions.
+Native accounting reuses an existing NClose ID when another source pair has
+exactly the same two BND boundaries and retained sides. Source pairs and unitigs
+remain traceable in `nclose_sources.tsv`; nearby coordinates are not merged.
 
 A **structure** carries a weight and a count of how often it uses each original
 NClose. Structures include chromosome paths, independent Type 4 features,
@@ -71,7 +74,8 @@ Files are written to the selected SKYPE output directory.
 | --- | --- |
 | `SV_call_result.vcf` | Native variant calls: constituent BNDs for compound structures, and symbolic DEL/DUP for ordinary Type 4. |
 | `SKYPE_result.bed` | NClose and structure summary views, with their weight scopes identified. |
-| `nclose_report.tsv` | Original NClose totals and separate preprocessing history. |
+| `nclose_report.tsv` | NClose totals after exact BND identity reuse and representative preprocessing history. |
+| `nclose_sources.tsv` | Original node pairs/unitigs and their shared NClose identities. |
 | `structure_report.tsv` | Each native structure's own weight and provenance. |
 | `structure_nclose_usage.tsv` | NClose occurrence counts and each structure's contribution. |
 | `total_cov.png`, `total_cov.pdf` | Observed and fitted depth with NClose and structure links. |

@@ -452,7 +452,7 @@ def build_vcf_header(contig_lengths):
         ("PARENT_WEIGHTS", ".", "Float", "Original normalized structure weights in PARENT_IDS order"),
         ("PARENT_MULTIPLICITY", ".", "Integer", "Number of constituent occurrences with this exact adjacency in each parent, in PARENT_IDS order"),
         ("NCLOSE_KEYS", ".", "String", "Original NClose node-index pairs, encoded as first:second"),
-        ("NCLOSE_IDS", ".", "String", "Original NClose IDs, linked to nclose_report.tsv"),
+        ("NCLOSE_IDS", ".", "String", "NClose IDs after exact native BND identity reuse, linked to nclose_report.tsv; source pairs are in nclose_sources.tsv"),
         ("WEIGHT_METHOD", 1, "String", "STRUCTURE_SUM: sum of original structure weights times NClose occurrence counts"),
         ("MODEL_WEIGHT", 1, "Float", "Sum of unique fitted feature occurrence contributions normalized by median depth divided by two"),
         ("MODEL_FEATURE_COUNT", 1, "Integer", "Number of distinct positive fitted columns contributing to this BND"),
