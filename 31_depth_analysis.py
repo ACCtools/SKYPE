@@ -7,7 +7,7 @@ from circos_plotting import render_total_coverage_circos
 from skype_vcf_writer import write_vcf_record_with_fallback
 from structure_nclose import (
     StructureWeights, add_virtual_structure, load_or_build_structure_model,
-    save_structure_model, set_path_splits, write_structure_reports,
+    save_structure_model, write_structure_reports,
 )
 from native_structure_output import display_events, write_native_bed, write_native_vcf
 from bp_step_depth_ratio import (
@@ -69,7 +69,6 @@ RAW_TRANSLOCATION_RESULT_PKL = 'raw_translocation_result.pkl'
 RAW_TRANSLOCATION_REPORT_TSV = 'raw_translocation_read_counts.tsv'
 
 BND_TYPE = 0
-CTG_IN_TYPE = 1
 TEL_TYPE = 2
 
 CTG_NAM = 0
@@ -93,9 +92,6 @@ CTG_RPTCASE = 17
 CTG_MAINFLOWDIR = 18
 CTG_MAINFLOWCHR = 19
 
-NODE_NAME = 1
-CHR_CHANGE_IDX = 2
-DIR_CHANGE_IDX = 3
 
 ABS_MAX_COVERAGE_RATIO = 3
 MAX_PATH_CNT = 100
@@ -113,9 +109,6 @@ TYPE34_BREAK_CHUKJI_LIMIT = 1*M
 
 NCLOSE_SIM_COMPARE_RAITO = 1.2
 
-CTG_INTYPE_CHECK_MIN_LENGTH = 100 * K
-CTG_INTYPE_INSERT_MIN_SEGMENT_LENGTH = 10 * K
-CTG_INTYPE_INSERT_MIN_RATIO = 0.2
 
 
 def similar_check(v1, v2, ratio=TYPE2_SIM_COMPARE_RAITO):
@@ -342,24 +335,6 @@ def import_data2(file_path : str) -> list :
     paf_file.close()
     return contig_data
 
-def import_path_paf_rows(file_path : str) -> list:
-    rows = []
-    with open(file_path, "r") as paf_file:
-        for curr_contig in paf_file:
-            curr_contig = curr_contig.rstrip()
-            if not curr_contig:
-                continue
-            temp_list = curr_contig.split("\t")
-            int_induce_idx = [
-                CTG_LEN, CTG_STR, CTG_END,
-                CHR_LEN, CHR_STR, CHR_END,
-                CTG_MAPQ,
-            ]
-            for i in int_induce_idx:
-                temp_list[i] = int(temp_list[i])
-            rows.append(tuple(temp_list))
-    return rows
-
 def import_bed(bed_path : str) -> dict:
     bed_data_file = open(bed_path, "r")
     chr_len = collections.defaultdict(list)
@@ -445,7 +420,7 @@ def build_vcf_header(contig_lengths):
         ("SVTYPE", 1, "String", "Type of structural variant"),
         ("END", 1, "Integer", "End position of SV"),
         ("SVLEN", 1, "Integer", "Length of the SV"),
-        ("WEIGHT", 1, "Float", "Sum of structure weight times original NClose occurrence count, normalized by median depth divided by two"),
+        ("WEIGHT", 1, "Float", "Summed normalized structure contributions; for BNDs includes NClose occurrences and exact junction multiplicity within each source NClose"),
         ("CTG_NAME", 1, "String", "Name of contig for supporting variant"),
         ("SVCLASS", ".", "String", "SKYPE source event classes"),
         ("PARENT_IDS", ".", "String", "Contributing structure IDs, linked to structure_report.tsv"),
@@ -453,7 +428,7 @@ def build_vcf_header(contig_lengths):
         ("PARENT_MULTIPLICITY", ".", "Integer", "Number of constituent occurrences with this exact adjacency in each parent, in PARENT_IDS order"),
         ("NCLOSE_KEYS", ".", "String", "Original NClose node-index pairs, encoded as first:second"),
         ("NCLOSE_IDS", ".", "String", "NClose IDs after exact native BND identity reuse, linked to nclose_report.tsv; source pairs are in nclose_sources.tsv"),
-        ("WEIGHT_METHOD", 1, "String", "STRUCTURE_SUM: sum of original structure weights times NClose occurrence counts"),
+        ("WEIGHT_METHOD", 1, "String", "STRUCTURE_SUM: sum of original structure weights times exported event occurrence counts"),
         ("MODEL_WEIGHT", 1, "Float", "Sum of unique fitted feature occurrence contributions normalized by median depth divided by two"),
         ("MODEL_FEATURE_COUNT", 1, "Integer", "Number of distinct positive fitted columns contributing to this BND"),
         ("MODEL_OCCURRENCE_COUNT", 1, "Integer", "Number of contributing model occurrences across positive columns, after duplicate parent descriptions are removed"),
@@ -590,257 +565,6 @@ def write_symbolic_vcf_record(
 
 def invert_strand(strand):
     return '-' if strand == '+' else '+'
-
-def make_breakend_endpoint(chrom, pos, strand):
-    return {
-        'chrom': chrom,
-        'pos': int(pos),
-        'strand': strand,
-    }
-
-def infer_path_strand_from_paf_rows(rows : list, idx : int) -> str:
-    chrom = rows[idx][CHR_NAM]
-    curr_mid = (rows[idx][CHR_STR] + rows[idx][CHR_END]) // 2
-
-    if idx + 1 < len(rows) and rows[idx + 1][CHR_NAM] == chrom:
-        next_mid = (rows[idx + 1][CHR_STR] + rows[idx + 1][CHR_END]) // 2
-        if next_mid != curr_mid:
-            return '+' if next_mid > curr_mid else '-'
-
-    if idx > 0 and rows[idx - 1][CHR_NAM] == chrom:
-        prev_mid = (rows[idx - 1][CHR_STR] + rows[idx - 1][CHR_END]) // 2
-        if curr_mid != prev_mid:
-            return '+' if curr_mid > prev_mid else '-'
-
-    return rows[idx][CTG_DIR] if rows[idx][CTG_DIR] in {'+', '-'} else '+'
-
-def paf_row_entry_endpoint(row, strand):
-    pos = row[CHR_STR] if strand == '+' else row[CHR_END]
-    return make_breakend_endpoint(row[CHR_NAM], pos, strand)
-
-def paf_row_exit_endpoint(row, strand):
-    pos = row[CHR_END] if strand == '+' else row[CHR_STR]
-    return make_breakend_endpoint(row[CHR_NAM], pos, strand)
-
-def append_ctg_intype_interrupt_segment(
-    segments : list,
-    row,
-    strand : str,
-    length : int,
-    row_idx : int,
-):
-    if length <= 0:
-        return
-    chrom = row[CHR_NAM]
-    if segments and segments[-1]['chrom'] == chrom:
-        segments[-1]['exit'] = paf_row_exit_endpoint(row, strand)
-        segments[-1]['length'] += length
-        segments[-1]['last_idx'] = row_idx
-    else:
-        segments.append({
-            'chrom': chrom,
-            'strand': strand,
-            'entry': paf_row_entry_endpoint(row, strand),
-            'exit': paf_row_exit_endpoint(row, strand),
-            'length': length,
-            'first_idx': row_idx,
-            'last_idx': row_idx,
-        })
-
-def nearest_different_chrom_row(rows : list, row_idx : int, step : int, chrom : str):
-    idx = row_idx + step
-    while 0 <= idx < len(rows):
-        if rows[idx][CHR_NAM] != chrom:
-            return idx
-        idx += step
-    return None
-
-def attach_ctg_intype_interrupt_flanks(segments : list, rows : list):
-    for segment in segments:
-        left_idx = nearest_different_chrom_row(
-            rows, segment['first_idx'], -1, segment['chrom']
-        )
-        if left_idx is not None:
-            left_strand = infer_path_strand_from_paf_rows(rows, left_idx)
-            segment['left_flank_exit'] = paf_row_exit_endpoint(rows[left_idx], left_strand)
-
-        right_idx = nearest_different_chrom_row(
-            rows, segment['last_idx'], 1, segment['chrom']
-        )
-        if right_idx is not None:
-            right_strand = infer_path_strand_from_paf_rows(rows, right_idx)
-            segment['right_flank_entry'] = paf_row_entry_endpoint(rows[right_idx], right_strand)
-
-def get_ctg_intype_interrupt_segments(key_int : int, endpoint_chroms : set) -> list:
-    """
-    Build coordinate-bearing interruption pieces for split BND reporting.
-    Keep the same chromosome selection/filtering; only attach entry/exit coords.
-    """
-    paf_loc = f"{output_folder}/{key_int}.paf"
-    if not os.path.isfile(paf_loc):
-        return []
-
-    rows = import_path_paf_rows(paf_loc)
-    if not rows:
-        return []
-
-    row_lengths = [abs(row[CHR_END] - row[CHR_STR]) for row in rows]
-    total_length = sum(row_lengths)
-    if total_length <= CTG_INTYPE_CHECK_MIN_LENGTH:
-        return []
-
-    foreign_chrom_lengths = Counter()
-    for row, length in zip(rows, row_lengths):
-        chrom = row[CHR_NAM]
-        if chrom not in endpoint_chroms:
-            foreign_chrom_lengths[chrom] += length
-
-    interrupt_chroms = {
-        chrom for chrom, length in foreign_chrom_lengths.items()
-        if length / total_length >= CTG_INTYPE_INSERT_MIN_RATIO
-    }
-    if not interrupt_chroms:
-        return []
-
-    segments = []
-    for i, (row, length) in enumerate(zip(rows, row_lengths)):
-        chrom = row[CHR_NAM]
-        if chrom not in interrupt_chroms:
-            continue
-        if length < CTG_INTYPE_INSERT_MIN_SEGMENT_LENGTH:
-            continue
-
-        strand = infer_path_strand_from_paf_rows(rows, i)
-        append_ctg_intype_interrupt_segment(segments, row, strand, length, i)
-
-    attach_ctg_intype_interrupt_flanks(segments, rows)
-    return segments
-
-def append_chrom_change_break(ordered_breaks : list, left : dict, right : dict):
-    if left['chrom'] != right['chrom']:
-        ordered_breaks.append((left, right))
-
-def get_karyotype_next_state(curr_node, prev_node_name : int, curr_node_name : int):
-    if curr_node_name > prev_node_name:
-        next_incr = curr_node[CTG_DIR]
-    else:
-        next_incr = '-' if curr_node[CTG_DIR] == '+' else '+'
-    next_ref = curr_node[CHR_STR] if next_incr == '+' else curr_node[CHR_END]
-    return [curr_node[CHR_NAM], next_incr], next_ref
-
-def build_ctg_intype_split_bnds(weights, min_weight, include_usage=False):
-    split_weight_by_key = defaultdict(float)
-    split_parent_weight = defaultdict(float)
-    split_feature_usage = defaultdict(Counter)
-    split_parent_usage = defaultdict(Counter)
-
-    for path_idx, (paf_loc, key_int_list) in enumerate(paf_ans_list):
-        if path_idx >= len(weights):
-            break
-        path_weight = float(weights[path_idx])
-        if path_weight <= min_weight:
-            continue
-
-        path = import_index_path(paf_loc)
-        if len(path[0]) < 4:
-            path[0] = tuple([0] + list(path[0]))
-        if len(path[-1]) < 4:
-            path[-1] = tuple([0] + list(path[-1]))
-
-        ctg_intype_key_by_edge = {}
-        for key_int in key_int_list:
-            key_type, key_value = int2key[key_int]
-            if key_type == CTG_IN_TYPE:
-                ctg_intype_key_by_edge[key_value] = key_int
-
-        curr_incr = '+' if path[0][NODE_NAME][-1] == 'f' else '-'
-        first_real_node = contig_data[path[1][NODE_NAME]]
-        curr_chr = [first_real_node[CHR_NAM], curr_incr]
-        curr_ref = first_real_node[CHR_STR] if curr_incr == '+' else first_real_node[CHR_END]
-
-        for i in range(1, len(path) - 1):
-            prev_node_name = path[i - 1][1]
-            curr_node_name = path[i][1]
-            if not isinstance(prev_node_name, int) or not isinstance(curr_node_name, int):
-                continue
-
-            last_node = contig_data[prev_node_name]
-            curr_node = contig_data[curr_node_name]
-            edge_key = (
-                (path[i - 1][0], prev_node_name),
-                (path[i][0], curr_node_name),
-            )
-            key_int = ctg_intype_key_by_edge.get(edge_key)
-
-            interrupt_segments = []
-            if key_int is not None:
-                endpoint_chroms = {last_node[CHR_NAM], curr_node[CHR_NAM]}
-                interrupt_segments = get_ctg_intype_interrupt_segments(key_int, endpoint_chroms)
-
-            if not (
-                path[i][CHR_CHANGE_IDX] > path[i - 1][CHR_CHANGE_IDX]
-                or path[i][DIR_CHANGE_IDX] > path[i - 1][DIR_CHANGE_IDX]
-                or interrupt_segments
-            ):
-                continue
-
-            if interrupt_segments:
-                parent_nclose = tuple(sorted([prev_node_name, curr_node_name]))
-                parent_nclose_idx = nclose2idx.get(parent_nclose)
-                if parent_nclose_idx is not None:
-                    left_pos = last_node[CHR_END] if curr_incr == '+' else last_node[CHR_STR]
-                    left_endpoint = interrupt_segments[0].get('left_flank_exit')
-                    if left_endpoint is None or left_endpoint['chrom'] != curr_chr[0]:
-                        left_endpoint = make_breakend_endpoint(curr_chr[0], left_pos, curr_chr[1])
-
-                    next_chr, _next_ref = get_karyotype_next_state(
-                        curr_node, prev_node_name, curr_node_name
-                    )
-                    right_pos = curr_node[CHR_STR] if next_chr[1] == '+' else curr_node[CHR_END]
-                    right_endpoint = interrupt_segments[-1].get('right_flank_entry')
-                    if right_endpoint is None or right_endpoint['chrom'] != next_chr[0]:
-                        right_endpoint = make_breakend_endpoint(next_chr[0], right_pos, next_chr[1])
-
-                    ordered_breaks = []
-                    append_chrom_change_break(
-                        ordered_breaks, left_endpoint, interrupt_segments[0]['entry']
-                    )
-                    for segment_idx in range(len(interrupt_segments) - 1):
-                        append_chrom_change_break(
-                            ordered_breaks,
-                            interrupt_segments[segment_idx]['exit'],
-                            interrupt_segments[segment_idx + 1]['entry'],
-                        )
-                    append_chrom_change_break(
-                        ordered_breaks, interrupt_segments[-1]['exit'], right_endpoint
-                    )
-
-                    if ordered_breaks:
-                        split_parent_weight[parent_nclose_idx] += path_weight
-                        split_parent_usage[parent_nclose_idx][path_idx] += 1
-                        ctg_name = last_node[CTG_NAM]
-                        for split_idx, (left, right) in enumerate(ordered_breaks, start=1):
-                            split_key = (
-                                parent_nclose_idx,
-                                split_idx,
-                                left['chrom'],
-                                int(left['pos']),
-                                left['strand'],
-                                right['chrom'],
-                                int(right['pos']),
-                                right['strand'],
-                                ctg_name,
-                            )
-                            split_weight_by_key[split_key] += path_weight
-                            split_feature_usage[split_key][path_idx] += 1
-
-            curr_chr, curr_ref = get_karyotype_next_state(
-                curr_node, prev_node_name, curr_node_name
-            )
-
-    if include_usage:
-        return split_weight_by_key, split_parent_weight, split_feature_usage, split_parent_usage
-    return split_weight_by_key, split_parent_weight
 
 def parse_optional_float(value):
     if value is None or value == '*':
@@ -1994,15 +1718,6 @@ def draw_circos_plot(fig_prefix=''):
             active_columns=displayed_ecdna_columns,
         )
 
-        split_bnd_weights, split_parent_weight = build_ctg_intype_split_bnds(
-            weights, BREAKEND_REMARKABLE_CN
-        )
-        adjusted_nclose_cn = defaultdict(float, nclose_cn)
-        for parent_nclose_idx, split_weight in split_parent_weight.items():
-            adjusted_nclose_cn[parent_nclose_idx] = max(
-                0.0, adjusted_nclose_cn[parent_nclose_idx] - split_weight
-            )
-    
         # with open(f"{PREFIX}/nclose_cn.txt", "wt") as f:
         #     for k, v in nclose_cn.items():
         #         if v > BREAKEND_REMARKABLE_CN:
@@ -2029,7 +1744,7 @@ def draw_circos_plot(fig_prefix=''):
         bnd_cn_data = []
 
         for k in nclose_cn:
-            v = adjusted_nclose_cn[k]
+            v = nclose_cn[k]
             pos1, pos2 = nclose_str_pos[k]
             idx1, idx2 = idx2nclose[k]
             chr_nam1 = contig_data[idx1][CHR_NAM]
@@ -2048,29 +1763,6 @@ def draw_circos_plot(fig_prefix=''):
         
             if v > BREAKEND_REMARKABLE_CN:
                 bnd_cn_data.append([(chr_nam1, pos1), (chr_nam2, pos2), v, event_type])
-
-        for split_key, v in sorted(split_bnd_weights.items()):
-            (
-                _parent_nclose_idx,
-                _split_idx,
-                chr_a,
-                pos_a,
-                dir_a,
-                chr_b,
-                pos_b,
-                dir_b,
-                _ctg_name,
-            ) = split_key
-            if v <= BREAKEND_REMARKABLE_CN:
-                continue
-
-            event_type = 'breakend'
-            if chr_a != chr_b:
-                transloc_val_list.append(v / meandepth * 2)
-            elif dir_a != dir_b:
-                inv_val_list.append(v / meandepth * 2)
-                event_type = 'inversion'
-            bnd_cn_data.append([(chr_a, pos_a), (chr_b, pos_b), v, event_type])
 
         indel_val_list = []
         for event in build_aggregated_indel_events(weights, BREAKEND_REMARKABLE_CN):
@@ -2184,12 +1876,6 @@ if not pipeline_input_is_vcf(pipeline_input_config):
         for pair_id, views in sorted(virtual_by_pair.items()):
             add_virtual_structure(structure_model, virtual_records[pair_id], views[0][3],
                                   [(c, st, nd) for c, st, nd, _ in views], contig_data)
-    # Split membership is topology, so zero/small fitted coefficients must not
-    # hide it. The helper's temporary weights are discarded; only counts remain.
-    _, _, split_feature_usage, split_parent_usage = build_ctg_intype_split_bnds(
-        np.ones(len(weights)), 0.0, include_usage=True,
-    )
-    set_path_splits(structure_model, split_feature_usage, split_parent_usage, idx2nclose)
     native_context = StructureWeights(structure_model, weights, N)
     save_structure_model(PREFIX, structure_model)
     write_structure_reports(PREFIX, native_context, nclose_filter_status)
@@ -2253,6 +1939,7 @@ def pairs_to_vcf():
     bnd_count, record_count = write_native_vcf(
         native_context, chr_len, f"{PREFIX}/SV_call_result.vcf", ratios,
         build_vcf_header, write_bnd_vcf_pair, write_symbolic_vcf_record,
+        nodes=contig_data,
     )
     logging.info("Native VCF: %d unique BND adjacencies, %d records", bnd_count, record_count)
 

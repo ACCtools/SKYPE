@@ -10,10 +10,22 @@ workflow described in [usage](usage.md#input-workflows).
 
 An NClose is the original junction unit tracked through SKYPE's assembly
 processing and depth model. Its alignment chain can contain internal pieces;
-the current output does not generally split that chain into primitive junctions.
+the depth model, BED, plots and NClose reports retain its original endpoints.
+Only the native VCF projects eligible source NCloses into primitive BNDs between
+adjacent retained alignments in query order. It includes CEN-SAT endpoint-route,
+telomere-derived and virtual-inversion NCloses. Read and OLC rescue keep their
+outer pair. Same-chromosome/same-strand neighbors with equal reference and query
+gaps are normal continuations and are omitted; no new size or MAPQ cutoff is
+applied by this export. Ordinary Type 4 DEL/DUP and VCF-input annotation retain
+their existing representations.
 Distinct source pairs with exactly equal BND endpoints and retained sides reuse
 one native accounting identity, preferring an existing compressed-graph NClose.
-Source-specific alignments, path splits and occurrence counts remain separate.
+Source-specific alignments and occurrence counts remain separate.
+VCF projection uses those source counts before merging exactly equal BND
+endpoint/retained-side pairs. A structure's contribution to one BND is its weight
+times its source-NClose count times that BND's count within the source chain.
+Projection never creates a junction between different constituent unitigs or
+feeds split events back into the graph, matrix or fitted depth.
 This does not change the graph's broader spatial compression or AMP eligibility.
 
 | Term | Role |

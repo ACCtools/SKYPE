@@ -57,6 +57,10 @@ its own workflow. See [input workflows](docs/usage.md#input-workflows).
 An **NClose** is SKYPE's tracked assembly-junction unit. It includes Type 1,
 Type 2 and Type 4 events. An NClose can retain several internal alignment
 pieces; it is not necessarily a decomposition into primitive junctions.
+The native VCF alone expands each eligible NClose into BNDs between adjacent
+alignments. CEN-SAT, telomere-derived and virtual-inversion NCloses are included;
+read and OLC rescue retain their original endpoint pair. Normal reference
+continuations are omitted. The depth model, BED and plots retain original NCloses.
 Native accounting reuses an existing NClose ID when another source pair has
 exactly the same two BND boundaries and retained sides. Source pairs and unitigs
 remain traceable in `nclose_sources.tsv`; nearby coordinates are not merged.
@@ -72,7 +76,9 @@ Files are written to the selected SKYPE output directory.
 
 | File | What to use it for |
 | --- | --- |
-| `SV_call_result.vcf` | Native variant calls: constituent BNDs for compound structures, and symbolic DEL/DUP for ordinary Type 4. |
+| `SV_call_result.vcf` | Native variant calls: adjacent-alignment BNDs within eligible constituent NCloses, and symbolic DEL/DUP for ordinary Type 4. |
+| `SV_call_result.nclose_bnds.tsv` | Each original NClose source's junctions and their exact merged VCF BND IDs. |
+| `SV_call_result.bnd_weights.tsv` | Each structure/source NClose's contribution to an exported BND. |
 | `SKYPE_result.bed` | NClose and structure summary views, with their weight scopes identified. |
 | `nclose_report.tsv` | NClose totals after exact BND identity reuse and representative preprocessing history. |
 | `nclose_sources.tsv` | Original node pairs/unitigs and their shared NClose identities. |
@@ -91,6 +97,7 @@ Native outputs share this calculation:
 
 ```text
 NClose CN = sum(structure weight × NClose occurrence count) / N
+BND CN = sum(structure weight × source NClose occurrence count × BND occurrences in that source) / N
 N = median read depth excluding chrM / 2
 ```
 
@@ -98,16 +105,21 @@ For example, a path with normalized weight `3` and a virtual inversion with
 normalized weight `2` each using NClose A once give A a total of `5`. A virtual
 inversion contributes its weight to each constituent NClose according to its
 usage count; the weight is not divided between its two NCloses.
+Likewise, splitting a source NClose gives each distinct junction its full source
+contribution. Junctions merge only when both chromosomes, boundaries and retained
+sides match exactly, including reverse-complement descriptions. Source-specific
+counts keep different internal chains separate even if their outer endpoints match.
 
 These values are support estimates, not read VAFs. Structure CN, NClose CN and
 the predicted depth of a reference segment describe different quantities.
 Contributions are summed before the native output threshold (`CN > 0.1`).
-VCF geometry merging and the existing PATH_SPLIT representation can make its
+VCF geometry merging and reciprocal BND mate records can make its
 record count differ from the original NClose count.
 
 See [weight accounting](docs/outputs.md#weight-accounting) for AMP normalization,
 virtual contributions, Type 4 path contributions and worked examples, and
-[output representations](docs/outputs.md#output-representations) for PATH_SPLIT.
+[output representations](docs/outputs.md#output-representations) for original
+NClose endpoints and compound summaries.
 
 ## Further documentation
 

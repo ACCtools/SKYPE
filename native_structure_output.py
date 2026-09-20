@@ -1,70 +1,25 @@
 """Native output views of the shared structure/NClose accounting table."""
 from collections import defaultdict
-from math import fsum
 from pathlib import Path
 import csv
 
 import vcfpy
 
-
-def bnd_calls(context, min_cn=0.1):
-    grouped = {}
-    for pid, rows in context.projected_rows.items():
-        event = context.projections[pid]
-        if event["kind"] != "bnd":
-            continue
-        endpoints = tuple(sorted(event["endpoints"]))
-        call = grouped.setdefault(endpoints, dict(endpoints=endpoints, rows={}, names=set(),
-                                                 nclose_ids=set(), keys=set(), classes=set()))
-        for row in rows:
-            if row["contribution"] <= 0:
-                continue
-            call["rows"][(row["structure_id"], pid)] = row
-            call["nclose_ids"].add(row["nclose_id"])
-            call["keys"].update(row["source_nclose_keys"])
-            if event["is_split"]:
-                call["names"].update(event.get("contig_names", ()))
-            else:
-                for key in row["source_nclose_keys"]:
-                    call["names"].update(context.model["nclose_sources"][key].get("contig_names", ()))
-            call["classes"].add("PATH_SPLIT" if event["is_split"] else {
-                "PATH": "NCLOSE", "AMP": "AMPLICON", "MERGE_TYPE4": "MERGED_TYPE4",
-                "VIRTUAL_INV": "VIRTUAL_INV", "TYPE4": "NCLOSE",
-            }[row["kind"]])
-    result = []
-    for endpoints, call in sorted(grouped.items()):
-        rows = list(call["rows"].values())
-        weight = fsum(r["contribution_N"] for r in rows)
-        if weight <= min_cn:
-            continue
-        parents = sorted({r["structure_id"] for r in rows})
-        own = {r["structure_id"]: r["structure_weight_N"] for r in rows}
-        model = [r for r in rows if r["feature_index"] is not None]
-        virtual = [r for r in rows if r["feature_index"] is None]
-        call.update(weight=weight, rows=rows, info=dict(
-            SVCLASS=sorted(call["classes"]), PARENT_IDS=parents,
-            PARENT_WEIGHTS=[own[p] for p in parents],
-            PARENT_MULTIPLICITY=[sum(r["occurrence_count"] for r in rows if r["structure_id"] == p) for p in parents],
-            NCLOSE_IDS=sorted(call["nclose_ids"]),
-            NCLOSE_KEYS=[f"{a}:{b}" for a, b in sorted(call["keys"])],
-            WEIGHT_METHOD="STRUCTURE_SUM",
-            MODEL_WEIGHT=fsum(r["contribution_N"] for r in model),
-            VIRTUAL_WEIGHT=fsum(r["contribution_N"] for r in virtual),
-            MODEL_FEATURE_COUNT=len({r["feature_index"] for r in model}),
-            MODEL_OCCURRENCE_COUNT=sum(r["occurrence_count"] for r in model)))
-        result.append(call)
-    return result
+from native_vcf_bnd import aggregate_bnd_calls, bnd_calls, nclose_bnd_memberships
 
 
-def write_native_vcf(context, contig_lengths, path, ratios, build_header, write_bnd, write_symbolic):
+def write_native_vcf(context, contig_lengths, path, ratios, build_header, write_bnd, write_symbolic, *, nodes):
     records, contributions = [], []
     class Buffer:
         def write_record(self, record):
             records.append(record)
     writer = Buffer()
-    calls = bnd_calls(context)
+    memberships = nclose_bnd_memberships(context, nodes)
+    calls = aggregate_bnd_calls(context, memberships)
+    bnd_ids = {}
     for index, call in enumerate(calls, 1):
         name = f"SKYPE.BND.{index}"
+        bnd_ids[call["endpoints"]] = name
         a, b = call["endpoints"]
         ratio_info = ratios.pair([(c, p, "left" if side == "L" else "right")
                                   for c, p, side in call["endpoints"]], call["weight"] * context.n_unit)
@@ -73,11 +28,14 @@ def write_native_vcf(context, contig_lengths, path, ratios, build_header, write_
                   "|".join(sorted(call["names"])), bp_ratio_info=ratio_info, extra_info=call["info"])
         for row in call["rows"]:
             contributions.append((name, row["feature_index"] if row["feature_index"] is not None else ".",
-                                  row["projection_id"], row["occurrence_count"],
+                                  row["occurrence_count"],
                                   row["structure_weight_N"], row["contribution_N"], "STRUCTURE_SUM",
-                                  row["structure_id"], row["nclose_id"], row["kind"]))
+                                  row["structure_id"], row["nclose_id"], row["kind"],
+                                  ":".join(map(str, row["source_nclose_key"])),
+                                  row["nclose_occurrence_count"], row["bnd_occurrences_per_nclose"],
+                                  ";".join(map(str, row["junction_indices"]))))
     counts = defaultdict(int)
-    for event, raw_weight in context.visible_projections():
+    for event, raw_weight in context.visible_ncloses():
         if event["kind"] != "indel":
             continue
         chrom, st, nd = event["chrom"], event["st"], event["nd"]
@@ -97,32 +55,39 @@ def write_native_vcf(context, contig_lengths, path, ratios, build_header, write_
             output.write_record(record)
     with Path(path).with_suffix(".bnd_weights.tsv").open("w") as handle:
         output = csv.writer(handle, delimiter="\t", lineterminator="\n")
-        output.writerow(("bnd_id", "feature_index", "source_occurrence", "occurrence_count",
-                         "feature_weight_N", "contribution_N", "weight_method", "structure_id", "nclose_id", "structure_kind"))
+        output.writerow(("bnd_id", "feature_index", "occurrence_count",
+                         "feature_weight_N", "contribution_N", "weight_method", "structure_id", "nclose_id", "structure_kind",
+                         "source_nclose_key", "nclose_occurrence_count", "bnd_occurrences_per_nclose", "junction_indices"))
         output.writerows(contributions)
+    with Path(path).with_suffix(".nclose_bnds.tsv").open("w") as handle:
+        output = csv.writer(handle, delimiter="\t", lineterminator="\n")
+        output.writerow(("nclose_id", "source_nclose_key", "junction_index", "node_a", "node_b",
+                         "mode", "chrom_a", "pos_a0", "side_a", "chrom_b", "pos_b0", "side_b", "bnd_id"))
+        for key, junctions in memberships.items():
+            for junction in junctions:
+                a, b = junction["endpoints"]
+                output.writerow((junction["nclose_id"], ":".join(map(str, key)), junction["junction_index"],
+                                 *junction["node_pair"], junction["mode"], *a, *b,
+                                 bnd_ids.get(junction["endpoints"], ".")))
     return len(calls), len(records)
 
 
 def display_events(context, nodes, centromeres, min_cn=0.1):
     events = []
-    for projection, weight in context.visible_projections(min_cn):
+    for nclose, weight in context.visible_ncloses(min_cn):
         event = dict(weight=weight, weight_N=weight / context.n_unit,
-                     source_id=projection["projection_id"], nclose_ids=projection["nclose_id"],
+                     source_id=nclose["nclose_id"], nclose_ids=nclose["nclose_id"],
                      weight_scope="NCLOSE", kind="NCLOSE")
-        if projection["kind"] == "indel":
-            chrom, st, nd = projection["chrom"], projection["st"], projection["nd"]
-            event.update(type="Deletion" if projection["event_type"] == "front_jump" else "Duplication",
+        if nclose["kind"] == "indel":
+            chrom, st, nd = nclose["chrom"], nclose["st"], nclose["nd"]
+            event.update(type="Deletion" if nclose["event_type"] == "front_jump" else "Duplication",
                          spans=[(chrom, st, nd)], link=[(chrom, st), (chrom, nd)], link_type="indel")
         else:
-            a, b = projection["endpoints"]
+            a, b = nclose["endpoints"]
             event.update(type="Breakend", link_type="inversion" if a[0] == b[0] and a[2] == b[2] else "breakend")
-            if projection["is_split"]:
-                event.update(spans=[(c, max(0, p - 1), p) for c, p, _ in (a, b)],
-                             link=[a[:2], b[:2]])
-            else:
-                left, right = (nodes[i] for i in projection["parent_key"])
-                event.update(spans=[(n[5], n[7], n[8]) for n in (left, right)],
-                             link=[(n[5], n[7]) for n in (left, right)])
+            left, right = (nodes[i] for i in nclose["event_key"])
+            event.update(spans=[(n[5], n[7], n[8]) for n in (left, right)],
+                         link=[(n[5], n[7]) for n in (left, right)])
         events.append(event)
     for structure in context.structure_summaries(min_cn):
         kind = structure["kind"]

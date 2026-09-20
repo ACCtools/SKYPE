@@ -11,7 +11,8 @@ separate reporting rules.
 | File | Unit of a row or record | Purpose |
 | --- | --- | --- |
 | `SV_call_result.vcf` | A BND mate record or ordinary symbolic DEL/DUP | Variant export. A BND adjacency has two reciprocal records. |
-| `SV_call_result.bnd_weights.tsv` | One structure's contribution to an emitted BND | Reproduce BND weights after PATH_SPLIT and exact geometry merging. |
+| `SV_call_result.bnd_weights.tsv` | One structure/source NClose's contribution to an emitted BND | Reproduce BND weights after exact geometry merging. |
+| `SV_call_result.nclose_bnds.tsv` | One source NClose junction | Trace alignment pairs to merged VCF BND IDs, including unexported geometry. |
 | `SKYPE_result.bed` | A NClose endpoint/span or a structure summary span | Inspect genomic intervals with an explicit weight scope. |
 | `nclose_report.tsv` | One Type 1/2/4 NClose after exact BND identity reuse | Inspect the full NClose total and representative preprocessing history. |
 | `nclose_sources.tsv` | One original source node pair/event | Trace source IDs, unitigs and canonical NClose identities. |
@@ -95,9 +96,10 @@ validated absolute copy numbers.
 
 ### Original NCloses and compound summaries
 
-AMP, MERGE_TYPE4 and VIRTUAL_INV export their original constituent NClose BNDs
-in the native VCF. A depth-model bridge between unitigs is not exported as an
-additional inferred junction. Ordinary unmerged Type 4 events remain symbolic
+AMP, MERGE_TYPE4 and VIRTUAL_INV first resolve to their original constituent
+NCloses. The native VCF then projects each eligible source NClose into its
+adjacent-alignment BNDs. A depth-model bridge between unitigs is not exported as
+an additional inferred junction. Ordinary unmerged Type 4 events remain symbolic
 DEL/DUP calls.
 
 BED and Circos also retain the compound structure's summary span. That summary
@@ -105,23 +107,38 @@ uses the structure's own weight; its constituent NClose views use their summed
 support. A summary and its constituent views are different descriptions of
 related evidence and must not be summed as independent events.
 
-### PATH_SPLIT
+### VCF-only NClose decomposition
 
-The existing path-specific handling of internal chromosome transitions can
-represent a parent NClose with several BNDs. The shared model records which
-path occurrences produce those child projections. Only those occurrences move
-from the parent display to the corresponding children; any other structure's
-contribution to the parent remains there.
+BED, Circos, `nclose_report.tsv` and CN distributions use the original NClose
+endpoints and full structure contributions. The native VCF separately expands
+each source NClose's inclusive node interval, sorts its retained alignments by
+query coordinates and exports adjacent junctions. It includes CEN-SAT endpoint
+unitigs, `subtelomere_cut_contig_*`, `telomere_middle_cut_contig_*` and constituent
+NCloses of VIRTUAL_INV. Stage-24 read and OLC rescue retain their original pair,
+identified by `rescue_method` or `raw_rescue_read_*`/`raw_rescue_olc_*` owners.
+Explicit synthetic debug pairs also retain their specified geometry.
 
-This transfer applies to VCF, BED and Circos. The original NClose's full sum
-remains in `nclose_report.tsv` and the original-NClose CN distributions.
-PATH_SPLIT does not add new original NClose IDs or implement a general
-primitive-junction decomposition of every NClose.
+Neighbors on the same chromosome and strand with equal signed reference and
+query gaps are normal continuations and are omitted. All other retained
+adjacencies are projected without a new size or MAPQ cutoff. Source alignments
+come from `contig_data`, not depth PAFs containing inferred reference bridges.
+Only the selected NClose interval is expanded, not its entire parent unitig.
 
-Membership is recorded regardless of each path's coefficient. For example,
-two paths with CN `0.06` that produce the same split can jointly pass the
-`> 0.1` gate. A parent can disappear from the displayed call set after its
-contributions move to children, while its original NClose report remains positive.
+For a BND, each structure/source contribution is:
+
+```text
+contribution_N = structure_weight_N × source NClose occurrences × BND occurrences in that source
+```
+
+For example, an `A -> X -> B` source with CN `2` gives `A-X` and `X-B` CN `2`
+each. If a separate raw rescue uses `A-B` with CN `1`, only the outer `A-B`
+receives that `1`. Repeated exact junctions within a source retain their true
+multiplicity. No projected weight changes the original NClose or depth model.
+
+Contributions are summed before the VCF `> 0.1` threshold, across all source
+NCloses sharing an exact BND. Two different source NCloses at CN `0.06` can
+therefore produce a visible shared primitive junction even when neither NClose
+is individually visible in BED.
 
 ### Exact native BND identity reuse and VCF geometry merging
 
@@ -132,16 +149,18 @@ the first registered matching source. Restoring an exact alias does not allocate
 a new ID. Ordinary symbolic Type 4 events retain their existing identities.
 
 Structure weights are unchanged. Counts from different physical occurrences
-add to the shared NClose. Source counts remain available so PATH_SPLIT transfers
-only the occurrences from its original pair, leaving other sources' support
-on the parent. The NClose report, BED and CN lists apply their threshold after
-identity aggregation. `nclose_sources.tsv` preserves original source metadata.
+add to the shared NClose. Source counts preserve the contribution of each
+original pair without moving support to other junctions. The NClose report, BED
+and CN lists apply their threshold after identity aggregation.
+`nclose_sources.tsv` preserves original source metadata.
 
-VCF also merges exactly matching projected geometry before its output threshold;
-split projections can therefore still make its junction count differ from the
-NClose report. `NCLOSE_IDS` contains shared identities, while `NCLOSE_KEYS` keeps
-the contributing original source pairs. Source pairs may have different anchor
-spans even when their junction-facing boundaries are identical.
+VCF merges projected geometry only when both endpoint chromosomes, exact
+0-based boundary coordinates and retained sides match, allowing endpoint-order
+reversal. There is no distance tolerance: a 1 bp difference, different mate or
+different retained side keeps a separate BND. Projection happens per original
+source, so exact outer aliases with different interiors do not share their
+internal junction contributions. `NCLOSE_IDS` contains shared NClose identities,
+while `NCLOSE_KEYS` keeps only contributing original source pairs.
 
 ## Native VCF fields
 
@@ -165,7 +184,7 @@ right side. Records are sorted by reference contig order and position.
 | `VIRTUAL_WEIGHT` | Sum of virtual-structure occurrence contributions. |
 | `MODEL_FEATURE_COUNT` | Number of distinct positive fitted columns contributing to the BND. |
 | `MODEL_OCCURRENCE_COUNT` | Contributing occurrence count over those fitted columns. |
-| `SVCLASS` | BND source classes, such as `NCLOSE`, `AMPLICON`, `MERGED_TYPE4`, `VIRTUAL_INV`, `PATH_SPLIT`. |
+| `SVCLASS` | BND source classes, such as `NCLOSE`, `AMPLICON`, `MERGED_TYPE4`, `VIRTUAL_INV`. |
 | `CTG_NAME` | Supporting contig names or the ordinary Type 4 source label. |
 | `STRANDS`, `MATEID` | BND orientation and reciprocal mate linkage. |
 | `BP_STEP_DEPTH_RATIO_B` | Signed observed-depth step divided by exported support in raw-depth units. |
@@ -178,11 +197,27 @@ POS/END for symbolic records. A dot denotes an unavailable ratio. These depth
 diagnostics do not by themselves establish junction accuracy.
 
 `SV_call_result.bnd_weights.tsv` contains `bnd_id`, `feature_index`,
-`source_occurrence`, `occurrence_count`, `feature_weight_N`, `contribution_N`,
-`weight_method`, `structure_id`, `nclose_id` and `structure_kind`.
-`source_occurrence` identifies the original NClose display or its PATH_SPLIT
-projection. Summing `contribution_N` by `bnd_id` reproduces each BND's `WEIGHT`.
+`occurrence_count`, `feature_weight_N`, `contribution_N`, `weight_method`,
+`structure_id`, `nclose_id`, `structure_kind`, `source_nclose_key`,
+`nclose_occurrence_count`, `bnd_occurrences_per_nclose` and `junction_indices`.
+`nclose_id` identifies the original NClose contributing to the emitted BND.
+Rows distinguish each contributing structure/source pair. `occurrence_count`
+equals `nclose_occurrence_count * bnd_occurrences_per_nclose`; `junction_indices`
+lists the matching 1-based adjacency indices in query order, separated by `;`.
+Summing `contribution_N` by `bnd_id` reproduces each BND's `WEIGHT`.
 Virtual rows have `feature_index=.`.
+
+`SV_call_result.nclose_bnds.tsv` records the topology independently of positive
+support. Its columns are `nclose_id`, `source_nclose_key`, `junction_index`,
+`node_a`, `node_b`, `mode`, `chrom_a`, `pos_a0`, `side_a`, `chrom_b`, `pos_b0`,
+`side_b` and `bnd_id`. Node pairs are in query order; endpoint triples are in
+canonical chromosome/coordinate/retained-side order (`L` or `R`). Modes are
+`ADJACENT_ALIGNMENT`, `RAW_RESCUE_OUTER` and `SYNTHETIC_OUTER`. The last two
+contain a single preserved outer pair. A `.` BND ID means that geometry did not
+pass the VCF weight threshold. A source with zero weight may still map to an
+emitted geometry supported by another source; only the contribution TSV records
+positive support. Normal continuations are absent. BND ID `SKYPE.BND.k` joins to
+the two VCF records `SKYPE.BND.k_1` and `SKYPE.BND.k_2`.
 
 ## TSV reports and IDs
 
@@ -221,7 +256,7 @@ change fitted-column IDs; these are not globally stable genomic identifiers.
 
 Summing `contribution_N` by `nclose_id` reproduces `nclose_report.tsv` totals.
 This table describes original membership; the BND contribution TSV describes
-the projected/exported representation.
+the exported BNDs after geometry merging and output thresholding.
 
 ### Original NClose report
 
@@ -263,9 +298,8 @@ not an additional variant count or a change to preprocessing acceptance rules.
 The BED columns are `#chrom`, `cordst`, `cordnd`, `type`, `weight (N)`,
 `nclose_id`, `weight_scope`, and `source_id`.
 
-- `weight_scope=NCLOSE` means projected NClose support. Original BND views have
-  endpoint anchor intervals; PATH_SPLIT views have breakpoint point intervals.
-  Ordinary Type 4 rows have reference spans.
+- `weight_scope=NCLOSE` means the full original NClose support. BND views have
+  endpoint anchor intervals. Ordinary Type 4 rows have reference spans.
 - `weight_scope=STRUCTURE` means the structure's own normalized coefficient or
   virtual estimate. AMP, MERGE_TYPE4, virtual-inversion and centromere summaries
   use this scope. `source_id` joins to the structure report.
@@ -274,9 +308,9 @@ BED retains both constituent views and compound summaries. `nclose_id` can list
 multiple constituent IDs on a summary, and is `.` for a centromere-only feature.
 
 Circos uses the same display event list as BED. NClose links include all
-structure contributions after PATH_SPLIT transfers; AMP contributions are not
-subtracted from those links. Compound summary links use their own structure
-weights. Observed and predicted depth tracks remain those of the fitted model;
+structure contributions; AMP contributions are not subtracted from those links.
+Compound summary links use their own structure weights. Observed and predicted
+depth tracks remain those of the fitted model;
 the additive virtual output convention does not refit either track.
 
 `cn_data.pkl` stores this tuple:
@@ -286,10 +320,10 @@ the additive virtual output convention does not refit either track.
 ```
 
 The first three lists contain each qualifying original NClose once, using its
-full sum and the `> 0.1` gate. They contain neither compound summary entries nor
-PATH_SPLIT children. The telomere list retains its existing telomere-selection
-rules and uses path coefficients. The lists contain numbers only; use the TSV
-reports when IDs and coordinates are needed.
+full sum and the `> 0.1` gate. They exclude compound summary entries. The telomere
+list retains its existing telomere-selection rules and uses path coefficients.
+The lists contain numbers only; use the TSV reports when IDs and coordinates
+are needed.
 
 ## VCF-input outputs
 
@@ -320,15 +354,15 @@ and native structure reports do not apply to it.
 | `nclose_event_catalog.pkl`, `nclose_path_usage.pkl`, `nclose_filter_status.pkl` | Original event tracking and preprocessing provenance; native output reconstruction leaves these intact. |
 | `tot_loc_list.pkl`, `23_input.pkl` | Matrix-column identities and depth-coordinate metadata. |
 | `B.npy`, `weight.npy`, `predict_B.npy` | Observed depth, raw fitted coefficients and reconstructed depth. |
-| `structure_nclose_model.pkl` | Versioned native structure membership, original NClose metadata, source signature, and stage-31 weights/projections. |
+| `structure_nclose_model.pkl` | Versioned native structure membership, original NClose metadata, source signature, and stage-31 weights. |
 | `raw_translocation_result.pkl`, `raw_translocation_read_counts.tsv` | Paired-junction evidence used to qualify and estimate virtual structures. |
 | `24_raw_rescue/` | D queries, read/OLC evidence, candidates, summaries, installation state and pre-rescue snapshots. |
 
 The shared structure model is built at stage 22 without display thresholds.
-Stage 31 joins final coefficients, adds qualified virtual structures, records
-PATH_SPLIT membership and saves the normalization unit. Its model membership is
-checked against the source signature on reload. Regenerating stage 22 rebuilds
-the table for the current matrix columns.
+Stage 31 joins final coefficients, adds qualified virtual structures and saves
+the normalization unit. Its model membership is checked against the source
+signature on reload. Regenerating stage 22 rebuilds the table for the current
+matrix columns.
 
 ## Regenerating existing results
 
@@ -336,6 +370,23 @@ Use a [stage-31 restart](usage.md#restarts) with the original sample, reference,
 inputs and result directory. If the structure model is absent, it is reconstructed
 from saved path, node, catalog and circuit artifacts. This does not require
 refitting the depth model, but does require those original provenance artifacts.
+
+Structure-model version 3 removes the former `PATH_SPLIT` representation and its saved
+membership fields. Stage 31 rebuilds older cached structure models from the
+original intermediate artifacts, retaining the fitted coefficients and predicted
+depth. Former split children disappear; their path contributions remain on the
+original NClose. The current VCF-only projection is calculated on export and
+does not add split children or membership fields to the cached structure model.
+It works with existing version-3 models and original node artifacts. Exported
+BND counts, coordinates, weights and sequential IDs can change. Existing result
+files are updated only when stage 31 is rerun.
+
+The BND contribution TSV no longer has the redundant `source_occurrence` column;
+use `nclose_id` instead. The other columns retain their order. Update consumers
+that select the removed column or address later columns by position.
+`source_occurrence_counts` in `structure_nclose_usage.tsv` remains unchanged.
+The VCF projection appends four source/junction columns to `bnd_weights.tsv`
+and adds `nclose_bnds.tsv`; use column names when reading these files.
 
 When updating older native outputs, account for these format/meaning changes:
 
@@ -346,9 +397,10 @@ When updating older native outputs, account for these format/meaning changes:
 | AMP summary CN | Own structure CN, without the former extra ×2. |
 | NClose report | Actual CN and separate history; compound summaries live in the structure report. |
 | BED | Adds `weight_scope` and `source_id`; numeric weights retain full output precision. |
-| Circos/CN distributions | Full NClose contributions; CN lists exclude compound summaries and split children. |
-| Output selection | Contributions are summed before thresholding; low-weight paths can collectively produce visible PATH_SPLIT calls. |
-| Exact native BND aliases | Reuse a shared NClose ID/report row; original source mappings are in `nclose_sources.tsv`. Version-1 cached structure models are rebuilt. |
+| Circos/CN distributions | Full NClose contributions; CN lists exclude compound summaries. |
+| Output selection | Contributions are summed before thresholding; low-weight paths can collectively produce a visible original NClose. |
+| Exact native BND aliases | Reuse a shared NClose ID/report row; original source mappings are in `nclose_sources.tsv`. Version-1 and version-2 cached structure models are rebuilt as version 3. |
+| VCF-only decomposition | Projects each eligible source NClose into adjacent junctions, then merges exact endpoint/side pairs; read and OLC rescue keep their outer pair. |
 
 These changes can alter exported weights, adjacency sets and sequential BND IDs
 while leaving the fitted coefficients and predicted depth unchanged. They

@@ -20,7 +20,7 @@ from nclose_tracking import (
 )
 
 MODEL_FILE = "structure_nclose_model.pkl"
-MODEL_VERSION = 2
+MODEL_VERSION = 3
 
 
 def read_pickle(prefix, name):
@@ -154,7 +154,7 @@ def build_structure_model(prefix, nodes=None):
         nodes = read_pickle(prefix, "01_nclose_data.pkl")["contig_data"]
     ids = nclose_event_id_by_key(catalog)
     model = dict(version=MODEL_VERSION, source_signature=source_signature(prefix),
-                 ncloses={}, structures=[], path_splits=[],
+                 ncloses={}, structures=[],
                  next_nclose_id=len(catalog) + 1, column_count=len(locations))
     constituents = {}
     event_by_location = {}
@@ -254,23 +254,6 @@ def add_virtual_structure(model, record, raw_weight, views, nodes):
     model["structures"].append(structure)
 
 
-def set_path_splits(model, feature_usage, parent_usage, idx_to_key):
-    initialize_nclose_registry(model)
-    splits = []
-    for number, (key, counts) in enumerate(sorted(feature_usage.items()), 1):
-        parent, split_index, ca, pa, da, cb, pb, db, name = key
-        parent_key = idx_to_key[parent]
-        canonical = model["nclose_aliases"][parent_key]
-        splits.append(dict(
-            projection_id=f"{model['ncloses'][canonical]['nclose_id']}.PATH_SPLIT.{number}",
-            parent_key=parent_key, split_index=split_index, contig_names=(name,),
-            endpoints=((ca, int(pa), "L" if da == "+" else "R"),
-                       (cb, int(pb), "R" if db == "+" else "L")),
-            column_counts=dict(counts)))
-    model["path_splits"] = splits
-    model["split_parent_usage"] = {idx_to_key[k]: dict(v) for k, v in parent_usage.items()}
-
-
 class StructureWeights:
     def __init__(self, model, weights, n_unit):
         initialize_nclose_registry(model)
@@ -299,13 +282,9 @@ class StructureWeights:
                 self.telomere_weights[node] += count * structure["raw_weight"]
         self.totals = {key: fsum(r["contribution"] for r in self.by_nclose[key])
                        for key in self.ncloses}
-        self.projections, self.projected_rows = self._project()
-        self.projected_totals = {
-            key: fsum(r["contribution"] for r in rows)
-            for key, rows in self.projected_rows.items()}
         model["n_unit"] = self.n_unit
 
-    def contribution(self, structure, key, count, projection_id=None, source_counts=None):
+    def contribution(self, structure, key, count, source_counts=None):
         source_counts = {key: count} if source_counts is None else source_counts
         key = self.model["nclose_aliases"][key]
         sources = sorted(source_counts)
@@ -316,41 +295,11 @@ class StructureWeights:
                     structure_weight_N=structure["weight_N"],
                     contribution=int(count) * structure["raw_weight"],
                     contribution_N=int(count) * structure["weight_N"],
-                    projection_id=projection_id or self.ncloses[key]["nclose_id"],
                     source_nclose_keys=tuple(sources),
                     source_occurrence_counts=tuple(int(source_counts[k]) for k in sources))
 
-    def _project(self):
-        metadata = {e["nclose_id"]: dict(e, projection_id=e["nclose_id"],
-                                       parent_key=key, is_split=False)
-                    for key, e in self.ncloses.items()}
-        rows = defaultdict(list)
-        removed = self.model.get("split_parent_usage", {})
-        for structure in self.structures.values():
-            remaining = defaultdict(Counter)
-            for source, original_count in structure["source_nclose_counts"].items():
-                count = original_count - removed.get(source, {}).get(structure["feature_index"], 0)
-                if count < 0:
-                    raise ValueError(f"PATH_SPLIT exceeds source NClose count: {source}")
-                if count:
-                    remaining[self.model["nclose_aliases"][source]][source] = count
-            for key, sources in remaining.items():
-                pid = self.ncloses[key]["nclose_id"]
-                rows[pid].append(self.contribution(structure, key, sum(sources.values()),
-                                                   source_counts=sources))
-        by_column = {s["feature_index"]: s for s in self.structures.values()
-                     if s["feature_index"] is not None}
-        for split in self.model.get("path_splits", []):
-            pid = split["projection_id"]
-            canonical = self.model["nclose_aliases"][split["parent_key"]]
-            metadata[pid] = dict(split, kind="bnd", is_split=True,
-                                 nclose_id=self.ncloses[canonical]["nclose_id"])
-            for col, count in split["column_counts"].items():
-                rows[pid].append(self.contribution(by_column[col], split["parent_key"], count, pid))
-        return metadata, rows
-
-    def visible_projections(self, min_cn=0.1):
-        return [(self.projections[pid], total) for pid, total in self.projected_totals.items()
+    def visible_ncloses(self, min_cn=0.1):
+        return [(self.ncloses[key], total) for key, total in self.totals.items()
                 if total / self.n_unit > min_cn]
 
     def structure_summaries(self, min_cn=0.1):
@@ -400,7 +349,7 @@ def write_structure_reports(prefix, context, status):
                          ";".join(key_text(key) for key in v) if k == "source_nclose_keys" else
                          ";".join(map(str, v)) if k == "source_occurrence_counts" else
                          "." if v is None else v)
-                      for k, v in row.items() if k != "projection_id"})
+                      for k, v in row.items()})
     write_tsv(Path(prefix) / "structure_nclose_usage.tsv",
               ["structure_id", "kind", "feature_index", "nclose_key", "nclose_id",
                "occurrence_count", "structure_weight", "structure_weight_N",
