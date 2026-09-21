@@ -65,7 +65,7 @@ class NativeVcfProjectionTests(unittest.TestCase):
                 self.assertEqual([j["mode"] for js in nclose_bnd_memberships(context, nodes).values() for j in js],
                                  ["ADJACENT_ALIGNMENT", "ADJACENT_ALIGNMENT"])
 
-    def test_read_and_olc_rescue_retain_outer_pair_including_restored_sources(self):
+    def test_read_and_olc_rescue_split_including_restored_sources(self):
         for method in ("read", "olc"):
             for named in (True, False):
                 with self.subTest(method=method, named=named):
@@ -73,13 +73,37 @@ class NativeVcfProjectionTests(unittest.TestCase):
                     context, nodes, (pair,) = make_context([chain(name, *ABC)], [("AMP", {0: 1})], [10.])
                     if not named:
                         context.model["nclose_sources"][pair]["rescue_method"] = method
-                    call, = bnd_calls(context, nodes)
-                    self.assertEqual(call["endpoints"], (("chr1", 200, "L"), ("chr3", 500, "R")))
-                    self.assertEqual(nclose_bnd_memberships(context, nodes)[pair][0]["mode"], "RAW_RESCUE_OUTER")
+                    before = pickle.dumps((context.__dict__, nodes))
+                    calls = bnd_calls(context, nodes)
+                    self.assertEqual([call["endpoints"] for call in calls], [
+                        (("chr1", 200, "L"), ("chr2", 300, "R")),
+                        (("chr2", 400, "L"), ("chr3", 500, "R")),
+                    ])
+                    self.assertEqual([call["weight"] for call in calls], [1., 1.])
+                    self.assertEqual([j["mode"] for j in nclose_bnd_memberships(context, nodes)[pair]],
+                                     ["ADJACENT_ALIGNMENT", "ADJACENT_ALIGNMENT"])
+                    self.assertEqual(context.totals[pair], 10.)
+                    self.assertEqual(pickle.dumps((context.__dict__, nodes)), before)
+
+    def test_raw_and_unitig_exact_junctions_merge_source_weights(self):
+        for method in ("read", "olc"):
+            with self.subTest(method=method):
+                context, nodes, (unitig, raw) = make_context(
+                    [chain("unitig", *ABC), chain(f"raw_rescue_{method}_R1", *ABC)],
+                    [("PATH", {0: 1}), ("PATH", {1: 1})], [20., 50.])
+                self.assertEqual(context.model["nclose_aliases"][raw], unitig)
+                self.assertEqual(context.totals[unitig], 70.)
+                calls = bnd_calls(context, nodes)
+                self.assertEqual(len(calls), 2)
+                for call in calls:
+                    self.assertEqual(call["keys"], {unitig, raw})
+                    self.assertEqual(call["weight"], 7.)
+                    self.assertEqual({row["source_nclose_key"]: row["contribution_N"]
+                                      for row in call["rows"]}, {unitig: 2., raw: 5.})
 
     def test_raw_and_unitig_exact_outer_aliases_keep_separate_geometry_and_weight(self):
         context, nodes, (unitig, raw) = make_context(
-            [chain("unitig", *ABC), chain("raw_rescue_olc_R1", *ABC)],
+            [chain("unitig", *ABC), chain("raw_rescue_olc_R1", ABC[0], ABC[-1])],
             [("PATH", {0: 1}), ("PATH", {1: 1})], [20., 50.])
         self.assertEqual(context.model["nclose_aliases"][raw], unitig)
         self.assertEqual(context.totals[unitig], 70.)
@@ -174,6 +198,12 @@ class NativeVcfProjectionTests(unittest.TestCase):
                 event = _build_bnd_event((0, 2), nodes, "AMP")
                 event["endpoints"] = node_pair_endpoints(nodes, (0, 2))[0]
                 self.assertEqual([j["node_pair"] for j in source_junctions(event, nodes)], [(1, 2)])
+                for method in ("read", "olc"):
+                    with self.subTest(method=method):
+                        for alignment in nodes:
+                            alignment[0] = f"raw_rescue_{method}_R1"
+                        event["rescue_method"] = method
+                        self.assertEqual([j["node_pair"] for j in source_junctions(event, nodes)], [(1, 2)])
 
     def test_entirely_normal_chain_does_not_fall_back_to_outer_bnd(self):
         normal = (("chr1", 100, 200, "+"), ("chr1", 200, 300, "+"), ("chr1", 300, 400, "+"))
@@ -198,9 +228,9 @@ class NativeVcfProjectionTests(unittest.TestCase):
         self.assertEqual(call["weight"], .12)
         self.assertEqual(call["endpoints"], (("chr1", 200, "L"), ("chr2", 300, "R")))
 
-    def test_serialized_mapping_weights_mates_and_depth_ratio_use_primitive_bnds(self):
+    def test_serialized_rescue_mapping_weights_mates_and_depth_ratio_use_primitive_bnds(self):
         other = (ABC[0], ABC[1], ("chr4", 700, 800, "+"))
-        context, nodes, _ = make_context([chain("a", *ABC), chain("b", *other)],
+        context, nodes, _ = make_context([chain("raw_rescue_read_R1", *ABC), chain("raw_rescue_olc_R2", *other)],
                                         [("PATH", {0: 1}), ("PATH", {1: 1})], [.6, .6])
         ns = export_namespace()
         ratio_requests = []
@@ -223,6 +253,7 @@ class NativeVcfProjectionTests(unittest.TestCase):
                 contributions = list(csv.DictReader(handle, delimiter="\t"))
         self.assertEqual(result, (1, 2))
         self.assertEqual(len(links), 4)
+        self.assertEqual({link["mode"] for link in links}, {"ADJACENT_ALIGNMENT"})
         self.assertEqual(collections.Counter(link["bnd_id"] for link in links), {"SKYPE.BND.1": 2, ".": 2})
         self.assertEqual({link["source_nclose_key"] for link in links}, {"0:2", "3:5"})
         self.assertAlmostEqual(sum(float(row["contribution_N"]) for row in contributions), .12)
@@ -237,6 +268,8 @@ class NativeVcfProjectionTests(unittest.TestCase):
         self.assertEqual(b.INFO["MATEID"], a.ID[0])
         self.assertEqual(a.ALT[0].mate_pos, b.POS)
         self.assertEqual(a.INFO["NCLOSE_KEYS"], ["0:2", "3:5"])
+        self.assertAlmostEqual(a.INFO["WEIGHT"], .12)
+        self.assertAlmostEqual(b.INFO["WEIGHT"], .12)
         self.assertEqual(ratio_requests[0][0], [("chr1", 200, "left"), ("chr2", 300, "right")])
         self.assertAlmostEqual(ratio_requests[0][1], 1.2)
         self.assertEqual(pickle.dumps((context.__dict__, nodes)), before)

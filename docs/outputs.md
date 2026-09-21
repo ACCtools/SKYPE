@@ -114,8 +114,8 @@ endpoints and full structure contributions. The native VCF separately expands
 each source NClose's inclusive node interval, sorts its retained alignments by
 query coordinates and exports adjacent junctions. It includes CEN-SAT endpoint
 unitigs, `subtelomere_cut_contig_*`, `telomere_middle_cut_contig_*` and constituent
-NCloses of VIRTUAL_INV. Stage-24 read and OLC rescue retain their original pair,
-identified by `rescue_method` or `raw_rescue_read_*`/`raw_rescue_olc_*` owners.
+NCloses of VIRTUAL_INV. Stage-24 read and OLC rescue are also expanded using
+their saved alignment chains.
 Explicit synthetic debug pairs also retain their specified geometry.
 
 Neighbors on the same chromosome and strand with equal signed reference and
@@ -131,9 +131,10 @@ contribution_N = structure_weight_N × source NClose occurrences × BND occurren
 ```
 
 For example, an `A -> X -> B` source with CN `2` gives `A-X` and `X-B` CN `2`
-each. If a separate raw rescue uses `A-B` with CN `1`, only the outer `A-B`
-receives that `1`. Repeated exact junctions within a source retain their true
-multiplicity. No projected weight changes the original NClose or depth model.
+each. If a read or OLC rescue follows the same chain with CN `1`, both exact
+junctions merge to CN `3` each. A two-anchor `A -> B` source contributes only to
+`A-B`. Repeated exact junctions within a source retain their true multiplicity.
+No projected weight changes the original NClose or depth model.
 
 Contributions are summed before the VCF `> 0.1` threshold, across all source
 NCloses sharing an exact BND. Two different source NCloses at CN `0.06` can
@@ -212,9 +213,9 @@ support. Its columns are `nclose_id`, `source_nclose_key`, `junction_index`,
 `node_a`, `node_b`, `mode`, `chrom_a`, `pos_a0`, `side_a`, `chrom_b`, `pos_b0`,
 `side_b` and `bnd_id`. Node pairs are in query order; endpoint triples are in
 canonical chromosome/coordinate/retained-side order (`L` or `R`). Modes are
-`ADJACENT_ALIGNMENT`, `RAW_RESCUE_OUTER` and `SYNTHETIC_OUTER`. The last two
-contain a single preserved outer pair. A `.` BND ID means that geometry did not
-pass the VCF weight threshold. A source with zero weight may still map to an
+`ADJACENT_ALIGNMENT` (including read and OLC rescue) and `SYNTHETIC_OUTER`.
+The latter contains a single preserved outer pair. A `.` BND ID means that
+geometry did not pass the VCF weight threshold. A source with zero weight may still map to an
 emitted geometry supported by another source; only the contribution TSV records
 positive support. Normal continuations are absent. BND ID `SKYPE.BND.k` joins to
 the two VCF records `SKYPE.BND.k_1` and `SKYPE.BND.k_2`.
@@ -400,7 +401,7 @@ When updating older native outputs, account for these format/meaning changes:
 | Circos/CN distributions | Full NClose contributions; CN lists exclude compound summaries. |
 | Output selection | Contributions are summed before thresholding; low-weight paths can collectively produce a visible original NClose. |
 | Exact native BND aliases | Reuse a shared NClose ID/report row; original source mappings are in `nclose_sources.tsv`. Version-1 and version-2 cached structure models are rebuilt as version 3. |
-| VCF-only decomposition | Projects each eligible source NClose into adjacent junctions, then merges exact endpoint/side pairs; read and OLC rescue keep their outer pair. |
+| VCF-only decomposition | Projects each eligible source NClose, including read and OLC rescue, into adjacent junctions, then merges exact endpoint/side pairs. Rescue uses `ADJACENT_ALIGNMENT` instead of the former `RAW_RESCUE_OUTER` mode. |
 
 These changes can alter exported weights, adjacency sets and sequential BND IDs
 while leaving the fitted coefficients and predicted depth unchanged. They

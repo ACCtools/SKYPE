@@ -3,7 +3,6 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
-from types import SimpleNamespace
 
 import h5py
 import numpy as np
@@ -29,16 +28,17 @@ def load_functions(*names):
         raise AssertionError(f"Missing raw-NNLS helpers: {names}")
     calls = []
 
-    def fake_bvls(matrix, target, lower, upper, n_threads):
-        calls.append((matrix.copy(), target.copy(), n_threads))
-        return SimpleNamespace(beta=nnls(matrix, target)[0].astype(matrix.dtype))
+    def fake_solve(matrix, target, return_diagnostics=False):
+        calls.append((matrix.copy(), target.copy()))
+        weights = nnls(matrix, target)[0]
+        return (weights, {}) if return_diagnostics else weights
 
     namespace = {
         "MATRIX_CONTRACT": "depth_only_v1",
         "h5py": h5py,
         "np": np,
         "os": os,
-        "bvls": fake_bvls,
+        "solve_depth_nnls": fake_solve,
     }
     module = ast.Module(body=functions, type_ignores=[])
     exec(compile(module, str(RUN_NNLS_PATH), "exec"), namespace)

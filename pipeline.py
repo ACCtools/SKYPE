@@ -266,8 +266,9 @@ def run_skype(CELL_LINE, PREFIX, ctg_paf, ctg_aln_paf, utg_paf, utg_aln_paf,
                 ] + PROGRESS, check=True)
 
             if start_at <= 23:
+                # NNLS is faster with one BLAS thread on these depth matrices.
                 subprocess_run([
-                    "python", "23_run_nnls.py", os.path.abspath(PREFIX)
+                    "python", "23_run_nnls.py", os.path.abspath(PREFIX), "-t", "1"
                 ], check=True, cwd=skype_folder_loc)
 
         run_fit(skype_start_at)

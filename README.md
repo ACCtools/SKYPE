@@ -58,9 +58,9 @@ An **NClose** is SKYPE's tracked assembly-junction unit. It includes Type 1,
 Type 2 and Type 4 events. An NClose can retain several internal alignment
 pieces; it is not necessarily a decomposition into primitive junctions.
 The native VCF alone expands each eligible NClose into BNDs between adjacent
-alignments. CEN-SAT, telomere-derived and virtual-inversion NCloses are included;
-read and OLC rescue retain their original endpoint pair. Normal reference
-continuations are omitted. The depth model, BED and plots retain original NCloses.
+alignments. CEN-SAT, telomere-derived and virtual-inversion NCloses, as well as
+read and OLC rescue, are included. Normal reference continuations are omitted.
+The depth model, BED and plots retain original NCloses.
 Native accounting reuses an existing NClose ID when another source pair has
 exactly the same two BND boundaries and retained sides. Source pairs and unitigs
 remain traceable in `nclose_sources.tsv`; nearby coordinates are not merged.

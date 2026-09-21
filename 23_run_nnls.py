@@ -1,6 +1,7 @@
 """Fit every stage-22 depth feature with one raw non-negative solve."""
 
 import argparse
+import json
 import logging
 import os
 import pickle
@@ -8,7 +9,7 @@ import sys
 
 import h5py
 import numpy as np
-from adelie.solver import bvls
+from threadpoolctl import threadpool_info, threadpool_limits
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
@@ -16,6 +17,7 @@ from denoised_relative_error import (  # noqa: E402
     TV_LAMBDA_OVER_NOISE_SIGMA,
     calculate_denoised_relative_error,
 )
+from depth_nnls import predict_depth_from_weights, solve_depth_nnls  # noqa: E402
 from nclose_tracking import (  # noqa: E402
     load_filter_status,
     load_path_usage,
@@ -28,30 +30,9 @@ from skype_utils import DEPTH_ONLY_MATRIX_CONTRACT, LOG_LEVEL  # noqa: E402,F401
 MATRIX_CONTRACT = DEPTH_ONLY_MATRIX_CONTRACT
 
 
-def fit_raw_nnls(matrix, target):
-    """Run the pipeline's single non-negative least-squares solve."""
-
-    matrix = np.asarray(matrix)
-    target = np.asarray(target, dtype=matrix.dtype)
-    if matrix.ndim != 2:
-        raise ValueError(f"NNLS matrix must be 2-dimensional: {matrix.shape}")
-    if target.shape != (matrix.shape[0],):
-        raise ValueError(
-            f"NNLS target has shape {target.shape}, expected {(matrix.shape[0],)}"
-        )
-    if matrix.shape[1] == 0:
-        raise ValueError("NNLS matrix has no feature columns")
-
-    lower = np.zeros(matrix.shape[1], dtype=matrix.dtype)
-    upper = np.full(matrix.shape[1], np.finfo(matrix.dtype).max, dtype=matrix.dtype)
-    state = bvls(
-        matrix,
-        target,
-        lower,
-        upper,
-        n_threads=1,
-    )
-    return np.asarray(state.beta)
+def fit_raw_nnls(matrix, target, *, return_diagnostics=False):
+    """Run the Float64 SciPy working-set fit with an approximate Adelie fallback."""
+    return solve_depth_nnls(matrix, target, return_diagnostics=return_diagnostics)
 
 
 def _contract_text(value):
@@ -102,9 +83,20 @@ def load_depth_only_matrix(prefix):
     return feature_depth, feature_fail, target_depth, target_fail
 
 
+def _positive_thread_count(value):
+    count = int(value)
+    if count < 1:
+        raise argparse.ArgumentTypeError("threads must be a positive integer")
+    return count
+
+
 def build_parser():
     parser = argparse.ArgumentParser(description="SKYPE raw depth NNLS")
     parser.add_argument("prefix")
+    parser.add_argument(
+        "-t", "--thread", "--threads", type=_positive_thread_count, default=1,
+        help="BLAS thread limit for fitting and prediction (default: 1)",
+    )
     return parser
 
 
@@ -136,9 +128,18 @@ def main(argv=None):
 
     # One solve per pass; stage 24 may request one additional graph/fit pass.
     solver_matrix = feature_depth.T
-    weights = fit_raw_nnls(solver_matrix, target_depth)
-    predict_depth = solver_matrix.dot(weights)
-    predict_fail = feature_fail.T.dot(weights)
+    logging.info("NNLS BLAS thread limit : %d", args.thread)
+    with threadpool_limits(limits=args.thread, user_api="blas"):
+        weights, solver_diagnostics = fit_raw_nnls(
+            solver_matrix, target_depth, return_diagnostics=True
+        )
+        predict_depth = predict_depth_from_weights(solver_matrix, weights)
+        predict_fail = predict_depth_from_weights(feature_fail.T, weights)
+        solver_diagnostics["blas_threads_requested"] = args.thread
+        solver_diagnostics["blas_threadpools"] = [
+            {key: pool[key] for key in ("filepath", "internal_api", "num_threads")}
+            for pool in threadpool_info() if pool["user_api"] == "blas"
+        ]
     predict_all = np.concatenate((predict_depth, predict_fail))
 
     target_norm = np.linalg.norm(target_depth)
@@ -152,6 +153,24 @@ def main(argv=None):
     )
 
     logging.info("Raw NNLS feature count : %d", len(weights))
+    logging.info("NNLS solver : %s", solver_diagnostics["solver"])
+    if solver_diagnostics["kkt_scaled_max"] is None:
+        logging.info("NNLS convergence : solver-default; strict KKT not checked")
+        if solver_diagnostics["solver_tolerance"] is not None:
+            logging.info("NNLS solver tolerance : %g", solver_diagnostics["solver_tolerance"])
+    else:
+        logging.info("NNLS aggregated-matrix scaled KKT violation : %.3g", solver_diagnostics["kkt_scaled_max"])
+    logging.info(
+        "NNLS strategy : %s; working rounds : %d; largest subproblem : %d columns",
+        solver_diagnostics["strategy"], solver_diagnostics["working_set_rounds"],
+        solver_diagnostics["max_working_columns"],
+    )
+    if solver_diagnostics["working_set_fallback"] is not None:
+        logging.info("NNLS working-set fallback : %s", solver_diagnostics["working_set_fallback"])
+    logging.info(
+        "NNLS equivalent depth rows : %d -> %d",
+        solver_diagnostics["observation_rows"], solver_diagnostics["aggregated_rows"],
+    )
     logging.info("Error : %.4f", error)
     logging.info("Relative error : %.4f", relative_error)
     logging.info(
@@ -162,6 +181,9 @@ def main(argv=None):
     logging.info("Denoised relative error : %.4f", denoised_relative_error)
 
     np.save(os.path.join(prefix, "weight.npy"), weights)
+    with open(os.path.join(prefix, "nnls_diagnostics.json"), "w") as handle:
+        json.dump(solver_diagnostics, handle, indent=2)
+        handle.write("\n")
     np.save(os.path.join(prefix, "predict_B.npy"), predict_all)
     active_columns = list(range(len(weights)))
     with open(os.path.join(prefix, "A_idx_list.pkl"), "wb") as handle:

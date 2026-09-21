@@ -27,10 +27,7 @@ def source_junctions(event, nodes):
         raise ValueError(f"Invalid NClose alignment interval: {event['event_key']}")
     owner = str(nodes[start][0])
     names = (owner, str(nodes[end][0]))
-    if (event.get("rescue_method") in {"read", "olc"}
-            or any(name.startswith(("raw_rescue_read_", "raw_rescue_olc_")) for name in names)):
-        mode = "RAW_RESCUE_OUTER"
-    elif any(name.startswith(("debug_forced_nclose_", "vcf_")) for name in names):
+    if any(name.startswith(("debug_forced_nclose_", "vcf_")) for name in names):
         mode = "SYNTHETIC_OUTER"
     else:
         mode = "ADJACENT_ALIGNMENT"
