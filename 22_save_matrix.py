@@ -93,7 +93,12 @@ parser.add_argument("-t", "--thread",
 parser.add_argument("--progress",
                     help="Show progress bar", action='store_true')
 
+parser.add_argument('--depth-policy', choices=('legacy', 'all', 'nclose_l2', 'nclose_huber'), default='legacy')
+parser.add_argument('--robust-sigma-multiplier', type=float, default=3.)
+
 args = parser.parse_args()
+if not np.isfinite(args.robust_sigma_multiplier) or args.robust_sigma_multiplier <= 0:
+    parser.error('--robust-sigma-multiplier must be finite and positive')
 
 bed_data = import_bed(args.censat_bed_path)
 
@@ -468,6 +473,48 @@ logging.info(
 
 MATRIX_CONTRACT = DEPTH_ONLY_MATRIX_CONTRACT
 
+# Build topology from this graph, including on the first run without a cached
+# structure model. Depth-row selection must not depend on old fit weights.
+with open(f"{PREFIX}/tot_loc_list.pkl", 'wb') as f:
+    pkl.dump(tot_loc_list, f)
+native_input = not pipeline_input_is_vcf(load_pipeline_input(PREFIX))
+if native_input:
+    from structure_nclose import build_structure_model, save_structure_model
+    save_structure_model(PREFIX, build_structure_model(PREFIX))
+
+legacy_fitted_coordinates = list(chr_filt_st_list)
+legacy_fitted_set = set(legacy_fitted_coordinates)
+high_tau_by_coordinate = {}
+if args.depth_policy != 'legacy':
+    from high_depth import high_depth_gate
+    if not native_input and args.depth_policy.startswith('nclose_'):
+        raise ValueError('NClose-gated depth policies require native assembly input')
+    old_order = chr_filt_st_list + chr_no_filt_st_list
+    quality = high_depth_gate(PREFIX, df, legacy_fitted_coordinates, bed_data,
+                              use_nclose=native_input)
+    selected = quality if args.depth_policy == 'all' else quality.loc[quality.nclose_gate]
+    restored = {(r.chrom, int(r.start)) for r in selected.itertuples(index=False)}
+    high_tau_by_coordinate = {(r.chrom, int(r.start)): args.robust_sigma_multiplier*r.noise_sigma
+                              for r in selected.itertuples(index=False)}
+    keep = legacy_fitted_set | restored
+    coordinates = [(r.chr, int(r.st)) for r in df.itertuples(index=False)]
+    chr_filt_st_list = [key for key in coordinates if key in keep]
+    chr_no_filt_st_list = [key for key in coordinates if key not in keep]
+    new_order = chr_filt_st_list + chr_no_filt_st_list
+    if new_order != old_order:
+        old_indices = {key: i for i, key in enumerate(old_order)}
+        permutation = np.array([old_indices[key] for key in new_order])
+        # Bound the temporary allocation when permuting a large feature matrix.
+        for start in range(0, n, 256):
+            A_arr[start:start+256] = A_arr[start:start+256, permutation]
+        B = B[permutation]
+    filter_len = fm = len(chr_filt_st_list)
+    quality['included'] = pd.Series(
+        [(r.chrom, int(r.start)) in restored for r in quality.itertuples(index=False)], dtype=bool)
+    quality.to_csv(f'{PREFIX}/high_depth_gate.tsv', sep='\t', index=False)
+    logging.info('Depth policy %s: %d/%d high-depth bins included',
+                 args.depth_policy, len(restored), len(quality))
+
 with h5py.File(f'{PREFIX}/matrix.h5', 'w') as hf:
     hf.attrs['matrix_contract'] = MATRIX_CONTRACT
     hf.create_dataset('A', data=A_arr[:, :fm])
@@ -483,15 +530,11 @@ with open(f"{PREFIX}/23_input.pkl", "wb") as f:
         "chr_filt_st_list": chr_filt_st_list,
         "B_depth_start": 0,
         "B_depth_end": fm,
+        'depth_policy': args.depth_policy,
+        'legacy_chr_filt_st_list': legacy_fitted_coordinates,
+        'high_depth_rows': [i for i, key in enumerate(chr_filt_st_list) if key not in legacy_fitted_set],
+        'high_depth_tau': [high_tau_by_coordinate[key] for key in chr_filt_st_list if key not in legacy_fitted_set],
+        'robust_sigma_multiplier': args.robust_sigma_multiplier,
     }, f)
 
-with open(f"{PREFIX}/tot_loc_list.pkl", "wb") as f:
-    pkl.dump(tot_loc_list, f)
-
 np.save(f'{PREFIX}/B.npy', B)
-
-# Native output topology is tied to these exact matrix columns. No fitted
-# weights or display thresholds are involved in recording membership.
-if not pipeline_input_is_vcf(load_pipeline_input(PREFIX)):
-    from structure_nclose import build_structure_model, save_structure_model
-    save_structure_model(PREFIX, build_structure_model(PREFIX))

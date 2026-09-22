@@ -93,7 +93,6 @@ CTG_MAINFLOWDIR = 18
 CTG_MAINFLOWCHR = 19
 
 
-ABS_MAX_COVERAGE_RATIO = 3
 MAX_PATH_CNT = 100
 
 DIR_FOR = 1
@@ -988,33 +987,37 @@ NCLOSE_SIM_DIFF_THRESHOLD = 0.1 * N
 
 chr_order_list = extract_groups(list(df['chr']))
 
-chr_filt_st_list = []
-chr_no_filt_st_list = []
-
-chr_filt_idx_list = []
-chr_no_filt_idx_list = []
-
-for ind, l in enumerate(df.itertuples(index=False)):
-    flag = True
-    if l.meandepth > ABS_MAX_COVERAGE_RATIO * meandepth:
-        flag = False
-    for i in bed_data:
-        if l.chr == i:
-            for j in bed_data[i]:
-                if inclusive_checker(j, (l.st, l.nd)):
-                    flag = False
-                    break
-        if not flag:
-            break
-    
-    if flag:
-        chr_filt_st_list.append((l.chr, l.st))
-        chr_filt_idx_list.append(ind)
-    else:
-        chr_no_filt_st_list.append((l.chr, l.st))
-        chr_no_filt_idx_list.append(ind)
-
+# The saved vectors use stage 22's fitted-then-excluded row order. Rebuilding
+# a depth mask here silently assigns values to different genomic positions
+# whenever stage 22 used another inclusion policy.
+with open(f'{PREFIX}/23_input.pkl', 'rb') as f:
+    matrix_meta = pkl.load(f)
+if matrix_meta.get('matrix_contract') != DEPTH_ONLY_MATRIX_CONTRACT:
+    raise ValueError('Stage 31 requires the stage-22 depth metadata contract')
+chr_filt_st_list = [tuple(row) for row in matrix_meta['chr_filt_st_list']]
 filter_len = len(chr_filt_st_list)
+if matrix_meta.get('B_depth_start') != 0 or matrix_meta.get('B_depth_end') != filter_len:
+    raise ValueError('Stage-22 fitted depth extent does not match its coordinates')
+all_depth_coords = [(row.chr, int(row.st)) for row in df.itertuples(index=False)]
+coordinate_indices = {key: i for i, key in enumerate(all_depth_coords)}
+fitted_coordinates = set(chr_filt_st_list)
+if (len(coordinate_indices) != len(all_depth_coords)
+        or len(fitted_coordinates) != filter_len
+        or not fitted_coordinates.issubset(coordinate_indices)):
+    raise ValueError('Stage-22 coordinates are duplicated or absent from the depth table')
+chr_no_filt_st_list = [key for key in all_depth_coords if key not in fitted_coordinates]
+chr_filt_idx_list = [coordinate_indices[key] for key in chr_filt_st_list]
+chr_no_filt_idx_list = [coordinate_indices[key] for key in chr_no_filt_st_list]
+if len(B) != len(all_depth_coords) or np.load(f'{PREFIX}/predict_B.npy', mmap_mode='r').shape != B.shape:
+    raise ValueError('Saved depth vectors do not match the stage-22 genomic row order')
+pd.DataFrame({
+    'row_index': np.arange(len(all_depth_coords)),
+    'chrom': [key[0] for key in chr_filt_st_list + chr_no_filt_st_list],
+    'start': [key[1] for key in chr_filt_st_list + chr_no_filt_st_list],
+    'fitted': [True] * filter_len + [False] * len(chr_no_filt_st_list),
+}).to_csv(f'{PREFIX}/stage31_depth_coordinates.tsv', sep='\t', index=False)
+logging.info('Stage 31 uses stage-22 depth coordinates: %d fitted, %d excluded',
+             filter_len, len(chr_no_filt_st_list))
 
 def get_vec_from_stat_loc(stat_loc_):
     df = pd.read_csv(stat_loc_, compression='gzip', comment='#', sep='\t', names=['chr', 'st', 'nd', 'length', 'covsite', 'totaldepth', 'cov', 'meandepth'])

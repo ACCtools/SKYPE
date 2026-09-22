@@ -59,6 +59,8 @@ def run_skype(CELL_LINE, PREFIX, ctg_paf, ctg_aln_paf, utg_paf, utg_aln_paf,
     rescue_parser.add_argument('--raw-rescue-method', '--raw_rescue_method',
                                choices=('off', 'read', 'olc'), default=None)
     rescue_parser.add_argument('--raw-rescue-options', default='')
+    rescue_parser.add_argument('--depth-policy', choices=('legacy', 'all', 'nclose_l2', 'nclose_huber'), default='legacy')
+    rescue_parser.add_argument('--robust-sigma-multiplier', type=float, default=3.)
     rescue_options, remaining_options = rescue_parser.parse_known_args(
         normalize_extra_args(option_skype)
     )
@@ -147,6 +149,7 @@ def run_skype(CELL_LINE, PREFIX, ctg_paf, ctg_aln_paf, utg_paf, utg_aln_paf,
                 "predict_B.npy",
                 "contig_pat_vec_data.pkl",
                 "tot_loc_list.pkl",
+                "23_input.pkl",
             ],
         }
         if skype_start_at in restart_requirements:
@@ -262,7 +265,9 @@ def run_skype(CELL_LINE, PREFIX, ctg_paf, ctg_aln_paf, utg_paf, utg_aln_paf,
                 subprocess_run([
                     "python", os.path.join(skype_folder_loc, "22_save_matrix.py"),
                     RCS_BED, MAIN_STAT_NORM_LOC,
-                    PREFIX, "-t", THREAD
+                    PREFIX, "-t", THREAD,
+                    '--depth-policy', rescue_options.depth_policy,
+                    '--robust-sigma-multiplier', str(rescue_options.robust_sigma_multiplier),
                 ] + PROGRESS, check=True)
 
             if start_at <= 23:

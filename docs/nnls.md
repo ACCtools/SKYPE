@@ -1,6 +1,6 @@
 # Depth NNLS convergence
 
-Stage 23 fits every stage-22 feature with the unregularized objective
+By default, stage 23 fits every stage-22 feature with the unregularized objective
 `min ||A w - B||²`, subject to `w >= 0`, without an intercept. It uses
 `scipy.optimize.nnls` in Float64, with `adelie.solver.bvls` as the working-set
 fallback. The historical `nnls_solver.jl` is not called by this stage.
@@ -108,3 +108,46 @@ weights when matching duplicate columns, and retain a feasible incumbent if a
 new numerical result has higher raw SSE. Copying coefficients by position is
 invalid when graph enumeration changes feature order. If graph truncation
 removes previous columns, the nesting guarantee no longer follows.
+
+## Optional high-depth policies
+
+Native runs accept `--depth-policy` through the existing `--option_skype` string:
+
+```bash
+bash run.sh --skype-start-at 22 \
+  --option_skype '--depth-policy nclose_huber --robust-sigma-multiplier 3' \
+  H2009 path/to/result
+```
+
+The default `legacy` policy retains the existing depth cutoff. `all` restores
+amplitude-only exclusions, while `nclose_l2` and `nclose_huber` restore only
+contiguous high-depth blocks intersecting an NClose's original aligned segments.
+The NClose gate uses the current graph topology, including zero-weight paths;
+it does not require raw-read support or a positive fitted NClose weight.
+Existing CenSat exclusions remain in place. NClose-gated policies apply to the
+native assembly route. Stage 22 builds the current structure model before the
+gate, so an earlier fitting result is not required.
+
+For `nclose_huber`, original clean bins retain their quadratic loss. Restored
+bins use one-sided Huber loss: with residual `r = A w - B`, the loss is
+`r² / 2` for `r >= -tau`, and `-tau*r - tau²/2` otherwise. `tau` is the positive
+sigma multiplier times the chromosome noise estimated from original clean bins.
+The solver uses L-BFGS-B followed by weighted NNLS and checks the actual robust
+gradient against a scaled KKT tolerance of `1e-10`. It retains individual
+high-depth observations while aggregating only quadratic clean rows. This is a
+different objective and convergence certificate from the default NNLS above.
+
+If there are no high-depth candidates, `high_depth_gate.tsv` is a header-only
+table with a stable schema. If no candidate passes the NClose gate, the report
+retains those candidates with `included=false`. In both cases `nclose_huber`
+calls the existing raw NNLS directly at stage 23, records
+`high_depth_fallback: "no_high_depth_rows"`, and writes an empty
+`unexplained_high_depth.npy`. The robust optimizer and any cached initial weights
+are unnecessary for this fallback.
+
+With restored rows, `unexplained_high_depth.npy` records
+`max(B - A w - tau, 0)` in the order of `high_depth_rows` in `23_input.pkl`.
+These values are diagnostics, not extra path depth or SV support. Stage 31 uses
+the same saved row coordinates for plots and VCF depth annotations; it never
+reconstructs a separate amplitude mask. Changing the policy requires rerunning
+from stage 22 so matrix rows and their metadata stay aligned.

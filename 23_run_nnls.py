@@ -1,4 +1,4 @@
-"""Fit every stage-22 depth feature with one raw non-negative solve."""
+"""Fit stage-22 depth features with raw NNLS or the optional robust policy."""
 
 import argparse
 import json
@@ -130,9 +130,24 @@ def main(argv=None):
     solver_matrix = feature_depth.T
     logging.info("NNLS BLAS thread limit : %d", args.thread)
     with threadpool_limits(limits=args.thread, user_api="blas"):
-        weights, solver_diagnostics = fit_raw_nnls(
-            solver_matrix, target_depth, return_diagnostics=True
-        )
+        high_mask = np.zeros(len(target_depth), dtype=bool)
+        if matrix_meta.get('depth_policy') == 'nclose_huber':
+            high_mask[matrix_meta.get('high_depth_rows', [])] = True
+        if high_mask.any():
+            from high_depth import solve_robust
+            initial_path = os.path.join(prefix, 'weight.npy')
+            initial = np.load(initial_path) if os.path.isfile(initial_path) else None
+            if initial is not None and initial.shape != (solver_matrix.shape[1],):
+                initial = None
+            weights, solver_diagnostics = solve_robust(
+                solver_matrix, np.asarray(target_depth, dtype=float), high_mask,
+                np.asarray(matrix_meta['high_depth_tau']), initial=initial)
+        else:
+            weights, solver_diagnostics = fit_raw_nnls(
+                solver_matrix, target_depth, return_diagnostics=True
+            )
+            if matrix_meta.get('depth_policy') == 'nclose_huber':
+                solver_diagnostics['high_depth_fallback'] = 'no_high_depth_rows'
         predict_depth = predict_depth_from_weights(solver_matrix, weights)
         predict_fail = predict_depth_from_weights(feature_fail.T, weights)
         solver_diagnostics["blas_threads_requested"] = args.thread
@@ -141,6 +156,10 @@ def main(argv=None):
             for pool in threadpool_info() if pool["user_api"] == "blas"
         ]
     predict_all = np.concatenate((predict_depth, predict_fail))
+    if matrix_meta.get('depth_policy') == 'nclose_huber':
+        np.save(os.path.join(prefix, 'unexplained_high_depth.npy'),
+                np.maximum(target_depth[high_mask] - predict_depth[high_mask]
+                           - np.asarray(matrix_meta.get('high_depth_tau', [])), 0))
 
     target_norm = np.linalg.norm(target_depth)
     error = np.linalg.norm(predict_depth - target_depth)
