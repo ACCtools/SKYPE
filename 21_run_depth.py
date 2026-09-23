@@ -503,7 +503,13 @@ def adjust_paf_overlap(paf1_data, paf2_data):
     return new_paf1, new_paf2
 
 def format_nonzero_depth_paf_row(row, cigar):
-    """Format a PAF row, or omit alignments that have no depth-bearing span."""
+    """Format a PAF row, or omit alignments that have no depth-bearing span.
+
+    Every row of a depth PAF is a piece the path selected, so it is written as
+    primary: PanDepth skips tp:A:S rows, and alignasm keeps minimap2's secondary
+    tag on query pieces that no primary row covers.
+    """
+    row = ["tp:A:P" if item == "tp:A:S" else item for item in row]
     query_start, query_end = map(int, row[2:4])
     target_start, target_end = map(int, row[7:9])
     alignment_block_length = int(row[10])
@@ -856,9 +862,7 @@ def create_final_depth_paf_type2(type2_ins_del, PREFIX):
         )
         with open(output_path, 'wt') as f:
             for i in ins_paf:
-                # These are selected path pieces, including inverted anchors;
-                # PanDepth must not discard them because of source tp:A:S.
-                print(i.replace('\ttp:A:S', '\ttp:A:P'), file=f)
+                print(i, file=f)
 
 
 def rev_dir(d):

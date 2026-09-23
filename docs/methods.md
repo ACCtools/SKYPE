@@ -143,20 +143,28 @@ NCloses that survive standard NClose filtering, before the independent CEN-SAT
 endpoint merge. For oriented NCloses `A → B` and `C → D`, the inner directions
 must agree. Candidates then require either:
 
-- `distance(B, C) < 5 Mb`; or
-- two inversion junctions with both `distance(A, C) < 5 Mb` and
-  `distance(B, D) < 5 Mb`.
+- `distance(B, C) < 3 Mb`; or
+- two inversion junctions with both `distance(A, C) < 3 Mb` and
+  `distance(B, D) < 3 Mb`.
 
 Distances are gaps between reference alignment intervals; overlapping intervals
 have distance zero. Reverse-complement combinations are also checked when the
-NClose's reference-start span is at least 100 kb. The outer
-`abs(reference_ratio - 1) > 0.1` condition applies, with no minimum estimated
-outer span.
+NClose's reference-start span is at least 100 kb. In either layout the `B → C`
+bridge must walk forward: along the strand B is walked on, C's breakend must lie
+at or ahead of B's. Mirrored reverse-complement combinations of the same two
+junctions pass the unsigned distance and direction checks, and stage 21 would
+fill their bridge backwards. The outer `abs(reference_ratio - 1) > 0.1`
+condition applies, with no minimum estimated outer span.
 
-Stages 11 and 21 preserve selected secondary anchors and internal alignment
-pieces. A long inversion can therefore retain its middle depth while the signed
-correction feature represents flanking deletions. The saved insertion/deletion
-circuits are indexed with insertion circuits first, then deletion circuits.
+Stages 11 and 21 preserve internal alignment pieces, so a long inversion can
+retain its middle depth while the signed correction feature represents flanking
+deletions. The saved insertion/deletion circuits are indexed with insertion
+circuits first, then deletion circuits.
+
+Every row in a stage-11 or stage-21 depth PAF is an alignment piece that a path
+selected, so it is written as `tp:A:P`. alignasm keeps minimap2's `tp:A:S` tag
+on query pieces that no primary row covers, and PanDepth skips such rows by
+default.
 
 ### Graph traversal
 

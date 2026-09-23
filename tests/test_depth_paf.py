@@ -6,6 +6,7 @@ from pathlib import Path
 
 
 RUN_DEPTH_PATH = Path(__file__).resolve().parents[1] / "21_run_depth.py"
+OUTLIER_PATH = Path(__file__).resolve().parents[1] / "11_Ref_Outlier_Contig_Modify.py"
 
 
 def load_depth_paf_formatter():
@@ -24,6 +25,26 @@ def load_depth_paf_formatter():
 
 
 format_nonzero_depth_paf_row = load_depth_paf_formatter()
+
+
+def load_outlier_depth_paf_row():
+    """Load the stage-11 depth PAF row writer without running stage 11."""
+    import re
+
+    tree = ast.parse(OUTLIER_PATH.read_text(encoding="utf-8"))
+    functions = [
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name in ("cs_to_cigar", "row_with_cigar", "depth_paf_row")
+    ]
+    module = ast.Module(body=functions, type_ignores=[])
+    namespace = {"re": re}
+    exec(compile(module, str(OUTLIER_PATH), "exec"), namespace)
+    return namespace["depth_paf_row"]
+
+
+outlier_depth_paf_row = load_outlier_depth_paf_row()
 
 
 def load_virtual_bridge_check():
@@ -131,6 +152,22 @@ class DepthPafOutputTests(unittest.TestCase):
         row = self.make_row()
         row[10] = 0
         self.assertIsNone(format_nonzero_depth_paf_row(row, "10M"))
+
+    def test_selected_secondary_alignment_is_written_as_primary(self) -> None:
+        # H1437 utg009555l chr5:70,381,937-70,483,959 is tp:A:S in alignasm; PanDepth
+        # skipped it and the path column lost this piece's depth.
+        row = self.make_row()
+        row.insert(12, "tp:A:S")
+        output = format_nonzero_depth_paf_row(row, "10M").split("\t")
+        self.assertIn("tp:A:P", output)
+        self.assertNotIn("tp:A:S", output)
+        self.assertEqual(output[-2:], ["cs:Z::10", "cg:Z:10M"])
+
+    def test_stage11_selected_secondary_alignment_is_written_as_primary(self) -> None:
+        row = self.make_row()
+        row.insert(12, "tp:A:S")
+        output = outlier_depth_paf_row(row)
+        self.assertEqual(output[12:], ["tp:A:P", "cs:Z::10", "cg:Z:10M"])
 
     def test_omits_empty_cigar_even_with_positive_coordinates(self) -> None:
         self.assertIsNone(format_nonzero_depth_paf_row(self.make_row(), ""))

@@ -210,13 +210,6 @@ def node_original_or_synthetic_paf_row(node):
     return node_to_paf_row(node)
 
 
-def conjoined_anchor_paf_row(node):
-    # This alignment is selected by the conjoined path. Retain its coverage
-    # even when the source mapper labelled it as a secondary alignment.
-    return ["tp:A:P" if item == "tp:A:S" else item
-            for item in node_original_or_synthetic_paf_row(node)]
-
-
 def row_with_cigar(row):
     row = list(row)
     cs_tag = next((str(item) for item in reversed(row) if str(item).startswith("cs:Z:")), None)
@@ -227,10 +220,20 @@ def row_with_cigar(row):
     return row + ["cg:Z:" + cs_to_cigar(cs_tag[5:])]
 
 
+def depth_paf_row(row):
+    """A selected alignment as a depth PAF row.
+
+    Rows written here are pieces an outlier path selected, so PanDepth must count
+    them. It skips tp:A:S rows, and alignasm keeps minimap2's secondary tag on
+    query pieces that no primary row covers, so the tag is rewritten as primary.
+    """
+    return ["tp:A:P" if item == "tp:A:S" else item for item in row_with_cigar(row)]
+
+
 def write_rows_as_paf(path, rows):
     with open(path, "wt") as f:
         for row in rows:
-            for value in row_with_cigar(row):
+            for value in depth_paf_row(row):
                 print(value, end="\t", file=f)
             print("", file=f)
 
@@ -543,7 +546,7 @@ for s1, e1, s2, e2 in type4_ins:
     cntbj+=1
     write_rows_as_paf(
         f"{TYPE_4_VECTOR_PATH}/back_jump/{cntbj}_type2_merge_{type2_indel_cnt}.paf",
-        [conjoined_anchor_paf_row(contig_data[i]) for i in (s1, e2)]
+        [node_original_or_synthetic_paf_row(contig_data[i]) for i in (s1, e2)]
     )
         
     with open(f"{TYPE_4_VECTOR_PATH}/back_jump/{cntbj}_base.paf", "wt") as f:
@@ -574,7 +577,7 @@ for s1, e1, s2, e2 in type4_del:
     cntfj+=1
     write_rows_as_paf(
         f"{TYPE_4_VECTOR_PATH}/front_jump/{cntfj}_type2_merge_{type2_indel_cnt}.paf",
-        [conjoined_anchor_paf_row(contig_data[i]) for i in (s1, e2)]
+        [node_original_or_synthetic_paf_row(contig_data[i]) for i in (s1, e2)]
     )
         
     with open(f"{TYPE_4_VECTOR_PATH}/front_jump/{cntfj}_base.paf", "wt") as f:
