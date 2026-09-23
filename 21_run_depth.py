@@ -516,125 +516,12 @@ def format_nonzero_depth_paf_row(row, cigar):
         return None
     return "\t".join(map(str, list(row) + [f"cg:Z:{cigar}"]))
 
-def process_raw_contig_list(full_connected_path, key_cnt):
-    output_path = f'{output_folder}/{key_cnt}.paf'
-    skipped_rows = 0
-    with open(output_path, 'w') as f:
-        init_contig = form_normal_contig(contig_data[full_connected_path[0][1]])
-        path_contig = [init_contig]
-        full_connected_path_len = len(full_connected_path)
-        vcnt = 0
-        for i in range(1, full_connected_path_len):
-            curr_contig = path_contig[-1]
-            next_contig = contig_data[full_connected_path[i][1]]
-            # path_contig[-1] 은 form_normal_contig 결과라 simple_ctg_alt_* 같은 합성 contig는
-            # CTG_NAM 이 원본 이름(예: ptg000012l)으로 복구돼 있음. 같은 path 내 동일 contig
-            # chunk끼리 이름 비교가 깨져서 virtual_contig가 잘못 삽입되는 것을 막기 위해
-            # 이름 비교는 contig_data (합성 이름 그대로) 기준으로 한다.
-            curr_node_name = contig_data[full_connected_path[i-1][1]][CTG_NAM]
-            next_node_name = next_contig[CTG_NAM]
-            if curr_contig[CHR_NAM] == next_contig[CHR_NAM] and curr_node_name != next_node_name \
-            or (curr_contig[CHR_NAM] == next_contig[CHR_NAM] and (full_connected_path[i-1][0] in (2, 3) or full_connected_path[i][0] in (2, 3))):
-                dist = distance_checker(curr_contig, next_contig)
-                if dist > 0:
-                    if curr_contig[CHR_END] < next_contig[CHR_STR]:
-                        if curr_node_name != next_node_name:
-                            vcnt += 1
-                            new_contig = form_virtual_contig(curr_contig[CHR_LEN], curr_contig[CHR_END], next_contig[CHR_STR], curr_contig[CHR_NAM], vcnt)
-                            new_next_contig = form_normal_contig(next_contig)
-                            path_contig.append(new_contig)
-                            path_contig.append(new_next_contig)
-                        else:
-                            new_next_contig = form_normal_contig(next_contig)
-                            path_contig.append(new_next_contig)
-                    else:
-                        if curr_node_name != next_node_name:
-                            vcnt += 1
-                            new_contig = form_virtual_contig(curr_contig[CHR_LEN], next_contig[CHR_END], curr_contig[CHR_STR], curr_contig[CHR_NAM], vcnt)
-                            new_next_contig = form_normal_contig(next_contig)
-                            path_contig.append(new_contig)
-                            path_contig.append(new_next_contig)
-                        else:
-                            new_next_contig = form_normal_contig(next_contig)
-                            path_contig.append(new_next_contig)
-                elif curr_contig[CHR_END] == next_contig[CHR_STR] or curr_contig[CHR_STR] == next_contig[CHR_END]:
-                    new_next_contig = form_normal_contig(next_contig)
-                    path_contig.append(new_next_contig)
-                else:
-                    if curr_contig[CTG_DIR] == '-':
-                        curr_contig_rc = node_dir_transform(curr_contig)
-                    else:
-                        curr_contig_rc = copy.deepcopy(curr_contig)
-                    if next_contig[CTG_DIR] == '-':
-                        next_contig_rc = node_dir_transform(next_contig)
-                    else:
-                        next_contig_rc = copy.deepcopy(next_contig)
-                    curr_contig_data = [curr_contig_rc[CHR_STR], curr_contig_rc[CHR_END],
-                                        curr_contig_rc[CTG_STR], curr_contig_rc[CTG_END],
-                                        curr_contig[9], curr_contig[10],
-                                        curr_contig[-1][5:]]
+def process_raw_contig_list(full_connected_path):
+    """Build depth PAF rows for one connected contig path.
 
-                    next_contig_origin = form_normal_contig(next_contig)
-                    
-                    next_contig_data = [next_contig_rc[CHR_STR], next_contig_rc[CHR_END],
-                                        next_contig_rc[CTG_STR], next_contig_rc[CTG_END],
-                                        next_contig_origin[9], next_contig_origin[10],
-                                        next_contig_origin[-1][5:]]
-                    # try:
-                    #     assert(not (inclusive_checker_pair(tuple(curr_contig_data[0:2]), tuple(next_contig_data[0:2])) \
-                    #            or inclusive_checker_pair(tuple(next_contig_data[0:2]), tuple(curr_contig_data[0:2]))))
-                    # except:
-                    #     print(tuple(curr_contig_data[0:2]), tuple(next_contig_data[0:2]))
-                    #     print(index_file_path)
-                    if full_connected_path[i-1][0] in {2, 3}:
-                        is_index_inc = (next_contig[CTG_DIR]=='+' and full_connected_path[i][0]==1) or \
-                                    (next_contig[CTG_DIR]=='-' and full_connected_path[i][0]==0)
-                    elif full_connected_path[i][0] in {2, 3}:
-                        is_index_inc = (curr_contig[CTG_DIR]=='+' and full_connected_path[i-1][0]==1) or \
-                                (curr_contig[CTG_DIR]=='-' and full_connected_path[i-1][0]==0)
-                    else:
-                        assert(curr_node_name != next_node_name)
-                        is_index_inc = (curr_contig[CTG_DIR]=='+' and full_connected_path[i-1][0]==1) or \
-                                (curr_contig[CTG_DIR]=='-' and full_connected_path[i-1][0]==0)
-
-                    if is_index_inc: # 1324 2413
-
-                        curr_paf, next_paf = adjust_paf_overlap(curr_contig_data, next_contig_data)
-                        
-                        curr_result = form_adjusted_contig(curr_contig, curr_paf)
-                        if curr_contig[CTG_DIR]=='-':
-                            curr_result = node_dir_transform(curr_result)
-                        next_result = form_adjusted_contig(next_contig_origin, next_paf)
-                        if next_contig[CTG_DIR]=='-':
-                            next_result = node_dir_transform(next_result)
-                        path_contig[-1] = curr_result
-                        path_contig.append(next_result)
-                    else:
-                        next_paf, curr_paf = adjust_paf_overlap(next_contig_data, curr_contig_data)
-                        
-                        curr_result = form_adjusted_contig(curr_contig, curr_paf)
-                        if curr_contig[CTG_DIR]=='-':
-                            curr_result = node_dir_transform(curr_result)
-                        next_result = form_adjusted_contig(next_contig_origin, next_paf)
-                        if next_contig[CTG_DIR]=='-':
-                            next_result = node_dir_transform(next_result)
-                        path_contig[-1] = curr_result
-                        path_contig.append(next_result)
-
-                    
-            else:
-                next_contig_origin = form_normal_contig(next_contig)
-                path_contig.append(next_contig_origin)
-        for row in path_contig:
-            output_row = format_nonzero_depth_paf_row(
-                row, cs_to_cigar(row[-1][5:])
-            )
-            if output_row is None:
-                skipped_rows += 1
-                continue
-            print(output_row, file=f)
-
-def process_raw_contig_list_ecdna(full_connected_path):
+    Returns the formatted rows and the number of rows skipped because they
+    carry no depth-bearing alignment.
+    """
     init_contig = form_normal_contig(contig_data[full_connected_path[0][1]])
     path_contig = [init_contig]
     full_connected_path_len = len(full_connected_path)
@@ -642,7 +529,10 @@ def process_raw_contig_list_ecdna(full_connected_path):
     for i in range(1, full_connected_path_len):
         curr_contig = path_contig[-1]
         next_contig = contig_data[full_connected_path[i][1]]
-        # 동일 contig chunk 사이에 virtual_contig가 잘못 들어가지 않도록 contig_data 기준 이름 비교.
+        # path_contig[-1] 은 form_normal_contig 결과라 simple_ctg_alt_* 같은 합성 contig는
+        # CTG_NAM 이 원본 이름(예: ptg000012l)으로 복구돼 있음. 같은 path 내 동일 contig
+        # chunk끼리 이름 비교가 깨져서 virtual_contig가 잘못 삽입되는 것을 막기 위해
+        # 이름 비교는 contig_data (합성 이름 그대로) 기준으로 한다.
         curr_node_name = contig_data[full_connected_path[i-1][1]][CTG_NAM]
         next_node_name = next_contig[CTG_NAM]
         if curr_contig[CHR_NAM] == next_contig[CHR_NAM] and curr_node_name != next_node_name \
@@ -737,7 +627,7 @@ def process_raw_contig_list_ecdna(full_connected_path):
         else:
             next_contig_origin = form_normal_contig(next_contig)
             path_contig.append(next_contig_origin)
-    final_output_list = []
+    output_rows = []
     skipped_rows = 0
     for row in path_contig:
         output_row = format_nonzero_depth_paf_row(
@@ -746,10 +636,10 @@ def process_raw_contig_list_ecdna(full_connected_path):
         if output_row is None:
             skipped_rows += 1
             continue
-        final_output_list.append(output_row)
-    
-    return final_output_list, skipped_rows
-    
+        output_rows.append(output_row)
+    return output_rows, skipped_rows
+
+
 def create_final_depth_paf(data):
     (key, key_cnt) = data
     key_type, key_val = key
@@ -792,12 +682,12 @@ def create_final_depth_paf(data):
         # Never happen
         assert(False)
 
+    output_rows = []
     if len(raw_contig_list) > 0:
-        process_raw_contig_list(raw_contig_list, key_cnt)
-    else:
-        # Create empty file
-        with open(f'{output_folder}/{key_cnt}.paf', 'w') as f:
-            pass
+        output_rows, _ = process_raw_contig_list(raw_contig_list)
+    with open(f'{output_folder}/{key_cnt}.paf', 'w') as f:
+        for row in output_rows:
+            print(row, file=f)
 
 def create_final_depth_paf_ecdna(ecdna_circuit, save_path):
     for idx, circuit in enumerate(ecdna_circuit):
@@ -850,7 +740,7 @@ def create_final_depth_paf_ecdna(ecdna_circuit, save_path):
                 assert(False)
 
             if len(raw_contig_list) > 0:
-                output_rows, skipped_count = process_raw_contig_list_ecdna(
+                output_rows, skipped_count = process_raw_contig_list(
                     raw_contig_list
                 )
                 circuit_paf += output_rows
@@ -922,7 +812,7 @@ def create_final_depth_paf_type2(type2_ins_del, PREFIX):
                 assert(False)
 
             if len(raw_contig_list) > 0:
-                output_rows, skipped_count = process_raw_contig_list_ecdna(
+                output_rows, skipped_count = process_raw_contig_list(
                     raw_contig_list
                 )
                 ins_paf += output_rows
