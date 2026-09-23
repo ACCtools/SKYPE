@@ -3296,8 +3296,74 @@ def circuit_length_calculator(circuit, contig_rows):
     return circuit_len
 
 
+def order_ecdna_circuit(index_cycle, contig_rows):
+    """Canonical ordered form of a 4-node graph cycle, or None for other shapes.
+
+    The cycle is rotated (and reversed when needed, which is the same circuit read on
+    the opposite strand) so that it starts at its lowest row index and first walks
+    inside that row's own unitig. A crossed circuit then reads (s1, e1, e2, s2) and a
+    tandem one (s1, e1, s2, e2), where (s1, e1) and (s2, e2) are the two NCloses.
+    """
+    order = [int(index) for index in index_cycle]
+    if len(order) != 4 or len(set(order)) != 4:
+        return None
+    start = order.index(min(order))
+    order = order[start:] + order[:start]
+    name = [contig_rows[index][CTG_NAM] for index in order]
+    if name[3] == name[0] and name[1] != name[0]:
+        order = [order[0]] + order[:0:-1]
+        name = [contig_rows[index][CTG_NAM] for index in order]
+    if name[0] != name[1] or name[2] != name[3] or name[1] == name[2]:
+        return None
+    return tuple(order)
+
+
+def find_ecdna_circuits(contig_rows, ecdna_nclose_nodes):
+    """Four-node ecDNA circuits of the inversion-only graph, in traversal order.
+
+    Each set of four rows is reported once. When the graph holds both the crossed
+    and the tandem traversal of the same rows, the crossed one is kept (the legacy
+    stage-21 layout). The length limit is applied to the sorted rows, as before.
+    """
+    adjacency = initialize_inversion_only_graph(
+        contig_rows,
+        ecdna_nclose_nodes,
+    )
+    nx_graph = make_inversion_nx_graph(adjacency, contig_rows)
+    tool_graph = Graph(directed=True)
+    node_to_vertex = {}
+    vertex_to_node = {}
+    for node in nx_graph.nodes:
+        vertex = tool_graph.add_vertex()
+        node_to_vertex[node] = vertex
+        vertex_to_node[int(vertex)] = node
+    for source, target in nx_graph.edges:
+        tool_graph.add_edge(node_to_vertex[source], node_to_vertex[target])
+
+    traversals = defaultdict(set)
+    for circuit in all_circuits(tool_graph, max_length=4):
+        if len(circuit) != 4:
+            continue
+        ordered = order_ecdna_circuit(
+            [vertex_to_node[int(vertex)][1] for vertex in circuit],
+            contig_rows,
+        )
+        if ordered is not None:
+            traversals[tuple(sorted(ordered))].add(ordered)
+
+    circuits = []
+    for rows_key in sorted(traversals):
+        if circuit_length_calculator(rows_key, contig_rows) >= CIRCUIT_ECDNA_LENGTH_LIMIT:
+            continue
+        # Crossed circuits walk the second unitig backwards (b0 > b1).
+        circuits.append(
+            min(traversals[rows_key], key=lambda item: (item[2] < item[3], item))
+        )
+    return circuits
+
+
 def build_ecdna_circuits(contig_rows, raw_nclose_nodes, all_nclose_comp):
-    """Reproduce the legacy four-node inversion-circuit ecDNA candidates."""
+    """Four-node inversion-circuit ecDNA candidates, each in traversal order."""
 
     all_nclose_nodes = convert_all_nclose_comp_to_nclose_nodes(
         contig_rows,
@@ -3314,40 +3380,7 @@ def build_ecdna_circuits(contig_rows, raw_nclose_nodes, all_nclose_comp):
         sum(len(value) for value in ecdna_nclose_nodes.values()),
     )
 
-    adjacency = initialize_inversion_only_graph(
-        contig_rows,
-        ecdna_nclose_nodes,
-    )
-    nx_graph = make_inversion_nx_graph(adjacency, contig_rows)
-    tool_graph = Graph(directed=True)
-    node_to_vertex = {}
-    vertex_to_node = {}
-    for node in nx_graph.nodes:
-        vertex = tool_graph.add_vertex()
-        node_to_vertex[node] = vertex
-        vertex_to_node[int(vertex)] = node
-    for source, target in nx_graph.edges:
-        tool_graph.add_edge(node_to_vertex[source], node_to_vertex[target])
-
-    circuit_candidates = set()
-    for circuit in all_circuits(tool_graph, max_length=4):
-        if len(circuit) != 4:
-            continue
-        circuit_candidates.add(
-            tuple(
-                sorted(
-                    int(vertex_to_node[int(vertex)][1])
-                    for vertex in circuit
-                )
-            )
-        )
-
-    circuits = sorted(
-        circuit
-        for circuit in circuit_candidates
-        if circuit_length_calculator(circuit, contig_rows)
-        < CIRCUIT_ECDNA_LENGTH_LIMIT
-    )
+    circuits = find_ecdna_circuits(contig_rows, ecdna_nclose_nodes)
     return circuits, ecdna_nclose_nodes
 
 
@@ -4285,7 +4318,8 @@ def conjoined_type4(contig_data, filtered_type2_nodes, depth_df, repeat_censat_d
     Reject a junction when both breakpoints are depth-balanced, unless the
     interval between them overlaps CEN-SAT (including flanking endpoints).
     Accept a B-C bridge below 3 Mb, or two inversion junctions whose corresponding
-    ends A-C and B-D are below 3 Mb. Keep all four nodes so the existing signed
+    ends A-C and B-D are below 3 Mb. Either way the B-C bridge must walk forward
+    (see conjoined_bridge_advances). Keep all four nodes so the existing signed
     INDEL depth column also represents an inversion with flanking deletions.
     NCloses spanning >=100 kb are also considered in reverse-complement order.
     """
@@ -4366,7 +4400,10 @@ def conjoined_type4(contig_data, filtered_type2_nodes, depth_df, repeat_censat_d
                 for c1f_use, c1fi_, c1b_use, c1bi_ in c1_flips:
                     for c2f_use, c2fi_, c2b_use, c2bi_ in c2_flips:
                         # Directions are compared after each selected RC transform.
-                        if c1b_use[CTG_DIR] == c2f_use[CTG_DIR]:
+                        if (
+                            c1b_use[CTG_DIR] == c2f_use[CTG_DIR]
+                            and conjoined_bridge_advances(c1b_use, c2f_use)
+                        ):
                             indel_layout = (
                                 distance_checker(c1b_use, c2f_use)
                                 < TYPE2_CONJOIN_COMPRESS_LIMIT
@@ -4400,6 +4437,22 @@ def conjoined_type4(contig_data, filtered_type2_nodes, depth_df, repeat_censat_d
     conjoined_type4_del = sorted(conjoined_type4_del)
 
     return conjoined_type4_ins, conjoined_type4_del
+
+def conjoined_bridge_advances(inner_back, inner_front) -> bool:
+    """Whether the B -> C bridge of a conjoined pair A -> B, C -> D walks forward.
+
+    Both rows are taken after any RC transform and share one CTG_DIR, the strand
+    the path walks them on. The path enters B at its breakend and leaves C at its
+    breakend, and stage 21 fills the reference between them, so C's breakend must
+    lie ahead of B's along that strand. The unsigned distance checks cannot tell
+    this apart: mirrored RC combinations of the same two junctions pass them too.
+    """
+    back_breakend = get_breakend_coord(inner_back, 1)
+    front_breakend = get_breakend_coord(inner_front, 0)
+    if inner_back[CTG_DIR] == '+':
+        return front_breakend >= back_breakend
+    return front_breakend <= back_breakend
+
 
 def get_breakend_coord(contig, side_idx):
     nclose_loc = side_idx == 0

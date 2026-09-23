@@ -516,6 +516,34 @@ def format_nonzero_depth_paf_row(row, cigar):
         return None
     return "\t".join(map(str, list(row) + [f"cg:Z:{cigar}"]))
 
+def virtual_bridge_follows_strand(curr_contig, curr_row, curr_type, next_contig, next_row, next_type):
+    """Whether a virtual contig may bridge two path pieces on the reference.
+
+    A path walks a row along its alignment strand when traversed DIR_FOR and
+    along the opposite strand when traversed DIR_BAK. The reference gap filled
+    by a virtual contig is only a plain continuation if both pieces are walked
+    on the same strand and the next piece starts downstream of where the
+    current one ends; otherwise the bridge covers sequence both breakends
+    discard. Graph-only traversal labels (DIR_IN/DIR_OUT) carry no strand and
+    are not checked. Strands come from the original contig_data rows; the
+    coordinates come from the (possibly overlap-adjusted) path rows.
+    """
+    if curr_type not in (DIR_FOR, DIR_BAK) or next_type not in (DIR_FOR, DIR_BAK):
+        return True
+
+    def walked_strand(row, traversal):
+        if traversal == DIR_FOR:
+            return row[CTG_DIR]
+        return '-' if row[CTG_DIR] == '+' else '+'
+
+    strand = walked_strand(curr_row, curr_type)
+    if strand != walked_strand(next_row, next_type):
+        return False
+    if strand == '+':
+        return next_contig[CHR_STR] >= curr_contig[CHR_END]
+    return next_contig[CHR_END] <= curr_contig[CHR_STR]
+
+
 def process_raw_contig_list(full_connected_path):
     """Build depth PAF rows for one connected contig path.
 
@@ -539,6 +567,19 @@ def process_raw_contig_list(full_connected_path):
         or (curr_contig[CHR_NAM] == next_contig[CHR_NAM] and (full_connected_path[i-1][0] in (2, 3) or full_connected_path[i][0] in (2, 3))):
             dist = distance_checker(curr_contig, next_contig)
             if dist > 0:
+                if curr_node_name != next_node_name:
+                    prev_type, prev_idx = full_connected_path[i-1]
+                    next_type, next_idx = full_connected_path[i]
+                    assert virtual_bridge_follows_strand(
+                        curr_contig, contig_data[prev_idx], prev_type,
+                        next_contig, contig_data[next_idx], next_type,
+                    ), (
+                        "Virtual contig bridge runs against the path strand: "
+                        f"{curr_contig[CTG_NAM]} {curr_contig[CHR_NAM]}:{curr_contig[CHR_STR]}-{curr_contig[CHR_END]} "
+                        f"(row {prev_idx}, traversal {prev_type}) -> "
+                        f"{next_contig[CTG_NAM]} {next_contig[CHR_NAM]}:{next_contig[CHR_STR]}-{next_contig[CHR_END]} "
+                        f"(row {next_idx}, traversal {next_type})"
+                    )
                 if curr_contig[CHR_END] < next_contig[CHR_STR]:
                     if curr_node_name != next_node_name:
                         vcnt += 1
@@ -640,6 +681,40 @@ def process_raw_contig_list(full_connected_path):
     return output_rows, skipped_rows
 
 
+def bnd_raw_contig_list(key_val):
+    """Contig path for one BND key ((s_type, s), (e_type, e)).
+
+    Endpoints on different contigs are bridged through G. When the two endpoint
+    rows overlap on the reference there is no gap to fill, so they are joined
+    directly and process_raw_contig_list trims the overlap; G carries no strand
+    and would otherwise detour through contained contigs.
+    """
+    (s_type, s), (e_type, e) = key_val
+    raw_contig_list = []
+    if contig_data[s][CTG_NAM] != contig_data[e][CTG_NAM]:
+        overlapping = (
+            contig_data[s][CHR_NAM] == contig_data[e][CHR_NAM]
+            and distance_checker(contig_data[s], contig_data[e]) == 0
+        )
+        if not overlapping and nx.has_path(G, source=(DIR_OUT, s), target=(DIR_IN, e)):
+            path = nx.shortest_path(G, source=(DIR_OUT, s), target=(DIR_IN, e), weight='weight')
+            raw_contig_list.append((s_type, s))
+            for node in path[1:-1]:
+                raw_contig_list.append((node[0], node[1]))
+            raw_contig_list.append((e_type, e))
+        else:
+            raw_contig_list.append((s_type, s))
+            raw_contig_list.append((e_type, e))
+    else:
+        if s<e:
+            for i in range(s, e+1):
+                raw_contig_list.append((DIR_FOR, i))
+        else:
+            for i in range(s, e-1, -1):
+                raw_contig_list.append((DIR_BAK, i))
+    return raw_contig_list
+
+
 def create_final_depth_paf(data):
     (key, key_cnt) = data
     key_type, key_val = key
@@ -659,25 +734,7 @@ def create_final_depth_paf(data):
             for i in range(s-1, e, -1):
                 raw_contig_list.append((DIR_BAK, i))
     elif key_type == BND_TYPE:
-        (s_type, s), (e_type, e) = key_val
-        
-        if contig_data[s][CTG_NAM] != contig_data[e][CTG_NAM]:
-            if nx.has_path(G, source=(DIR_OUT, s), target=(DIR_IN, e)):
-                path = nx.shortest_path(G, source=(DIR_OUT, s), target=(DIR_IN, e), weight='weight')
-                raw_contig_list.append((s_type, s))
-                for node in path[1:-1]:
-                    raw_contig_list.append((node[0], node[1]))
-                raw_contig_list.append((e_type, e))
-            else:
-                raw_contig_list.append((s_type, s))
-                raw_contig_list.append((e_type, e))
-        else:
-            if s<e:
-                for i in range(s, e+1):
-                    raw_contig_list.append((DIR_FOR, i))
-            else:
-                for i in range(s, e-1, -1):
-                    raw_contig_list.append((DIR_BAK, i))
+        raw_contig_list.extend(bnd_raw_contig_list(key_val))
     else:
         # Never happen
         assert(False)
@@ -689,15 +746,25 @@ def create_final_depth_paf(data):
         for row in output_rows:
             print(row, file=f)
 
+def ecdna_circuit_segments(circuit):
+    """Path segments of an ordered ecDNA circuit (a0, a1, b0, b1) from stage 01:
+    a0->a1 inside one unitig, bridge to b0, b0->b1 inside the other, bridge to a0.
+    Each unitig stretch is walked in its row index order."""
+    assert len(circuit) == 4
+    a0, a1, b0, b1 = circuit
+    a_type = DIR_FOR if a0 < a1 else DIR_BAK
+    b_type = DIR_FOR if b0 < b1 else DIR_BAK
+    return [
+        (CTG_IN_TYPE, ((a_type, a0), (a_type, a1))),
+        (BND_TYPE, ((a_type, a1), (b_type, b0))),
+        (CTG_IN_TYPE, ((b_type, b0), (b_type, b1))),
+        (BND_TYPE, ((b_type, b1), (a_type, a0))),
+    ]
+
+
 def create_final_depth_paf_ecdna(ecdna_circuit, save_path):
     for idx, circuit in enumerate(ecdna_circuit):
-        assert(len(circuit) == 4)
-        data = []
-        s1, e1, s2, e2 = circuit
-        data.append((CTG_IN_TYPE, ((DIR_FOR, s1), (DIR_FOR, e1))))
-        data.append((BND_TYPE, ((DIR_FOR, e1), (DIR_BAK, e2))))
-        data.append((CTG_IN_TYPE, ((DIR_BAK, e2), (DIR_BAK, s2))))
-        data.append((BND_TYPE, ((DIR_BAK, s2), (DIR_FOR, s1))))
+        data = ecdna_circuit_segments(circuit)
         circuit_paf = []
         skipped_rows = 0
         for (key_type, key_val) in data:
@@ -716,25 +783,7 @@ def create_final_depth_paf_ecdna(ecdna_circuit, save_path):
                     for i in range(s-1, e, -1):
                         raw_contig_list.append((DIR_BAK, i))
             elif key_type == BND_TYPE:
-                (s_type, s), (e_type, e) = key_val
-                
-                if contig_data[s][CTG_NAM] != contig_data[e][CTG_NAM]:
-                    if nx.has_path(G, source=(DIR_OUT, s), target=(DIR_IN, e)):
-                        path = nx.shortest_path(G, source=(DIR_OUT, s), target=(DIR_IN, e), weight='weight')
-                        raw_contig_list.append((s_type, s))
-                        for node in path[1:-1]:
-                            raw_contig_list.append((node[0], node[1]))
-                        raw_contig_list.append((e_type, e))
-                    else:
-                        raw_contig_list.append((s_type, s))
-                        raw_contig_list.append((e_type, e))
-                else:
-                    if s<e:
-                        for i in range(s, e+1):
-                            raw_contig_list.append((DIR_FOR, i))
-                    else:
-                        for i in range(s, e-1, -1):
-                            raw_contig_list.append((DIR_BAK, i))
+                raw_contig_list.extend(bnd_raw_contig_list(key_val))
             else:
                 # Never happen
                 assert(False)
@@ -788,25 +837,7 @@ def create_final_depth_paf_type2(type2_ins_del, PREFIX):
                     for i in range(s-1, e, -1):
                         raw_contig_list.append((DIR_BAK, i))
             elif key_type == BND_TYPE:
-                (s_type, s), (e_type, e) = key_val
-                
-                if contig_data[s][CTG_NAM] != contig_data[e][CTG_NAM]:
-                    if nx.has_path(G, source=(DIR_OUT, s), target=(DIR_IN, e)):
-                        path = nx.shortest_path(G, source=(DIR_OUT, s), target=(DIR_IN, e), weight='weight')
-                        raw_contig_list.append((s_type, s))
-                        for node in path[1:-1]:
-                            raw_contig_list.append((node[0], node[1]))
-                        raw_contig_list.append((e_type, e))
-                    else:
-                        raw_contig_list.append((s_type, s))
-                        raw_contig_list.append((e_type, e))
-                else:
-                    if s<e:
-                        for i in range(s, e+1):
-                            raw_contig_list.append((DIR_FOR, i))
-                    else:
-                        for i in range(s, e-1, -1):
-                            raw_contig_list.append((DIR_BAK, i))
+                raw_contig_list.extend(bnd_raw_contig_list(key_val))
             else:
                 # Never happen
                 assert(False)

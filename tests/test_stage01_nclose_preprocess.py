@@ -619,10 +619,13 @@ class Stage01ContractTests(unittest.TestCase):
             self.assertIn("initial_rejections", rejection_lines[1])
             self.assertIn("synthetic_test", rejection_lines[1])
 
-    def test_ecdna_circuits_are_unique_sorted_four_node_cycles(self):
+    def test_ecdna_circuits_are_unique_ordered_four_node_cycles(self):
+        # Two unitigs with duplication-like junctions close a forward-only circle.
         contig_data = [
-            make_node("cycle", "chr1", index * 1_000, index * 1_000 + 100, index=index)
-            for index in range(4)
+            make_node("utg_a", "chr1", 1_000, 1_100, index=0),
+            make_node("utg_a", "chr1", 5_000, 5_100, index=1),
+            make_node("utg_b", "chr1", 6_000, 6_100, index=2),
+            make_node("utg_b", "chr1", 0, 100, index=3),
         ]
         cycle_graph = nx.DiGraph()
         cycle_nodes = [(np.DIR_FOR, index) for index in range(4)]
@@ -883,6 +886,105 @@ class Stage01ContractTests(unittest.TestCase):
             self.assertTrue((prefix / "path_data.pkl").is_file())
             self.assertTrue((prefix / "limit_combinations.json").is_file())
             self.assertFalse((prefix / "path_di_data.pkl").exists())
+
+
+def ecdna_rows(*rows):
+    """Contig rows from (unitig, strand, start, end) on one chromosome."""
+    return [
+        make_node(name, "chr14", start, end, direction=strand, index=index)
+        for index, (name, strand, start, end) in enumerate(rows)
+    ]
+
+
+def ecdna_nclose_nodes(contig_data):
+    """One NClose per unitig, joining its two rows."""
+    nodes = defaultdict(list)
+    for index in range(0, len(contig_data), 2):
+        nodes[contig_data[index][np.CTG_NAM]].append((index, index + 1))
+    return nodes
+
+
+class EcdnaCircuitTests(unittest.TestCase):
+    # H1437 utg019208l / utg041993l: the graph holds only the tandem traversal.
+    TANDEM = (
+        ("utg019208l", "+", 99_318_297, 99_382_654),
+        ("utg019208l", "-", 99_314_518, 99_315_331),
+        ("utg041993l", "-", 99_296_135, 99_313_461),
+        ("utg041993l", "+", 99_318_896, 99_339_418),
+    )
+    # H1437 utg000189l / utg068556l: the graph holds both traversals.
+    BOTH = (
+        ("utg000189l", "-", 120_837_288, 120_837_692),
+        ("utg000189l", "+", 147_814_031, 147_848_830),
+        ("utg068556l", "+", 153_501_401, 153_522_188),
+        ("utg068556l", "-", 152_804_903, 152_826_687),
+    )
+
+    def test_tandem_only_circuit_is_stored_in_traversal_order(self):
+        rows = ecdna_rows(*self.TANDEM)
+        self.assertEqual(
+            np.find_ecdna_circuits(rows, ecdna_nclose_nodes(rows)),
+            [(0, 1, 2, 3)],
+        )
+
+    def test_crossed_traversal_is_preferred_when_both_exist(self):
+        rows = ecdna_rows(*self.BOTH)
+        self.assertEqual(
+            np.find_ecdna_circuits(rows, ecdna_nclose_nodes(rows)),
+            [(0, 1, 3, 2)],
+        )
+
+    def test_order_ecdna_circuit_rotates_and_reverses_to_lowest_row(self):
+        rows = ecdna_rows(*self.BOTH)
+        self.assertEqual(np.order_ecdna_circuit([2, 3, 0, 1], rows), (0, 1, 2, 3))
+        self.assertEqual(np.order_ecdna_circuit([1, 0, 2, 3], rows), (0, 1, 3, 2))
+        self.assertEqual(np.order_ecdna_circuit([3, 2, 1, 0], rows), (0, 1, 2, 3))
+        self.assertEqual(np.order_ecdna_circuit([2, 3, 1, 0], rows), (0, 1, 3, 2))
+        self.assertIsNone(np.order_ecdna_circuit([0, 2, 1, 3], rows))
+        self.assertIsNone(np.order_ecdna_circuit([0, 1, 1, 3], rows))
+
+
+class ConjoinedType4BridgeTests(unittest.TestCase):
+    # HCC1937 chr19 balanced inversion of 31.16-42.38 Mb:
+    # utg029955l 42,384,975(L) <-> 31,164,628(L) and
+    # utg005874l 31,164,635(R) <-> 42,384,979(R).
+    INVERSION = (
+        ("utg029955l", "+", 42_336_004, 42_384_975),
+        ("utg029955l", "-", 30_942_420, 31_164_628),
+        ("utg005874l", "-", 31_164_635, 31_790_498),
+        ("utg005874l", "+", 42_384_979, 42_464_971),
+    )
+
+    def rows(self):
+        return [
+            make_node(name, "chr19", start, end, direction=strand, index=index)
+            for index, (name, strand, start, end) in enumerate(self.INVERSION)
+        ]
+
+    def conjoin(self, rows):
+        with patch.object(np, "estimate_type2_global_noise_sigma", return_value=0.0), patch.object(
+            np, "depth_df_to_by_chrom", return_value={}
+        ), patch.object(np, "breakpoint_is_depth_balanced", return_value=False):
+            return np.conjoined_type4(rows, {"chr19": [(0, 1), (2, 3)]}, None, None, {})
+
+    def test_bridge_must_reach_the_next_breakend_ahead(self):
+        rows = self.rows()
+        flipped = [
+            make_node(name, "chr19", start, end,
+                      direction="+" if strand == "-" else "-", index=index)
+            for index, (name, strand, start, end) in enumerate(self.INVERSION)
+        ]
+        # RC of NClose 1, original NClose 2: B walks down from 42.38 Mb to C at 31.16 Mb.
+        self.assertTrue(np.conjoined_bridge_advances(flipped[0], rows[2]))
+        # Original NClose 1, RC of NClose 2: B walks down from 31.16 Mb, C lies at 42.38 Mb.
+        self.assertFalse(np.conjoined_bridge_advances(rows[1], flipped[3]))
+
+    def test_mirrored_inversion_combination_is_not_conjoined(self):
+        ins, dels = self.conjoin(self.rows())
+        # Only the derivative-chromosome reading remains; its mirror (0, 1, 3, 2),
+        # which would bridge 31.16 -> 42.38 Mb backwards as an insertion, is gone.
+        self.assertEqual(ins, [])
+        self.assertEqual(dels, [(1, 0, 2, 3)])
 
 
 if __name__ == "__main__":
