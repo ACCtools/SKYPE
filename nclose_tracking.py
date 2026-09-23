@@ -28,12 +28,25 @@ INDEL_MERGE_TOLERANCE = 10_000
 NCLOSE_ID_PREFIX = "SKYPE.nclose."
 
 
-def make_indel_candidate(event_type, chrom, ref_a, ref_b, source):
+def make_indel_candidate(event_type, chrom, ref_a, ref_b, source, inner=None):
+    """Build an INDEL dedup key from its outer span.
+
+    Conjoined type2 candidates also pass ``inner``, the reference span of their
+    two inner anchors. Their depth column carries the type2_ins bridge between
+    those anchors, so the outer span alone does not identify the column.
+    """
     st, nd = sorted((int(ref_a), int(ref_b)))
-    return dict(event_type=event_type, chrom=chrom, st=st, nd=nd, source=source)
+    if inner is not None:
+        inner = tuple(sorted(int(x) for x in inner))
+    return dict(event_type=event_type, chrom=chrom, st=st, nd=nd, source=source, inner=inner)
 
 
 def same_indel_candidate(a, b, tolerance=INDEL_MERGE_TOLERANCE):
+    inner_a, inner_b = a.get('inner'), b.get('inner')
+    if (inner_a is None) != (inner_b is None):
+        return False
+    if inner_a is not None and any(abs(x - y) > tolerance for x, y in zip(inner_a, inner_b)):
+        return False
     return (a['event_type'] == b['event_type'] and a['chrom'] == b['chrom']
             and abs(a['st'] - b['st']) <= tolerance
             and abs(a['nd'] - b['nd']) <= tolerance)

@@ -519,6 +519,12 @@ for event in unique_vcf_type4_events:
     vcf_type4_outlier_index[(event_type, outlier_idx)] = event
 
 
+def conjoined_inner_span(e1, s2):
+    """Reference span of the two inner anchors bridged by type2_ins."""
+    coords = [contig_data[i][CHR_STR] for i in (e1, s2)] + [contig_data[i][CHR_END] for i in (e1, s2)]
+    return min(coords), max(coords)
+
+
 type2_indel_cnt = 0
 
 for s1, e1, s2, e2 in type4_ins:
@@ -529,7 +535,8 @@ for s1, e1, s2, e2 in type4_ins:
     ref_st = min(contig_data[s1][CHR_STR], contig_data[s1][CHR_END])
     ref_nd = max(contig_data[e2][CHR_STR], contig_data[e2][CHR_END])
 
-    candidate = make_indel_candidate('back_jump', chr_name, ref_st, ref_nd, f'type2_merge:{type2_indel_cnt}')
+    candidate = make_indel_candidate('back_jump', chr_name, ref_st, ref_nd, f'type2_merge:{type2_indel_cnt}',
+                                     inner=conjoined_inner_span(e1, s2))
     if not should_emit_indel_candidate(candidate):
         continue
 
@@ -559,7 +566,8 @@ for s1, e1, s2, e2 in type4_del:
     ref_st = min(contig_data[s1][CHR_STR], contig_data[s1][CHR_END])
     ref_nd = max(contig_data[e2][CHR_STR], contig_data[e2][CHR_END])
 
-    candidate = make_indel_candidate('front_jump', chr_name, ref_st, ref_nd, f'type2_merge:{type2_indel_cnt}')
+    candidate = make_indel_candidate('front_jump', chr_name, ref_st, ref_nd, f'type2_merge:{type2_indel_cnt}',
+                                     inner=conjoined_inner_span(e1, s2))
     if not should_emit_indel_candidate(candidate):
         continue
 

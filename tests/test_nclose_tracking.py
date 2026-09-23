@@ -23,8 +23,10 @@ from nclose_tracking import (
     format_nclose_ids,
     initialise_filter_status,
     load_type4_edge_event_map,
+    make_indel_candidate,
     nclose_event_id_by_key,
     record_filter_stage,
+    same_indel_candidate,
     save_event_catalog,
     write_nclose_report,
 )
@@ -280,6 +282,35 @@ class NCloseUsageTests(unittest.TestCase):
                 pickle.dump([edge], handle)
             mapping = load_type4_edge_event_map(prefix, catalog)
         self.assertEqual(mapping, {((0, 11), (0, 12)): indel_key})
+
+
+class IndelCandidateDedupTests(unittest.TestCase):
+    def test_outer_span_only_candidates_merge_within_tolerance(self):
+        a = make_indel_candidate("front_jump", "chr5", 19_331, 115_147_875, "a")
+        b = make_indel_candidate("front_jump", "chr5", 115_142_823, 19_331, "b")
+        self.assertTrue(same_indel_candidate(a, b))
+
+    def test_conjoined_candidates_with_different_inner_bridge_are_distinct(self):
+        # HCC1954 chr5: same outer span within 10 kb, different type2_ins bridge.
+        a = make_indel_candidate("front_jump", "chr5", 19_331, 115_147_875, "type2_merge:434",
+                                 inner=(113_335_109, 115_135_290))
+        b = make_indel_candidate("front_jump", "chr5", 19_331, 115_142_823, "type2_merge:447",
+                                 inner=(110_820_022, 113_336_742))
+        self.assertFalse(same_indel_candidate(a, b))
+
+    def test_conjoined_candidates_with_same_inner_bridge_merge(self):
+        a = make_indel_candidate("front_jump", "chr5", 19_331, 115_147_875, "a",
+                                 inner=(115_135_290, 113_335_109))
+        b = make_indel_candidate("front_jump", "chr5", 19_400, 115_142_823, "b",
+                                 inner=(113_336_000, 115_133_474))
+        self.assertTrue(same_indel_candidate(a, b))
+
+    def test_conjoined_and_plain_candidates_are_distinct(self):
+        plain = make_indel_candidate("front_jump", "chr5", 19_331, 115_147_875, "type4")
+        conjoined = make_indel_candidate("front_jump", "chr5", 19_331, 115_147_875, "type2_merge:1",
+                                         inner=(113_335_109, 115_135_290))
+        self.assertFalse(same_indel_candidate(plain, conjoined))
+        self.assertFalse(same_indel_candidate(conjoined, plain))
 
 
 class NCloseStatusAndReportTests(unittest.TestCase):
