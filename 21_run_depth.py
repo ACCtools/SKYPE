@@ -3,6 +3,7 @@ import sys
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from skype_utils import *
+from path_geometry import reference_connection_allowed, walked_strand
 
 import re
 import ast
@@ -175,7 +176,7 @@ def get_key_from_index_file(index_file_path):
             key_list.append((BND_TYPE, (ci, nci)))
             
         if i == len(bnd_index_data) - 2 and bnd_ctg_group[-1] == 2:
-            key_list.append((TEL_TYPE, ctg_ind))
+            key_list.append((TEL_TYPE, next_ctg_ind))
     
     return index_file_path, key_list
 
@@ -523,14 +524,12 @@ def format_nonzero_depth_paf_row(row, cigar):
     return "\t".join(map(str, list(row) + [f"cg:Z:{cigar}"]))
 
 def virtual_bridge_follows_strand(curr_contig, curr_row, curr_type, next_contig, next_row, next_type):
-    """Whether a virtual contig may bridge two path pieces on the reference.
+    """Whether a reference connection follows the path, including overlaps.
 
     A path walks a row along its alignment strand when traversed DIR_FOR and
-    along the opposite strand when traversed DIR_BAK. The reference gap filled
-    by a virtual contig is only a plain continuation if both pieces are walked
-    on the same strand and the next piece starts downstream of where the
-    current one ends; otherwise the bridge covers sequence both breakends
-    discard. Graph-only traversal labels (DIR_IN/DIR_OUT) carry no strand and
+    along the opposite strand when traversed DIR_BAK. Both pieces must walk
+    on the same strand, and either overlap at a shared trim boundary or leave
+    a gap ahead in that direction. Graph-only labels carry no strand and
     are not checked. Strands come from the original contig_data rows; the
     coordinates come from the (possibly overlap-adjusted) path rows.
     """
@@ -546,8 +545,8 @@ def virtual_bridge_follows_strand(curr_contig, curr_row, curr_type, next_contig,
     if strand != walked_strand(next_row, next_type):
         return False
     if strand == '+':
-        return next_contig[CHR_STR] >= curr_contig[CHR_END]
-    return next_contig[CHR_END] <= curr_contig[CHR_STR]
+        return next_contig[CHR_END] >= curr_contig[CHR_STR]
+    return next_contig[CHR_STR] <= curr_contig[CHR_END]
 
 
 def process_raw_contig_list(full_connected_path):
@@ -572,20 +571,18 @@ def process_raw_contig_list(full_connected_path):
         if curr_contig[CHR_NAM] == next_contig[CHR_NAM] and curr_node_name != next_node_name \
         or (curr_contig[CHR_NAM] == next_contig[CHR_NAM] and (full_connected_path[i-1][0] in (2, 3) or full_connected_path[i][0] in (2, 3))):
             dist = distance_checker(curr_contig, next_contig)
+            if curr_node_name != next_node_name:
+                prev_type, prev_idx = full_connected_path[i-1]
+                next_type, next_idx = full_connected_path[i]
+                assert virtual_bridge_follows_strand(
+                    curr_contig, contig_data[prev_idx], prev_type,
+                    next_contig, contig_data[next_idx], next_type,
+                ), (
+                    "Reference connection runs against the path strand: "
+                    f"row {prev_idx} (traversal {prev_type}) -> "
+                    f"row {next_idx} (traversal {next_type})"
+                )
             if dist > 0:
-                if curr_node_name != next_node_name:
-                    prev_type, prev_idx = full_connected_path[i-1]
-                    next_type, next_idx = full_connected_path[i]
-                    assert virtual_bridge_follows_strand(
-                        curr_contig, contig_data[prev_idx], prev_type,
-                        next_contig, contig_data[next_idx], next_type,
-                    ), (
-                        "Virtual contig bridge runs against the path strand: "
-                        f"{curr_contig[CTG_NAM]} {curr_contig[CHR_NAM]}:{curr_contig[CHR_STR]}-{curr_contig[CHR_END]} "
-                        f"(row {prev_idx}, traversal {prev_type}) -> "
-                        f"{next_contig[CTG_NAM]} {next_contig[CHR_NAM]}:{next_contig[CHR_STR]}-{next_contig[CHR_END]} "
-                        f"(row {next_idx}, traversal {next_type})"
-                    )
                 if curr_contig[CHR_END] < next_contig[CHR_STR]:
                     if curr_node_name != next_node_name:
                         vcnt += 1
@@ -690,7 +687,8 @@ def process_raw_contig_list(full_connected_path):
 def bnd_raw_contig_list(key_val):
     """Contig path for one BND key ((s_type, s), (e_type, e)).
 
-    Endpoints on different contigs are bridged through G. When the two endpoint
+    Endpoints on different contigs are bridged through a strand-filtered G.
+    When the two endpoint
     rows overlap on the reference there is no gap to fill, so they are joined
     directly and process_raw_contig_list trims the overlap; G carries no strand
     and would otherwise detour through contained contigs.
@@ -698,12 +696,42 @@ def bnd_raw_contig_list(key_val):
     (s_type, s), (e_type, e) = key_val
     raw_contig_list = []
     if contig_data[s][CTG_NAM] != contig_data[e][CTG_NAM]:
+        s_row, e_row = contig_data[s], contig_data[e]
+        s_strand = walked_strand(s_row[CTG_DIR], s_type)
+        e_strand = walked_strand(e_row[CTG_DIR], e_type)
+        reference_direction = '+' if s_row[CHR_STR] <= e_row[CHR_STR] else '-'
+        if s_strand is None:
+            s_type = DIR_FOR if s_row[CTG_DIR] == (e_strand or reference_direction) else DIR_BAK
+        if e_strand is None:
+            e_type = DIR_FOR if e_row[CTG_DIR] == (s_strand or reference_direction) else DIR_BAK
         overlapping = (
             contig_data[s][CHR_NAM] == contig_data[e][CHR_NAM]
             and distance_checker(contig_data[s], contig_data[e]) == 0
         )
-        if not overlapping and nx.has_path(G, source=(DIR_OUT, s), target=(DIR_IN, e)):
-            path = nx.shortest_path(G, source=(DIR_OUT, s), target=(DIR_IN, e), weight='weight')
+        source, target = (DIR_OUT, s), (DIR_IN, e)
+
+        def allowed_edge(a, b):
+            # Resolve the strandless ports using this BND's actual traversal.
+            a_type, a_idx = (s_type, s) if a == source else a
+            b_type, b_idx = (e_type, e) if b == target else b
+            if contig_data[a_idx][CTG_NAM] == contig_data[b_idx][CTG_NAM]:
+                # An observed unitig stretch may change reference strand,
+                # but must still be walked consistently in query order.
+                if a_type in (DIR_FOR, DIR_BAK) and b_type in (DIR_FOR, DIR_BAK):
+                    return a_type == b_type and (b_idx - a_idx) * (1 if a_type == DIR_FOR else -1) >= 0
+                return True
+            return reference_connection_allowed(
+                contig_data[a_idx], a_type, contig_data[b_idx], b_type,
+            )
+
+        graph = nx.subgraph_view(G, filter_edge=allowed_edge)
+        path = None
+        if not overlapping and source in graph and target in graph:
+            try:
+                path = nx.shortest_path(graph, source=source, target=target, weight='weight')
+            except nx.NetworkXNoPath:
+                pass
+        if path is not None:
             raw_contig_list.append((s_type, s))
             for node in path[1:-1]:
                 raw_contig_list.append((node[0], node[1]))
@@ -1215,39 +1243,20 @@ def connect_nclose_telo(contig_data : list, using_node : list, type_3_graph : di
                     full_bnd_graph[(DIR_FOR, telo_node_idx-1)].append([DIR_IN, telo_node_idx, 0])
             if telo_node[CTG_NAM] != type_3[CTG_NAM] \
             and telo_node[CHR_NAM] == type_3[CHR_NAM]:
-                if telo_node[CHR_END] <= type_3[CHR_END]:
-                    dir1 = "inc"
-                elif type_3[CHR_END] < telo_node[CHR_END]:
-                    dir1 = "dec"
-                if telo_node[CHR_STR] <= type_3[CHR_STR]:
-                    dir2 = "inc"
-                elif type_3[CHR_STR] < telo_node[CHR_STR]:
-                    dir2 = "dec"
+                end_increases = telo_node[CHR_END] <= type_3[CHR_END]
+                start_increases = telo_node[CHR_STR] <= type_3[CHR_STR]
                 dist = distance_checker(telo_node, type_3)
-                # if both end have consistency
-                if dir1 == dir2:
-                    if dir1 == "inc":
-                        if type_3_dir=='+':
-                            full_bnd_graph[(DIR_OUT, telo_node_idx)].append([DIR_FOR, type_3_idx, dist])
-                            full_bnd_graph[(DIR_BAK, type_3_idx)].append([DIR_IN, telo_node_idx, dist])
-                        elif type_3_dir=='-':
-                            full_bnd_graph[(DIR_FOR, type_3_idx)].append([DIR_IN, telo_node_idx, dist])
-                            full_bnd_graph[(DIR_OUT, telo_node_idx)].append([DIR_BAK, type_3_idx, dist])
-                    else:
-                        if type_3_dir=='+':
-                            full_bnd_graph[(DIR_FOR, type_3_idx)].append([DIR_IN, telo_node_idx, dist])
-                            full_bnd_graph[(DIR_OUT, telo_node_idx)].append([DIR_BAK, type_3_idx, dist])
-                        elif type_3_dir=='-':
-                            full_bnd_graph[(DIR_OUT, telo_node_idx)].append([DIR_FOR, type_3_idx, dist])
-                            full_bnd_graph[(DIR_BAK, type_3_idx)].append([DIR_IN, telo_node_idx, dist])
-                # else: each end have different sign of increment
-                # -> one node is included in the other
-                # thus, we should determine by mean val.
+                if end_increases == start_increases:
+                    strands = ('+',) if start_increases else ('-',)
                 else:
-                    full_bnd_graph[(DIR_OUT, telo_node_idx)].append([DIR_FOR, type_3_idx, dist])
-                    full_bnd_graph[(DIR_BAK, type_3_idx)].append([DIR_IN, telo_node_idx, dist])
-                    full_bnd_graph[(DIR_OUT, telo_node_idx)].append([DIR_BAK, type_3_idx, dist])
-                    full_bnd_graph[(DIR_FOR, type_3_idx)].append([DIR_IN, telo_node_idx, dist])
+                    # Containment supports either reference strand. These
+                    # ports are shared by different BNDs; the caller must
+                    # select the strand using the actual endpoint traversal.
+                    strands = ('+', '-')
+                for strand in strands:
+                    traversal = DIR_FOR if type_3_dir == strand else DIR_BAK
+                    full_bnd_graph[(DIR_OUT, telo_node_idx)].append([traversal, type_3_idx, dist])
+                    full_bnd_graph[(1 - traversal, type_3_idx)].append([DIR_IN, telo_node_idx, dist])
     
     return full_bnd_graph
 

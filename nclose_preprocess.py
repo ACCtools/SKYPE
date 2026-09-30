@@ -11,6 +11,7 @@ import sys
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from skype_utils import *
+from path_geometry import conjoined_outer_geometry, reference_connection_allowed, walked_strand
 from parse_vcf import parse_vcf_events, select_vcf_type4_graph_events
 from nclose_tracking import (
     build_bnd_event_catalog,
@@ -3287,13 +3288,33 @@ def make_inversion_nx_graph(bnd_graph_adjacency, contig_rows):
     return G
 
 def circuit_length_calculator(circuit, contig_rows):
-    circuit_len = 0
-    for i in range(len(circuit)):
-        curr_node = circuit[i]
-        next_node = circuit[i+1] if i+1 < len(circuit) else circuit[0]
-        circuit_len += abs(contig_rows[curr_node][CHR_END] - contig_rows[curr_node][CHR_STR])
-        circuit_len += abs(contig_rows[curr_node][CHR_END] - contig_rows[next_node][CHR_STR])
-    return circuit_len
+    """Reference length of the walked unitig pieces and two reference bridges.
+
+    A NClose jumps within a unitig; the distance between its reference loci
+    is not sequence in the circle. Overlapping bridge anchors are counted
+    only up to their common trim boundary, as in stage 21.
+    """
+    circuit = order_ecdna_circuit(circuit, contig_rows)
+    if circuit is None:
+        raise ValueError("Expected an ordered two-unitig ecDNA circuit")
+    a0, a1, b0, b1 = circuit
+    a_type, b_type = int(a0 < a1), int(b0 < b1)
+    length = sum(
+        contig_rows[index][CHR_END] - contig_rows[index][CHR_STR]
+        for start, end in ((a0, a1), (b0, b1))
+        for index in range(min(start, end) + 1, max(start, end))
+    )
+    for start, start_type, end, end_type in (
+        (a1, a_type, b0, b_type), (b1, b_type, a0, a_type),
+    ):
+        first, last = contig_rows[start], contig_rows[end]
+        if not reference_connection_allowed(first, start_type, last, end_type):
+            return float("inf")
+        if walked_strand(first[CTG_DIR], start_type) == '+':
+            length += last[CHR_END] - first[CHR_STR]
+        else:
+            length += first[CHR_END] - last[CHR_STR]
+    return length
 
 
 def order_ecdna_circuit(index_cycle, contig_rows):
@@ -3323,7 +3344,7 @@ def find_ecdna_circuits(contig_rows, ecdna_nclose_nodes):
 
     Each set of four rows is reported once. When the graph holds both the crossed
     and the tandem traversal of the same rows, the crossed one is kept (the legacy
-    stage-21 layout). The length limit is applied to the sorted rows, as before.
+    stage-21 layout), among traversals that pass the walked-length limit.
     """
     adjacency = initialize_inversion_only_graph(
         contig_rows,
@@ -3353,11 +3374,15 @@ def find_ecdna_circuits(contig_rows, ecdna_nclose_nodes):
 
     circuits = []
     for rows_key in sorted(traversals):
-        if circuit_length_calculator(rows_key, contig_rows) >= CIRCUIT_ECDNA_LENGTH_LIMIT:
+        eligible = [
+            circuit for circuit in traversals[rows_key]
+            if circuit_length_calculator(circuit, contig_rows) < CIRCUIT_ECDNA_LENGTH_LIMIT
+        ]
+        if not eligible:
             continue
         # Crossed circuits walk the second unitig backwards (b0 > b1).
         circuits.append(
-            min(traversals[rows_key], key=lambda item: (item[2] < item[3], item))
+            min(eligible, key=lambda item: (item[2] < item[3], item))
         )
     return circuits
 
@@ -4368,69 +4393,51 @@ def conjoined_type4(contig_data, filtered_type2_nodes, depth_df, repeat_censat_d
         flipped[CTG_DIR] = '+' if ctg[CTG_DIR] == '-' else '-'
         return flipped
 
-    for chrom, type2_list in type2_nclose_node.items():
-        L = len(type2_list)
-        for i in range(L):
-            for j in range(i + 1, L):
-                t2n1 = type2_list[i]
-                t2n2 = type2_list[j]
+    def orientations(pair):
+        front_idx, back_idx = pair
+        front, back = contig_data[front_idx], contig_data[back_idx]
+        options = [(front, front_idx, back, back_idx)]
+        if abs(front[CHR_STR] - back[CHR_STR]) >= TYPE2_DIST_FLIP_THRESHOLD:
+            options.append((flip_dir(back), back_idx, flip_dir(front), front_idx))
+        return options
 
-                c1fi, c1bi = t2n1
-                c2fi, c2bi = t2n2
+    def add_candidate(first, second):
+        a, ai, b, bi = first
+        c, ci, d, di = second
+        if b[CTG_DIR] != c[CTG_DIR] or not conjoined_bridge_advances(b, c):
+            return
+        indel_layout = distance_checker(b, c) < TYPE2_CONJOIN_COMPRESS_LIMIT
+        inversion_layout = (
+            a[CTG_DIR] != b[CTG_DIR] and c[CTG_DIR] != d[CTG_DIR]
+            and distance_checker(a, c) < TYPE2_CONJOIN_COMPRESS_LIMIT
+            and distance_checker(b, d) < TYPE2_CONJOIN_COMPRESS_LIMIT
+        )
+        if not (indel_layout or inversion_layout):
+            return
+        ratio, _ = calculate_single_contig_ref_ratio([a, d])
+        if abs(ratio - 1) <= BND_CONTIG_BOUND:
+            return
+        circuit = (ai, bi, ci, di)
+        # A circuit and its full RC are one event. Canonicalize the walked
+        # outer strand, not the unsigned ordering of the alignment starts.
+        if a[CTG_DIR] == '-':
+            circuit = circuit[::-1]
+        geometry = conjoined_outer_geometry(
+            contig_data[circuit[0]], contig_data[circuit[3]], circuit,
+        )
+        target = conjoined_type4_del if geometry['event_type'] == 'front_jump' else conjoined_type4_ins
+        target.add(circuit)
 
-                c1f = contig_data[c1fi]
-                c1b = contig_data[c1bi]
-                c2f = contig_data[c2fi]
-                c2b = contig_data[c2bi]
-
-                # Preserve the existing reference-start span used for RC eligibility.
-                len_c1 = abs(c1f[CHR_STR] - c1b[CHR_STR])
-                len_c2 = abs(c2f[CHR_STR] - c2b[CHR_STR])
-
-                # Candidate orientations per contig (original, and flipped if span >= threshold)
-                c1_flips = [(c1f, c1fi, c1b, c1bi)]
-                c2_flips = [(c2f, c2fi, c2b, c2bi)]
-
-                if len_c1 >= TYPE2_DIST_FLIP_THRESHOLD:
-                    c1_flips.append((flip_dir(c1b), c1bi, flip_dir(c1f), c1fi))
-                if len_c2 >= TYPE2_DIST_FLIP_THRESHOLD:
-                    c2_flips.append((flip_dir(c2b), c2bi, flip_dir(c2f), c2fi))
-
-                # Test all combinations (original/flip × original/flip)
-                for c1f_use, c1fi_, c1b_use, c1bi_ in c1_flips:
-                    for c2f_use, c2fi_, c2b_use, c2bi_ in c2_flips:
-                        # Directions are compared after each selected RC transform.
-                        if (
-                            c1b_use[CTG_DIR] == c2f_use[CTG_DIR]
-                            and conjoined_bridge_advances(c1b_use, c2f_use)
-                        ):
-                            indel_layout = (
-                                distance_checker(c1b_use, c2f_use)
-                                < TYPE2_CONJOIN_COMPRESS_LIMIT
-                            )
-                            inversion_layout = (
-                                c1f_use[CTG_DIR] != c1b_use[CTG_DIR]
-                                and c2f_use[CTG_DIR] != c2b_use[CTG_DIR]
-                                and distance_checker(c1f_use, c2f_use)
-                                < TYPE2_CONJOIN_COMPRESS_LIMIT
-                                and distance_checker(c1b_use, c2b_use)
-                                < TYPE2_CONJOIN_COMPRESS_LIMIT
-                            )
-                            if indel_layout or inversion_layout:
-                                ratio, _ = calculate_single_contig_ref_ratio([c1f_use, c2b_use])
-                                if abs(ratio - 1) > BND_CONTIG_BOUND:
-                                    # Insertion
-                                    if ratio < 0:
-                                        if contig_data[c1fi_][CHR_STR] > contig_data[c2bi_][CHR_STR]:
-                                            conjoined_type4_ins.add((c1fi_, c1bi_, c2fi_, c2bi_))
-                                        else:
-                                            conjoined_type4_ins.add((c2bi_, c2fi_, c1bi_, c1fi_))
-                                    # Deletion
-                                    else:
-                                        if contig_data[c1fi_][CHR_STR] < contig_data[c2bi_][CHR_STR]:
-                                            conjoined_type4_del.add((c1fi_, c1bi_, c2fi_, c2bi_))
-                                        else:
-                                            conjoined_type4_del.add((c2bi_, c2fi_, c1bi_, c1fi_))
+    for type2_list in type2_nclose_node.values():
+        options = [orientations(pair) for pair in type2_list]
+        for i in range(len(options)):
+            for j in range(i + 1, len(options)):
+                for first in options[i]:
+                    for second in options[j]:
+                        # Swapping owners is distinct from the distance-gated
+                        # RC alternatives of either individual NClose.
+                        add_candidate(first, second)
+                        add_candidate(second, first)
 
 
     conjoined_type4_ins = sorted(conjoined_type4_ins)

@@ -3,6 +3,7 @@ import sys
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from skype_utils import *
+from path_geometry import indel_depth_vector
 from skype_output_files import (
     build_matrix_column_locations,
     discover_ecdna_depth_inputs,
@@ -362,7 +363,7 @@ for i, ov_loc, bv_loc, type2_ins_idx, type2_ins_loc in tqdm(
         tv = tv_empty
         explicit_filter_reasons[event_key] = 'FILTERED_02_EXCLUDE_LIST'
     else:
-        tv = ov - bv
+        tv = indel_depth_vector(ov, bv, nclose_event_by_key[event_key])
     
     A_arr[ncnt, :m] = tv
         
@@ -386,7 +387,7 @@ for i, ov_loc, bv_loc, type2_ins_idx, type2_ins_loc in tqdm(
         tv = tv_empty
         explicit_filter_reasons[event_key] = 'FILTERED_02_EXCLUDE_LIST'
     else:
-        tv = ov + bv
+        tv = indel_depth_vector(ov, bv, nclose_event_by_key[event_key])
     
     A_arr[ncnt, :m] = tv
         

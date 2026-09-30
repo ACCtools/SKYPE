@@ -17,6 +17,7 @@ import os
 import pickle
 from collections import Counter
 from typing import Iterable, Mapping, Sequence
+from path_geometry import conjoined_outer_geometry
 
 
 EVENT_CATALOG_PKL = "nclose_event_catalog.pkl"
@@ -305,6 +306,7 @@ def discover_step11_indel_events(prefix: str) -> list[dict]:
     vcf_index = _vcf_outlier_index(prefix)
     events = []
     report_index = 0
+    merged_circuits = None
 
     for event_type in ("front_jump", "back_jump"):
         folder = os.path.join(outlier_root, event_type)
@@ -393,6 +395,22 @@ def discover_step11_indel_events(prefix: str) -> list[dict]:
                 "report_index": report_index,
                 "source": metadata.get("source", f"INDEL_INDEX_{report_index}"),
             }
+            if type2_merge_idx >= 0:
+                if merged_circuits is None:
+                    with open(_require_artifact(prefix, "conjoined_type4_ins_del.pkl"), "rb") as handle:
+                        insertions, deletions = pickle.load(handle)
+                    merged_circuits = list(insertions) + list(deletions)
+                if not primary_rows or not 1 <= type2_merge_idx <= len(merged_circuits):
+                    raise ValueError(f"Invalid merged INDEL input: {primary_path}")
+                geometry = conjoined_outer_geometry(
+                    first, last, merged_circuits[type2_merge_idx - 1],
+                )
+                if geometry["event_type"] != event_type:
+                    raise ValueError(
+                        f"Merged INDEL classification is stale: {primary_path}. "
+                        "Rerun SKYPE from stage 01."
+                    )
+                event.update(geometry)
             for field in (
                 "event_id", "vcf_id", "mate_id", "merged_vcf_ids", "svtype", "nodes"
             ):

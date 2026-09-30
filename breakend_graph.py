@@ -434,6 +434,10 @@ def initialize_bnd_graph(
     for telo_name, edge_list in telo_contig.items():
         for edge in edge_list:
             adjacency[telo_name].append(edge[:2])
+            if edge[0] in (DIR_FOR, DIR_BAK):
+                # Reading a path backwards must also be able to finish at
+                # its own NClose's telomere-bearing row.
+                adjacency[(1 - edge[0], edge[1])].append(telo_name)
             adjacency[(DIR_IN, edge[1])].append(telo_name)
             adjacency[telo_name].append((DIR_OUT, edge[1]))
 
@@ -570,6 +574,9 @@ def initialize_bnd_graph(
         back_name = chr_rev_corr[back_idx]
         for node_a in telo_contig.get(front_name, ()):
             for node_b in telo_contig.get(back_name, ()):
+                front, back = contig_data[node_a[1]], contig_data[node_b[1]]
+                if front[CHR_NAM] != back[CHR_NAM] or front[CHR_STR] > back[CHR_END]:
+                    continue
                 adjacency[(DIR_OUT, node_a[1])].append([DIR_IN, node_b[1]])
                 adjacency[(DIR_OUT, node_b[1])].append([DIR_IN, node_a[1]])
 

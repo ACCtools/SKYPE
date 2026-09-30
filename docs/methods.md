@@ -43,6 +43,24 @@ Type 1, Type 2 and Type 4 are all NCloses. A compound structure is a model of
 how NCloses are used, not an additional original NClose. A reference bridge
 used to explain depth is not, by itself, evidence for an extra junction.
 
+Reference connections between unitigs follow their actual traversal strands,
+including when their alignments overlap or one contains the other. A unitig's
+own observed alignment chain may still change strand at an NClose. Telomere
+entries have matching reverse exits, and both terminal anchors contribute to
+the path depth.
+
+Compound Type 2 candidates are tested in both unitig orders. Their reported
+DEL/DUP span and breakend directions use the walked outer junction boundaries,
+including reverse-complement traversals. The label is separate from the depth
+baseline sign: overlapping duplication anchors subtract their reference union
+once to retain the extra copy in the overlap. The catalog's `depth_base_sign`
+records this arithmetic for stage 22; original alignment strands remain in PAF.
+ecDNA length counts the walked unitig pieces and reference bridges, with overlap
+counted once. Reference distances jumped across an NClose are not circle length.
+
+Runs created before these path-geometry corrections need to restart at stage 01
+to rebuild candidates, paths, depth columns and their report metadata together.
+
 ## Pipeline overview
 
 ACCtools prepares references, assemblies, alignments and read depth, then calls

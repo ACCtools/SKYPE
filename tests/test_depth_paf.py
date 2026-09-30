@@ -3,6 +3,7 @@ from __future__ import annotations
 import ast
 import unittest
 from pathlib import Path
+from path_geometry import reference_connection_allowed, walked_strand
 
 
 RUN_DEPTH_PATH = Path(__file__).resolve().parents[1] / "21_run_depth.py"
@@ -97,6 +98,8 @@ def load_bnd_raw_contig_list(contig_data, graph):
     module = ast.Module(body=functions, type_ignores=[])
     namespace = {
         "nx": nx, "G": graph, "contig_data": contig_data,
+        "reference_connection_allowed": reference_connection_allowed,
+        "walked_strand": walked_strand, "CTG_DIR": 4,
         "CTG_NAM": 0, "CHR_NAM": 5, "CHR_STR": 7, "CHR_END": 8,
         "DIR_FOR": 1, "DIR_BAK": 0, "DIR_IN": 3, "DIR_OUT": 2,
     }

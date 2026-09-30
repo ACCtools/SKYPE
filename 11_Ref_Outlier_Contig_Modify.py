@@ -4,6 +4,7 @@ import pickle as pkl
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from skype_utils import *
+from path_geometry import conjoined_outer_geometry
 from nclose_tracking import (
     replace_catalog_indels, make_indel_candidate, same_indel_candidate,
     INDEL_MERGE_TOLERANCE,
@@ -254,6 +255,21 @@ def make_base_paf_row(chrom, ref_st, ref_nd):
 
 def write_base_paf(path, chrom, ref_st, ref_nd):
     write_rows_as_paf(path, [make_base_paf_row(chrom, ref_st, ref_nd)])
+
+
+def write_conjoined_depth_pafs(circuit, event_idx, merge_idx, root):
+    """Write observed anchors and their baseline, preserving original PAFs."""
+    first, last = (contig_data[circuit[index]] for index in (0, 3))
+    geometry = conjoined_outer_geometry(first, last, circuit)
+    folder = os.path.join(root, geometry['event_type'])
+    write_rows_as_paf(
+        os.path.join(folder, f'{event_idx}_type2_merge_{merge_idx}.paf'),
+        [node_original_or_synthetic_paf_row(node) for node in (first, last)],
+    )
+    write_base_paf(
+        os.path.join(folder, f'{event_idx}_base.paf'), geometry['chrom'],
+        geometry['depth_base_st'], geometry['depth_base_nd'],
+    )
 
 
 def classify_vcf_bnd_type4_pair(nclose_key, node_a_idx, node_b_idx):
@@ -528,69 +544,24 @@ def conjoined_inner_span(e1, s2):
     return min(coords), max(coords)
 
 
-type2_indel_cnt = 0
-
-for s1, e1, s2, e2 in type4_ins:
-    type2_indel_cnt += 1
-    chr_name = contig_data[s1][CHR_NAM]
-    chr_len = chr_data[chr_name]
-
-    ref_st = min(contig_data[s1][CHR_STR], contig_data[s1][CHR_END])
-    ref_nd = max(contig_data[e2][CHR_STR], contig_data[e2][CHR_END])
-
-    candidate = make_indel_candidate('back_jump', chr_name, ref_st, ref_nd, f'type2_merge:{type2_indel_cnt}',
-                                     inner=conjoined_inner_span(e1, s2))
+for type2_indel_cnt, circuit in enumerate(list(type4_ins) + list(type4_del), start=1):
+    s1, e1, s2, e2 = circuit
+    geometry = conjoined_outer_geometry(contig_data[s1], contig_data[e2], circuit)
+    candidate = make_indel_candidate(
+        geometry['event_type'], geometry['chrom'], geometry['st'], geometry['nd'],
+        f'type2_merge:{type2_indel_cnt}', inner=conjoined_inner_span(e1, s2),
+    )
     if not should_emit_indel_candidate(candidate):
         continue
-
-    cntbj+=1
-    write_rows_as_paf(
-        f"{TYPE_4_VECTOR_PATH}/back_jump/{cntbj}_type2_merge_{type2_indel_cnt}.paf",
-        [node_original_or_synthetic_paf_row(contig_data[i]) for i in (s1, e2)]
+    if geometry['event_type'] == 'front_jump':
+        cntfj += 1
+        event_idx = cntfj
+    else:
+        cntbj += 1
+        event_idx = cntbj
+    write_conjoined_depth_pafs(
+        circuit, event_idx, type2_indel_cnt, TYPE_4_VECTOR_PATH,
     )
-        
-    with open(f"{TYPE_4_VECTOR_PATH}/back_jump/{cntbj}_base.paf", "wt") as f:
-            N = ref_st - ref_nd
-            virtual_contig = ["base_contig_1", N, 0, N]
-            virtual_contig += ['+', chr_name, chr_len, ref_nd, ref_st]
-            virtual_contig += [N, N, 0]
-            virtual_contig += ['tp:A:P', 'cs:Z:'+f":{N}"]
-            cigar_str = 'cg:Z:' + cs_to_cigar(virtual_contig[-1][5:])
-            virtual_contig += [cigar_str]
-            for j in virtual_contig:
-                print(j, end="\t", file=f)
-            print("", file=f)
-
-for s1, e1, s2, e2 in type4_del:
-    type2_indel_cnt += 1
-    chr_name = contig_data[s1][CHR_NAM]
-    chr_len = chr_data[chr_name]
-
-    ref_st = min(contig_data[s1][CHR_STR], contig_data[s1][CHR_END])
-    ref_nd = max(contig_data[e2][CHR_STR], contig_data[e2][CHR_END])
-
-    candidate = make_indel_candidate('front_jump', chr_name, ref_st, ref_nd, f'type2_merge:{type2_indel_cnt}',
-                                     inner=conjoined_inner_span(e1, s2))
-    if not should_emit_indel_candidate(candidate):
-        continue
-
-    cntfj+=1
-    write_rows_as_paf(
-        f"{TYPE_4_VECTOR_PATH}/front_jump/{cntfj}_type2_merge_{type2_indel_cnt}.paf",
-        [node_original_or_synthetic_paf_row(contig_data[i]) for i in (s1, e2)]
-    )
-        
-    with open(f"{TYPE_4_VECTOR_PATH}/front_jump/{cntfj}_base.paf", "wt") as f:
-            N = ref_nd - ref_st
-            virtual_contig = ["base_contig_1", N, 0, N]
-            virtual_contig += ['+', chr_name, chr_len, ref_st, ref_nd]
-            virtual_contig += [N, N, 0]
-            virtual_contig += ['tp:A:P', 'cs:Z:'+f":{N}"]
-            cigar_str = 'cg:Z:' + cs_to_cigar(virtual_contig[-1][5:])
-            virtual_contig += [cigar_str]
-            for j in virtual_contig:
-                print(j, end="\t", file=f)
-            print("", file=f)
 
 with open(f"{args.prefix}/{VCF_TYPE4_OUTLIER_INDEX_PKL}", "wb") as f:
     pkl.dump(vcf_type4_outlier_index, f)
