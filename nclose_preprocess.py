@@ -125,6 +125,16 @@ TELOMERE_CLUSTER_THRESHOLD = 500*K
 SUBTELOMERE_LENGTH = 500*K
 MULTI_END_ALIGNMENT_WINDOW = 500*K
 
+# New telomere connections (TELCON) whose telomere-facing base lies farther than
+# NEW_TELOMERE_MIN_END_DIST from the matching reference end assert that this
+# locus is a chromosome end. See new_telomere_rejection_reason.
+NEW_TELOMERE_MIN_END_DIST = 20*K
+NEW_TELOMERE_MIN_HOST_MAPQ = 20
+NEW_TELOMERE_MIN_HOST_SPAN = 1*K
+NEW_TELOMERE_INSERTION_WINDOW = 200*K
+NEW_TELOMERE_ANCHOR_BREAKEND_TOL = 2*K
+MULTI_END_RESCUE_MIN_DEPTH_RATIO = 0.3
+
 MIN_FLANK_SIZE_BP = 1*M
 
 REPEAT_MERGE_GAP = 0
@@ -901,6 +911,69 @@ def find_multi_end_aligned_contigs(contig_data, window=MULTI_END_ALIGNMENT_WINDO
         for row_idx in row_indices_by_contig[contig_name]
     }
     return excluded_contigs, excluded_row_indices
+
+
+def multi_end_host_contigs(contig_data, node_label, excluded_contigs,
+                           window=MULTI_END_ALIGNMENT_WINDOW):
+    """Multi-end contigs whose ambiguity comes only from pure telomere repeats.
+
+    Pure telomere rows (label '*in': inside the expanded reference telomere
+    interval) are TTAGGG arrays that align to whichever chromosome end absorbs
+    them, so their coordinates carry no chromosome identity. A contig is kept
+    ambiguous only if its other rows still reach two distinct ends, or none of
+    them is uniquely placed.
+    """
+    rows_by_contig = defaultdict(list)
+    for row_idx, row in enumerate(contig_data):
+        if row[CTG_NAM] in excluded_contigs:
+            rows_by_contig[row[CTG_NAM]].append(row_idx)
+    hosts = set()
+    for contig_name, row_indices in rows_by_contig.items():
+        host_rows = [
+            idx for idx in row_indices
+            if not node_label[idx][1].endswith('in')
+        ]
+        if not host_rows:
+            continue
+        anchors = set().union(*(
+            terminal_alignment_anchors(contig_data[idx], window) for idx in host_rows
+        ))
+        if len(anchors) >= 2:
+            continue
+        if all(int(contig_data[idx][CTG_MAPQ]) < NEW_TELOMERE_MIN_HOST_MAPQ for idx in host_rows):
+            continue
+        hosts.add(contig_name)
+    return hosts
+
+
+def low_depth_faces(contig_data, telo_connect_info, contig_names, depth_df):
+    """Contigs with a telomere connection whose face lies in a near-empty depth window.
+
+    A host region that the sample's reads hardly cover (below
+    MULTI_END_RESCUE_MIN_DEPTH_RATIO of the autosomal median) cannot carry a
+    chromosome end in this sample; such regions are germline differences from the
+    reference subtelomere.
+    """
+    if depth_df is None or not contig_names:
+        return set()
+    autosomal = depth_df[~depth_df["chr"].isin(("chrX", "chrY", "chrM"))]
+    median_depth = float(np.median(autosomal["meandepth"].to_numpy(dtype=float)))
+    by_chrom = {chrom: frame for chrom, frame in depth_df.groupby("chr", sort=False)}
+    low = set()
+    for idx, telo_name in telo_connect_info.items():
+        node = contig_data[idx]
+        if node[CTG_NAM] not in contig_names:
+            continue
+        face = node[CHR_STR] if telo_name[-1] == 'f' else node[CHR_END]
+        frame = by_chrom.get(node[CHR_NAM])
+        if frame is None:
+            continue
+        window = frame[(frame["st"] <= face + 1) & (face + 1 <= frame["nd"])]
+        if window.empty:
+            continue
+        if float(window["meandepth"].iloc[0]) < MULTI_END_RESCUE_MIN_DEPTH_RATIO * median_depth:
+            low.add(node[CTG_NAM])
+    return low
 
 
 def import_data2(file_path : str) -> list :
@@ -1704,6 +1777,52 @@ def telomere_in_terminal_censat(node, side, censat_data):
     )
 
 
+def new_telomere_rejection_reason(contig_data, node_label, idx, telo_name):
+    """Return why a new telomere connection is not a chromosome end, or None.
+
+    Applies only when the telomere-facing base is farther than
+    NEW_TELOMERE_MIN_END_DIST from the matching reference end; nearer
+    connections are ordinary reference telomeres.
+
+    - host_mapq: beyond SUBTELOMERE_LENGTH the host must be uniquely placed
+      (MAPQ >= NEW_TELOMERE_MIN_HOST_MAPQ). MAPQ-0 hosts are paralogs or
+      interstitial telomeric sequence, e.g. the chr2q14 ancestral fusion site.
+    - host_span: a host of <= NEW_TELOMERE_MIN_HOST_SPAN reference bp is an
+      alignment fragment, not a chromosome arm (same cutoff as NClose anchors).
+    - insertion: the host's other neighbour is a telomere-labelled or another
+      chromosome's terminal block, so the host is inserted into that chromosome
+      end, which remains the real end.
+    """
+    node = contig_data[idx]
+    side = telo_name[-1]
+    face = node[CHR_STR] if side == 'f' else node[CHR_END]
+    end_dist = face if side == 'f' else node[CHR_LEN] - face
+    if end_dist <= NEW_TELOMERE_MIN_END_DIST:
+        return None
+    if (
+        end_dist > SUBTELOMERE_LENGTH
+        and len(node) > CTG_MAPQ
+        and int(node[CTG_MAPQ]) < NEW_TELOMERE_MIN_HOST_MAPQ
+    ):
+        return "host_mapq"
+    if node[CHR_END] - node[CHR_STR] <= NEW_TELOMERE_MIN_HOST_SPAN:
+        return "host_span"
+    # The telomere precedes the host in contig order when the host's
+    # telomere-facing reference end is also its contig-front end.
+    telomere_in_front = (node[CTG_DIR] == '+') == (side == 'f')
+    other = idx + 1 if telomere_in_front else idx - 1
+    if 0 <= other < len(contig_data) and contig_data[other][CTG_NAM] == node[CTG_NAM]:
+        neighbour = contig_data[other]
+        if node_label[other][0] != '0':
+            return "insertion"
+        if (
+            neighbour[CHR_NAM] != node[CHR_NAM]
+            and terminal_alignment_anchors(neighbour, NEW_TELOMERE_INSERTION_WINDOW)
+        ):
+            return "insertion"
+    return None
+
+
 def preprocess_telo(contig_data : list, node_label : list, censat_data=None) -> tuple :
     telo_preprocessed_contig = []
     telo_connect_info = {}
@@ -1886,6 +2005,20 @@ def preprocess_telo(contig_data : list, node_label : list, censat_data=None) -> 
             report_case[case] = [row for row in report_case[case] if row[1] not in excluded]
         if excluded:
             logging.info("Excluded %d new telomere candidates inside terminal censat", len(excluded))
+    rejected = {}
+    for idx, name in telo_connect_info.items():
+        reason = new_telomere_rejection_reason(contig_data, node_label, idx, name)
+        if reason is not None:
+            rejected[idx] = reason
+    for idx in rejected:
+        del telo_connect_info[idx]
+    for case in ('A', 'B', 'C'):
+        report_case[case] = [row for row in report_case[case] if row[1] not in rejected]
+    if rejected:
+        logging.info(
+            "Excluded %d new telomere candidates without a chromosome-end host: %s",
+            len(rejected), dict(Counter(rejected.values())),
+        )
     return telo_preprocessed_contig, report_case, telo_connect_info
 
 def subtelo_cut(contig_data : list, node_label : list, subnode_label : list) -> list :
@@ -1910,16 +2043,32 @@ def subtelo_cut(contig_data : list, node_label : list, subnode_label : list) -> 
             end_telcon = True
         front_dest = '0'
         end_dest = '0'
+        # Cut only when the outermost telomere-labelled node of the block faces
+        # the contig tip (a captured terminal segment). If it faces the junction,
+        # the partner chromosome continues past it (an end-to-end fusion), as in
+        # the ESC case of preprocess_telo.
+        front_first_telo = None
+        end_first_telo = None
         if not front_telcon:
             while front_telo_bound<=curr_contig_ed and subnode_label[front_telo_bound][0] != '0' :
-                if node_label[front_telo_bound][0] != '0':
-                    front_block_contain_telo = True
+                if node_label[front_telo_bound][0] != '0' and front_first_telo is None:
+                    front_first_telo = front_telo_bound
                 front_telo_bound+=1
         if not end_telcon:
             while end_telo_bound>=curr_contig_st and subnode_label[end_telo_bound][0] != '0':
-                if node_label[end_telo_bound][0] != '0':
-                    end_block_contain_telo = True
+                if node_label[end_telo_bound][0] != '0' and end_first_telo is None:
+                    end_first_telo = end_telo_bound
                 end_telo_bound-=1
+        if front_first_telo is not None:
+            front_block_contain_telo = (
+                node_label[front_first_telo][1][0] + contig_data[front_first_telo][CTG_DIR]
+                in ("f+", "b-")
+            )
+        if end_first_telo is not None:
+            end_block_contain_telo = (
+                node_label[end_first_telo][1][0] + contig_data[end_first_telo][CTG_DIR]
+                in ("b+", "f-")
+            )
         for_cut = False
         bak_cut = False
         if front_telo_bound > curr_contig_st and front_block_contain_telo:
@@ -3479,6 +3628,26 @@ def _prepare_paf_source_rows(resources, paf_path, policy, excluded_unitigs=()):
     if not contig_data:
         return [], set(), set(), original_node_count
     excluded_contigs, excluded_rows = find_multi_end_aligned_contigs(contig_data)
+    node_label = label_node(contig_data, resources.telo_dict)
+    host_contigs = multi_end_host_contigs(contig_data, node_label, excluded_contigs)
+    telo_preprocessed_contig, _, telo_connect_info = preprocess_telo(
+        contig_data,
+        node_label,
+        resources.censat_data,
+    )
+    rescued_contigs = host_contigs - low_depth_faces(
+        contig_data, telo_connect_info, host_contigs, resources.depth_df,
+    )
+    if rescued_contigs:
+        excluded_contigs = excluded_contigs - rescued_contigs
+        excluded_rows = {
+            row_idx for row_idx in excluded_rows
+            if contig_data[row_idx][CTG_NAM] not in rescued_contigs
+        }
+        logging.info(
+            f"Kept {len(rescued_contigs)} multi-end-aligned contigs whose only "
+            "ambiguous rows are pure telomere repeats"
+        )
     excluded_origins = {contig_data[idx][10] for idx in excluded_rows}
     if excluded_contigs:
         logging.info(
@@ -3486,12 +3655,6 @@ def _prepare_paf_source_rows(resources, paf_path, policy, excluded_unitigs=()):
             f"({len(excluded_rows)} PAF rows)"
         )
 
-    node_label = label_node(contig_data, resources.telo_dict)
-    telo_preprocessed_contig, _, telo_connect_info = preprocess_telo(
-        contig_data,
-        node_label,
-        resources.censat_data,
-    )
     excluded_telo_candidates = sum(
         row_idx in excluded_rows for row_idx in telo_connect_info
     )
@@ -6024,7 +6187,14 @@ def apply_subtelomeric_orientation_filter(
             return 'inward' if ctg_dir == '+' else 'outward'
         return 'outward' if ctg_dir == '+' else 'inward'
 
-    def endpoint_orientations(node_idx):
+    def near_reference_end(node):
+        chromosome_length = chr_len.get(node[CHR_NAM], 0)
+        return (
+            node[CHR_STR] < SUBTELO_TIP_LIMIT
+            or node[CHR_END] > chromosome_length - SUBTELO_TIP_LIMIT
+        )
+
+    def endpoint_orientations(node_idx, breakend, unique_pair):
         chrom = contig_data[node_idx][CHR_NAM]
         chromosome_length = chr_len.get(chrom, 0)
         ctg_dir = contig_data[node_idx][CTG_DIR]
@@ -6034,20 +6204,41 @@ def apply_subtelomeric_orientation_filter(
         if contig_data[node_idx][CHR_END] > chromosome_length - SUBTELO_TIP_LIMIT:
             orientations.add(orientation_from_telo_side('b', ctg_dir))
         for telo_name, anchor_idx in telo_anchor_by_chrom.get(chrom, []):
+            anchor = contig_data[anchor_idx]
             if (
                 distance_checker(
                     contig_data[node_idx],
-                    contig_data[anchor_idx],
-                ) < SUBTELO_TIP_LIMIT
+                    anchor,
+                ) >= SUBTELO_TIP_LIMIT
             ):
-                orientations.add(
-                    orientation_from_telo_side(telo_name[-1], ctg_dir)
-                )
+                continue
+            # An internal new telomere shares no subtelomeric paralogy with other
+            # chromosome ends, so it does not make a uniquely placed endpoint
+            # terminal. It still counts when it caps this very breakend.
+            anchor_face = anchor[CHR_STR] if telo_name[-1] == 'f' else anchor[CHR_END]
+            if (
+                unique_pair
+                and not near_reference_end(anchor)
+                and abs(anchor_face - breakend) > NEW_TELOMERE_ANCHOR_BREAKEND_TOL
+            ):
+                continue
+            orientations.add(
+                orientation_from_telo_side(telo_name[-1], ctg_dir)
+            )
         return orientations
 
     def reject_reason(candidate):
-        start_orientations = endpoint_orientations(candidate.path_pair[0])
-        end_orientations = endpoint_orientations(candidate.path_pair[1])
+        node_a, node_b = candidate.path_pair
+        unique_pair = all(
+            int(contig_data[idx][CTG_MAPQ]) >= NEW_TELOMERE_MIN_HOST_MAPQ
+            for idx in (node_a, node_b)
+        )
+        start_orientations = endpoint_orientations(
+            node_a, get_breakend_coord(contig_data[node_a], 0), unique_pair,
+        )
+        end_orientations = endpoint_orientations(
+            node_b, get_breakend_coord(contig_data[node_b], 1), unique_pair,
+        )
         if start_orientations and not start_orientations.isdisjoint(
             end_orientations
         ):
