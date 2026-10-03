@@ -5,8 +5,6 @@ import unittest
 from collections import defaultdict
 from pathlib import Path
 
-import pandas as pd
-
 import nclose_preprocess as npp
 from nclose_candidate import NCloseCandidate
 
@@ -157,49 +155,6 @@ class SubtelomericOrientationTests(unittest.TestCase):
             ("chr20", 66103776, 66150000, "+", 60),
         )
         self.assertEqual(self.filter(rows), [])
-
-
-class MultiEndHostTests(unittest.TestCase):
-    def test_telomere_repeats_do_not_make_a_contig_multi_end(self):
-        rows = paf_rows(
-            "utg077205l",
-            ("chr9", 0, 1491, "+", 60),
-            ("chr7", 1, 2970, "+", 1),
-            ("chr1", 248095484, 248117548, "-", 60),
-        )
-        excluded, _ = npp.find_multi_end_aligned_contigs(rows)
-        self.assertEqual(excluded, {"utg077205l"})
-        labels = npp.label_node(rows, TELO_DICT)
-        self.assertEqual(npp.multi_end_host_contigs(rows, labels, excluded), {"utg077205l"})
-
-    def test_subtelomere_pair_stays_ambiguous(self):
-        # HCC1954 utg035313l: 176 kb chr22p subtelomere + chr20q subtelomere.
-        rows = paf_rows(
-            "utg035313l",
-            ("chr22", 4810, 183341, "-", 60),
-            ("chr20", 66105464, 66106771, "+", 31),
-            ("chr8", 196, 1886, "-", 60),
-        )
-        excluded, _ = npp.find_multi_end_aligned_contigs(rows)
-        labels = npp.label_node(rows, TELO_DICT)
-        self.assertEqual(npp.multi_end_host_contigs(rows, labels, excluded), set())
-
-    def test_host_face_without_reads_is_not_rescued(self):
-        # HCC1954 utg017642l: chr18 100-200 kb has 8% of median depth in every line.
-        rows = paf_rows(
-            "utg017642l",
-            ("chr10", 134756418, 134757834, "-", 0),
-            ("chr18", 163533, 392478, "+", 60),
-        )
-        depth = pd.DataFrame({
-            "chr": ["chr1", "chr2", "chr18", "chr18"],
-            "st": [1, 1, 100001, 200001],
-            "nd": [100000, 100000, 200000, 300000],
-            "meandepth": [58.0, 60.0, 5.7, 69.4],
-        })
-        self.assertEqual(
-            npp.low_depth_faces(rows, {1: "chr18f"}, {"utg017642l"}, depth), {"utg017642l"},
-        )
 
 
 if __name__ == "__main__":

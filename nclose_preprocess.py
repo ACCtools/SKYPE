@@ -133,7 +133,6 @@ NEW_TELOMERE_MIN_HOST_MAPQ = 20
 NEW_TELOMERE_MIN_HOST_SPAN = 1*K
 NEW_TELOMERE_INSERTION_WINDOW = 200*K
 NEW_TELOMERE_ANCHOR_BREAKEND_TOL = 2*K
-MULTI_END_RESCUE_MIN_DEPTH_RATIO = 0.3
 
 MIN_FLANK_SIZE_BP = 1*M
 
@@ -911,69 +910,6 @@ def find_multi_end_aligned_contigs(contig_data, window=MULTI_END_ALIGNMENT_WINDO
         for row_idx in row_indices_by_contig[contig_name]
     }
     return excluded_contigs, excluded_row_indices
-
-
-def multi_end_host_contigs(contig_data, node_label, excluded_contigs,
-                           window=MULTI_END_ALIGNMENT_WINDOW):
-    """Multi-end contigs whose ambiguity comes only from pure telomere repeats.
-
-    Pure telomere rows (label '*in': inside the expanded reference telomere
-    interval) are TTAGGG arrays that align to whichever chromosome end absorbs
-    them, so their coordinates carry no chromosome identity. A contig is kept
-    ambiguous only if its other rows still reach two distinct ends, or none of
-    them is uniquely placed.
-    """
-    rows_by_contig = defaultdict(list)
-    for row_idx, row in enumerate(contig_data):
-        if row[CTG_NAM] in excluded_contigs:
-            rows_by_contig[row[CTG_NAM]].append(row_idx)
-    hosts = set()
-    for contig_name, row_indices in rows_by_contig.items():
-        host_rows = [
-            idx for idx in row_indices
-            if not node_label[idx][1].endswith('in')
-        ]
-        if not host_rows:
-            continue
-        anchors = set().union(*(
-            terminal_alignment_anchors(contig_data[idx], window) for idx in host_rows
-        ))
-        if len(anchors) >= 2:
-            continue
-        if all(int(contig_data[idx][CTG_MAPQ]) < NEW_TELOMERE_MIN_HOST_MAPQ for idx in host_rows):
-            continue
-        hosts.add(contig_name)
-    return hosts
-
-
-def low_depth_faces(contig_data, telo_connect_info, contig_names, depth_df):
-    """Contigs with a telomere connection whose face lies in a near-empty depth window.
-
-    A host region that the sample's reads hardly cover (below
-    MULTI_END_RESCUE_MIN_DEPTH_RATIO of the autosomal median) cannot carry a
-    chromosome end in this sample; such regions are germline differences from the
-    reference subtelomere.
-    """
-    if depth_df is None or not contig_names:
-        return set()
-    autosomal = depth_df[~depth_df["chr"].isin(("chrX", "chrY", "chrM"))]
-    median_depth = float(np.median(autosomal["meandepth"].to_numpy(dtype=float)))
-    by_chrom = {chrom: frame for chrom, frame in depth_df.groupby("chr", sort=False)}
-    low = set()
-    for idx, telo_name in telo_connect_info.items():
-        node = contig_data[idx]
-        if node[CTG_NAM] not in contig_names:
-            continue
-        face = node[CHR_STR] if telo_name[-1] == 'f' else node[CHR_END]
-        frame = by_chrom.get(node[CHR_NAM])
-        if frame is None:
-            continue
-        window = frame[(frame["st"] <= face + 1) & (face + 1 <= frame["nd"])]
-        if window.empty:
-            continue
-        if float(window["meandepth"].iloc[0]) < MULTI_END_RESCUE_MIN_DEPTH_RATIO * median_depth:
-            low.add(node[CTG_NAM])
-    return low
 
 
 def import_data2(file_path : str) -> list :
@@ -3628,26 +3564,6 @@ def _prepare_paf_source_rows(resources, paf_path, policy, excluded_unitigs=()):
     if not contig_data:
         return [], set(), set(), original_node_count
     excluded_contigs, excluded_rows = find_multi_end_aligned_contigs(contig_data)
-    node_label = label_node(contig_data, resources.telo_dict)
-    host_contigs = multi_end_host_contigs(contig_data, node_label, excluded_contigs)
-    telo_preprocessed_contig, _, telo_connect_info = preprocess_telo(
-        contig_data,
-        node_label,
-        resources.censat_data,
-    )
-    rescued_contigs = host_contigs - low_depth_faces(
-        contig_data, telo_connect_info, host_contigs, resources.depth_df,
-    )
-    if rescued_contigs:
-        excluded_contigs = excluded_contigs - rescued_contigs
-        excluded_rows = {
-            row_idx for row_idx in excluded_rows
-            if contig_data[row_idx][CTG_NAM] not in rescued_contigs
-        }
-        logging.info(
-            f"Kept {len(rescued_contigs)} multi-end-aligned contigs whose only "
-            "ambiguous rows are pure telomere repeats"
-        )
     excluded_origins = {contig_data[idx][10] for idx in excluded_rows}
     if excluded_contigs:
         logging.info(
@@ -3655,6 +3571,12 @@ def _prepare_paf_source_rows(resources, paf_path, policy, excluded_unitigs=()):
             f"({len(excluded_rows)} PAF rows)"
         )
 
+    node_label = label_node(contig_data, resources.telo_dict)
+    telo_preprocessed_contig, _, telo_connect_info = preprocess_telo(
+        contig_data,
+        node_label,
+        resources.censat_data,
+    )
     excluded_telo_candidates = sum(
         row_idx in excluded_rows for row_idx in telo_connect_info
     )
