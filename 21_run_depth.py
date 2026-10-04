@@ -457,8 +457,8 @@ def adjust_paf_overlap(paf1_data, paf2_data):
     """
     두 개의 PAF 데이터를 입력받아 (각각  
     [ref_st, ref_nd, qry_st, qry_nd, mat_len, aln_len, cs_string]),
-    두 정렬의 참조 영역이 반드시 겹친다고 가정합니다.
-    겹치지 않으면 에러를 발생시킵니다.
+    두 정렬의 참조 영역이 겹치거나 하나의 경계에서 맞닿는다고 가정합니다.
+    떨어져 있으면 에러를 발생시킵니다. 안쪽을 향해 맞닿는 연결은 두 조각 모두 0 bp가 됩니다.
     
     겹치는 영역의 중간(new_boundary)을 기준으로, paf1은 좌측 부분(참조: ref_st ~ new_boundary),
     paf2는 우측 부분(참조: new_boundary ~ ref_nd)를 남기도록 잘라냅니다.
@@ -472,8 +472,8 @@ def adjust_paf_overlap(paf1_data, paf2_data):
     ref_st1, ref_nd1, qry_st1, qry_nd1, mat_len1, aln_len1, cs1 = paf1_data
     ref_st2, ref_nd2, qry_st2, qry_nd2, mat_len2, aln_len2, cs2 = paf2_data
 
-    # 두 정렬의 참조 구간이 겹치는지 확인
-    if ref_nd1 <= ref_st2 or ref_nd2 <= ref_st1:
+    # A shared boundary is valid: both retained pieces can have zero length.
+    if ref_nd1 < ref_st2 or ref_nd2 < ref_st1:
         raise Exception("두 PAF의 reference 구간이 겹치지 않습니다.")
     
     # 겹치는 영역의 시작과 끝
@@ -571,6 +571,18 @@ def process_raw_contig_list(full_connected_path):
         if curr_contig[CHR_NAM] == next_contig[CHR_NAM] and curr_node_name != next_node_name \
         or (curr_contig[CHR_NAM] == next_contig[CHR_NAM] and (full_connected_path[i-1][0] in (2, 3) or full_connected_path[i][0] in (2, 3))):
             dist = distance_checker(curr_contig, next_contig)
+            forward_touch = curr_contig[CHR_END] == next_contig[CHR_STR]
+            reverse_touch = curr_contig[CHR_STR] == next_contig[CHR_END]
+            strand = (
+                walked_strand(contig_data[full_connected_path[i-1][1]][CTG_DIR],
+                              full_connected_path[i-1][0])
+                or walked_strand(next_contig[CTG_DIR], full_connected_path[i][0])
+            )
+            # Inward-facing touching anchors describe a zero-length reference
+            # walk. Use the same CS-aware trimming as an overlap; appending
+            # both whole anchors would invent reference coverage. Ordinary
+            # forward/reverse touching retains the original PAF rows unchanged.
+            empty_touch = (strand == '-' and forward_touch) or (strand == '+' and reverse_touch)
             if curr_node_name != next_node_name:
                 prev_type, prev_idx = full_connected_path[i-1]
                 next_type, next_idx = full_connected_path[i]
@@ -603,7 +615,7 @@ def process_raw_contig_list(full_connected_path):
                     else:
                         new_next_contig = form_normal_contig(next_contig)
                         path_contig.append(new_next_contig)
-            elif curr_contig[CHR_END] == next_contig[CHR_STR] or curr_contig[CHR_STR] == next_contig[CHR_END]:
+            elif (forward_touch or reverse_touch) and not empty_touch:
                 new_next_contig = form_normal_contig(next_contig)
                 path_contig.append(new_next_contig)
             else:

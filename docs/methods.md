@@ -191,6 +191,16 @@ selected, so it is written as `tp:A:P`. alignasm keeps minimap2's `tp:A:S` tag
 on query pieces that no primary row covers, and PanDepth skips such rows by
 default.
 
+Touching reference anchors are interpreted in the walked direction. An
+inward-facing contact whose entry and exit coincide contributes zero depth;
+the two complete anchor alignments must not be added as reference sequence.
+Ordinary consecutive contacts retain both alignments. This rule applies to
+reference bridges in chromosome paths and ecDNA circuits, while a unitig's
+observed NClose connection remains a separate kind of adjacency. A corrected
+zero-depth feature supplies no dosage evidence and does not establish absence
+of its constituent junctions. Rebuild from stage 21 to apply this depth-rendering
+correction to an otherwise unchanged saved graph.
+
 ### Graph traversal
 
 Stage 10 permits two visits to a reference chromosome-end telomere anchor,
