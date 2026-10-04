@@ -2,10 +2,11 @@ import ast
 import collections
 import csv
 from pathlib import Path
+from types import SimpleNamespace
 import pickle
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import vcfpy
 
@@ -95,6 +96,7 @@ class StructureWeightTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             nodes, pair, paths, int2key = write_internal_chromosome_fixture(Path(tmp))
             weights = [12.]
+            terminal_writer = Mock()
             namespace = dict(
                 PREFIX=tmp, contig_data=nodes, weights=weights, N=10., meandepth=20.,
                 chr_len={c: 1_000_000 for c in ("chr1", "chr2", "chr3")},
@@ -104,12 +106,17 @@ class StructureWeightTests(unittest.TestCase):
                 VCF_FILTER_DEPTH_N=.1, defaultdict=collections.defaultdict,
                 StructureWeights=StructureWeights, save_structure_model=save_structure_model,
                 write_structure_reports=write_structure_reports, display_events=display_events,
+                write_terminal_evidence=terminal_writer,
+                args=SimpleNamespace(terminal_source_fasta=None, terminal_reference_fasta=None,
+                                     terminal_raw_paf=None, terminal_source_binding=None),
                 nclose_filter_status={}, cen_fragment_meta={},
                 paf_ans_list=paths, int2key=int2key, output_folder=f"{tmp}/21_pat_depth",
                 nclose2idx={pair: 1}, idx2nclose={1: pair},
             )
             exec(compile(ast.Module(body=[block], type_ignores=[]), str(source), "exec"), namespace)
             context = namespace["native_context"]
+            terminal_writer.assert_called_once_with(tmp, context, nodes,
+                source_fasta=None, reference_fasta=None, raw_paf=None, source_binding=None)
             calls = bnd_calls(context, nodes)
             self.assertEqual([call["endpoints"] for call in calls], [
                 (("chr1", 150_000, "L"), ("chr2", 200_000, "R")),

@@ -84,6 +84,9 @@ Files are written to the selected SKYPE output directory.
 | `nclose_sources.tsv` | Original node pairs/unitigs and their shared NClose identities. |
 | `structure_report.tsv` | Each native structure's own weight and provenance. |
 | `structure_nclose_usage.tsv` | NClose occurrence counts and each structure's contribution. |
+| `terminal_evidence.json` | Physical terminal contexts and explicitly assembly-derived sequence evidence, with source/reference verification states. |
+| `structure_terminal_usage.tsv` | Every native PATH start and end, including zero weights, joined to its evidence context. |
+| `terminal_host_inventory.tsv` | All graph terminal hosts, including hosts with no modeled PATH use. |
 | `total_cov.png`, `total_cov.pdf` | Observed and fitted depth with NClose and structure links. |
 | `SV_benchmark_result.vcf` | VCF-input records annotated with `SKYPE_CN` and `SKYPE_STATUS`. |
 
@@ -120,6 +123,60 @@ See [weight accounting](docs/outputs.md#weight-accounting) for AMP normalization
 virtual contributions, Type 4 path contributions and worked examples, and
 [output representations](docs/outputs.md#output-representations) for original
 NClose endpoints and compound summaries.
+
+## Native terminal evidence
+
+Stage 21 records its actual resolved terminal traversal in
+`terminal_component_context.json`, including a host whose depth row was trimmed
+to zero. Input hashes are captured before resolution and checked again before
+publication; rebuilding stage 21 invalidates any older capture first.
+Stage 31 joins this record to each PATH end and writes separate evidence
+reports. Graph labels and unused direct edges do not substitute for the physical
+port used in a path. Both occurrences of a terminal node in one path are retained.
+The annotation does not change graph construction, PAFs, depth, weights, or calls.
+It applies to the native PATH workflow; it does not annotate the separate
+full-assembly-only or VCF-only workflows.
+
+The four display classes are ordinary graph anchor, observed nonreference
+telomeric extension, donor-route repeat, and unavailable sequence/ambiguous port.
+Always read the separate physical-port, `assembly_evidence_state`, source-repeat,
+reference-comparison, anchor-quality and internal-repeat/farther-flank fields.
+An ordinary graph anchor is a model label, not a measured absence of a telomere.
+A repeat extension can still be internal. An assembly boundary does not establish
+a chromosome cap, healing event, somatic event, or complete chromosome path.
+The usage table's conditional fitted contributions do not measure identified
+telomere dosage or chromosome-end counts.
+
+`terminal_evidence_rules.json` fixes the uniform motif and context rules.
+Full tract span, canonical-covered bases, aligned-side overlap, and outward-only
+coverage are distinct quantities. Strong extension descriptions require the
+primary span/canonical minima on the outward partition and a complete callable
+reference comparison. A clipped reference-end window cannot supply a negative
+comparison. No independent-molecule evidence is assumed by these reports.
+
+The pipeline passes its effective assembly FASTA, assembly-alignment reference,
+and raw PAF to the report. Input FASTAs are read without creating indexes.
+Existing runs can be annotated with `python terminal_evidence.py PREFIX` and
+optional `--source-fasta`, `--reference-fasta`, `--raw-paf`, and `--source-binding`.
+Missing stage-21 capture or source inputs remain explicit unknown states; this
+command does not rebuild the graph, alignment, or fit. `terminal_source_inputs.json`
+records requested files only and never certifies historical generation.
+
+Historical source verification requires an upstream
+`<raw_paf>.source_binding.json` (or explicit binding path) with schema
+`SKYPE.assembly_alignment_source.v1`, complete fresh-generation status,
+`producer_stage=raw_and_alternate_alignment_generation`, equal `inputs_before`
+and `inputs_after` FASTA/reference path-SHA pairs, primary/alternate output
+path-SHA pairs, matching `outputs_at_generation` recorded immediately after each
+mapper finishes, and recorded generation argv. Its `reference_index_binding` must
+use `SKYPE.reference_index_source.v1`, bind the exact reference, preset and
+minimap2 to the index, and link the actual `-d` generation output to the published
+index by equal content SHA. The gap-extraction step, when present, retains its
+script identity and source/raw/query-file argument linkage. The existing
+`.aln.paf.alignasm.json` must then link those exact PAF inputs to the selected PAF.
+Only the upstream fresh-generation producer may issue this attestation.
+Readable legacy sequences are explicitly unverified; a downstream hash or an
+old existence/size/mtime cache never upgrades them to bound source evidence.
 
 ## Further documentation
 

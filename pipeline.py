@@ -48,7 +48,7 @@ def run_skype(CELL_LINE, PREFIX, ctg_paf, ctg_aln_paf, utg_paf, utg_aln_paf,
               unitig_fasta=None, alignment_force=False, *,
               alignasm_ref, chr_fai, tel_bed, rpt_bed, rcs_bed, cyt_bed,
               ref_stat=None, raw_rescue_method=None, raw_rescue_options=None,
-              reference_index_cache=None):
+              reference_index_cache=None, terminal_source_binding=None):
     # Execute the core SKYPE analysis scripts.
     dep_folder = os.path.abspath(dep_folder)
     reference_index_cache = os.path.abspath(
@@ -309,11 +309,19 @@ def run_skype(CELL_LINE, PREFIX, ctg_paf, ctg_aln_paf, utg_paf, utg_aln_paf,
                     round_path.write_text(json.dumps(dict(applied=True, refit_complete=True, rounds=1), indent=2)+'\n')
 
         if skype_start_at <= 31:
-            subprocess_run([
+            report_cmd = [
                 "python", os.path.join(skype_folder_loc, "31_depth_analysis.py"),
                 RCS_BED, PPC_PAF_LOC, MAIN_STAT_NORM_LOC,
                 TEL_BED, CHR_FAI, CYT_BED, PREFIX, "-t", THREAD
-            ] + PROGRESS, check=True)
+            ]
+            if not benchmark_vcf_loc:
+                for option, value in (("source-fasta", unitig_fasta),
+                                      ("reference-fasta", alignasm_ref),
+                                      ("raw-paf", utg_paf),
+                                      ("source-binding", terminal_source_binding)):
+                    if value is not None:
+                        report_cmd.extend(["--terminal-" + option, value])
+            subprocess_run(report_cmd + PROGRESS, check=True)
 
 
 def build_parser():
@@ -348,6 +356,7 @@ def build_parser():
     parser.add_argument('--raw-rescue-method', choices=('off', 'read', 'olc'))
     parser.add_argument('--raw-rescue-options')
     parser.add_argument('--reference-index-cache')
+    parser.add_argument('--terminal-source-binding')
     return parser
 
 

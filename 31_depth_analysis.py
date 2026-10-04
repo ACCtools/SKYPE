@@ -10,6 +10,7 @@ from structure_nclose import (
     save_structure_model, write_structure_reports,
 )
 from native_structure_output import display_events, write_native_bed, write_native_vcf
+from terminal_evidence import write_terminal_evidence
 from bp_step_depth_ratio import (
     BP_STEP_DEPTH_RATIO_B,
     BP_STEP_DEPTH_RATIO_PREDICT_B,
@@ -943,6 +944,9 @@ parser.add_argument("-t", "--thread",
 
 parser.add_argument("--progress", 
                     help="Show progress bar", action='store_true')
+
+for option in ("source-fasta", "reference-fasta", "raw-paf", "source-binding"):
+    parser.add_argument("--terminal-" + option, help="Optional terminal evidence input; does not change fitting or calls.")
 
 args = parser.parse_args()
 
@@ -1884,6 +1888,13 @@ if not pipeline_input_is_vcf(pipeline_input_config):
     native_context = StructureWeights(structure_model, weights, N)
     save_structure_model(PREFIX, structure_model)
     write_structure_reports(PREFIX, native_context, nclose_filter_status)
+    write_terminal_evidence(
+        PREFIX, native_context, contig_data,
+        source_fasta=args.terminal_source_fasta,
+        reference_fasta=args.terminal_reference_fasta,
+        raw_paf=args.terminal_raw_paf,
+        source_binding=args.terminal_source_binding,
+    )
     native_display_events = display_events(native_context, contig_data, cen_fragment_meta)
 else:
     # Assign report IDs to ecDNA inversion NCloses whose Amplicon is visible in

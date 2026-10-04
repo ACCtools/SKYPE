@@ -4,6 +4,7 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from skype_utils import *
 from path_geometry import reference_connection_allowed, walked_strand
+from terminal_evidence import begin_component_capture, capture_component, write_component_context
 
 import re
 import ast
@@ -549,7 +550,7 @@ def virtual_bridge_follows_strand(curr_contig, curr_row, curr_type, next_contig,
     return next_contig[CHR_STR] <= curr_contig[CHR_END]
 
 
-def process_raw_contig_list(full_connected_path):
+def process_raw_contig_list(full_connected_path, *, terminal_context=None):
     """Build depth PAF rows for one connected contig path.
 
     Returns the formatted rows and the number of rows skipped because they
@@ -685,10 +686,15 @@ def process_raw_contig_list(full_connected_path):
             path_contig.append(next_contig_origin)
     output_rows = []
     skipped_rows = 0
-    for row in path_contig:
+    for row_index, row in enumerate(path_contig):
         output_row = format_nonzero_depth_paf_row(
             row, cs_to_cigar(row[-1][5:])
         )
+        if terminal_context is not None:
+            if row_index == 0:
+                terminal_context['start'] = output_row
+            if row_index == len(path_contig) - 1:
+                terminal_context['end'] = output_row
         if output_row is None:
             skipped_rows += 1
             continue
@@ -786,11 +792,13 @@ def create_final_depth_paf(data):
         assert(False)
 
     output_rows = []
+    terminal_context = {}
     if len(raw_contig_list) > 0:
-        output_rows, _ = process_raw_contig_list(raw_contig_list)
+        output_rows, _ = process_raw_contig_list(raw_contig_list, terminal_context=terminal_context)
     with open(f'{output_folder}/{key_cnt}.paf', 'w') as f:
         for row in output_rows:
             print(row, file=f)
+    return capture_component(key_cnt, key, raw_contig_list, contig_data, terminal_context)
 
 def ecdna_circuit_segments(circuit):
     """Path segments of an ordered ecDNA circuit (a0, a1, b0, b1) from stage 01:
@@ -1298,6 +1306,7 @@ args = parser.parse_args()
 
 PREPROCESSED_PAF_FILE_PATH = args.ppc_paf_file_path
 
+terminal_inputs_snapshot = begin_component_capture(args.prefix, PREPROCESSED_PAF_FILE_PATH)
 contig_data = import_data2(PREPROCESSED_PAF_FILE_PATH)
 contig_data_size = len(contig_data)
 
@@ -1492,12 +1501,13 @@ if os.path.isdir(output_folder):
     shutil.rmtree(output_folder)
 os.makedirs(output_folder, exist_ok=True)
 
+terminal_component_records = []
 with ProcessPoolExecutor(max_workers=THREAD) as executor:
     futures = [executor.submit(create_final_depth_paf, (key, key_cnt)) for key, key_cnt in key2int.items()]
 
     for future in tqdm(as_completed(futures), total=len(futures), desc='Split paf to run depth efficiently',
                        disable=not sys.stdout.isatty() and not args.progress):
-        future.result()
+        terminal_component_records.append(future.result())
 
 paf_ans_list = []
 for index_file_path, key_list in index_data_list:
@@ -1547,3 +1557,6 @@ dep_list = [0] * len(paf_ans_list)
 
 with open(f'{PREFIX}/contig_pat_vec_data.pkl', 'wb') as f:
     pkl.dump((paf_ans_list, list(key2int.values()), int2key, dep_list), f)
+
+write_component_context(PREFIX, terminal_component_records, PREPROCESSED_PAF_FILE_PATH,
+                        expected_inputs=terminal_inputs_snapshot)
