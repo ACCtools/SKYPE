@@ -196,6 +196,26 @@ Same-terminal paths such as `chr1f → chr1f` are searched when qualifying ancho
 exist and require reference-end anchors at both ends. Graph filters and the
 configured search limits apply to the candidate paths.
 
+Path deduplication uses the exact ordered source-node walk, including each
+node's traversal direction and the terminal labels. Expanded graph counters
+are search state and are not part of this identity. Equal chromosome-total
+lengths or equal depth predictions do not justify merging different junctions,
+source chains or their ordering. This replaces the former 50 kb tolerance on
+chromosome-total lengths, which could discard different deletion loci or
+alternative junction combinations depending on enumeration order.
+
+`path_search_diagnostics.json` records the retained graph's search limits and
+terminal pairs that reached the per-pair path limit. Reaching that limit means
+exhaustive enumeration is unproven; it does not establish that additional
+paths exist or that omitted paths have no biological support. Runs made with
+the former path compression need to restart at stage 10 or earlier before
+comparing downstream fits or structural outputs.
+The existing default budgets can be changed explicitly with
+`--per-pair-path-limit` and `--total-path-limit` through `--option_skype`.
+For controlled comparisons, fix `--limit-combinations` as well so a change in
+candidate count cannot silently change the graph's permitted rearrangement
+complexity through the automatic budget fallback.
+
 ## Depth fitting and structure weights
 
 Stage 00 smooths the log CHM13 correction factors with a Gaussian sigma of one

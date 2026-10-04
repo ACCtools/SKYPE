@@ -15,7 +15,7 @@ import os
 import pickle
 import sys
 from collections import Counter, defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from multiprocessing import Pool
 from pathlib import Path
 from typing import Mapping, Sequence
@@ -72,7 +72,6 @@ PAT_PATH_LIMIT = 10 * K
 BND_OVERUSE_CNT = 2
 CENSAT_VISIT_LIMIT = 2
 PATH_MAJOR_COMPONENT = 3
-PATH_COMPRESS_LIMIT = 50 * K
 IGNORE_PATH_LIMIT = 50 * K
 MIN_PATH_REF_LEN = 5 * M
 
@@ -121,6 +120,7 @@ class PathSearchResult:
     dir_change_limit: int
     path_items: list
     counts: list
+    diagnostics: dict = field(default_factory=dict)
 
     def as_path_dict(self) -> dict:
         return {key: paths for key, paths in self.path_items}
@@ -1154,14 +1154,28 @@ def _write_debug_path(
         print(chromosome_profile, file=index_handle)
 
 
+def _path_walk_key(path: Sequence) -> tuple:
+    """Identify an ordered source-preserving walk in one immutable node snapshot.
+
+    Expanded graph chromosome/direction counters describe search state, not
+    sequence. Stage 21 likewise consumes only each node's walking direction
+    and source index. Different loci, directions, source chains or order must
+    remain distinct even when chromosome totals or depth columns are equal.
+    """
+    return tuple(
+        (node[0],) if isinstance(node[0], str) else (node[0], node[1])
+        for node in path
+    )
+
+
 def _path_is_acceptable(
     path: Sequence,
     source_name: str,
     target_name: str,
-    path_compress: Mapping,
+    seen_walks: set,
     context: _PathWorkerContext,
 ) -> tuple[bool, list, Counter]:
-    """Apply all retained legacy path filters and profile compression."""
+    """Apply path filters and reject only an exactly repeated source walk."""
 
     path_len = len(path)
     if path_len < 4:
@@ -1287,14 +1301,8 @@ def _path_is_acceptable(
     if total_path_ref_len < MIN_PATH_REF_LEN:
         return False, [], Counter()
 
-    profile_key = tuple(sorted(path_counter))
-    for previous_counter in path_compress[profile_key]:
-        if all(
-            abs(previous_counter[chrom] - path_counter[chrom])
-            <= PATH_COMPRESS_LIMIT
-            for chrom in profile_key
-        ):
-            return False, [], Counter()
+    if _path_walk_key(path) in seen_walks:
+        return False, [], Counter()
     return True, chromosome_profile, path_counter
 
 
@@ -1323,7 +1331,7 @@ def _run_terminal_pair(data):
                     graph_without_other_terminals.remove_node(node)
 
     path_list = []
-    path_compress = defaultdict(list)
+    seen_walks = set()
     pair_count = 0
     for chr_count in range(context.chr_change_limit + 1):
         for dir_count in range(context.dir_change_limit + 1):
@@ -1380,14 +1388,13 @@ def _run_terminal_pair(data):
                     path,
                     source_name,
                     target_name,
-                    path_compress,
+                    seen_walks,
                     context,
                 )
                 if not accepted:
                     continue
 
-                profile_key = tuple(sorted(profile_counter))
-                path_compress[profile_key].append(copy.deepcopy(profile_counter))
+                seen_walks.add(_path_walk_key(path))
                 pair_count += 1
                 _write_debug_path(
                     path,
@@ -1526,11 +1533,32 @@ def run_path_search(
                 (terminal_pair, count)
                 for terminal_pair, count, _ in results
             ]
+            capped_pairs = [
+                {"source": pair[0], "target": pair[1], "retained_paths": count}
+                for pair, count in counts if count >= config.per_pair_path_limit
+            ]
+            if capped_pairs:
+                logging.warning(
+                    "%d terminal pairs reached the per-pair path limit (%d); "
+                    "exhaustiveness is unproven for these pairs",
+                    len(capped_pairs), config.per_pair_path_limit,
+                )
             last_success = PathSearchResult(
                 chr_change_limit=chr_limit,
                 dir_change_limit=dir_limit,
                 path_items=path_items,
                 counts=counts,
+                diagnostics={
+                    "path_deduplication": "exact_ordered_source_walk",
+                    "chr_change_limit": chr_limit,
+                    "dir_change_limit": dir_limit,
+                    "retained_path_count": total_path_count,
+                    "per_pair_path_limit": config.per_pair_path_limit,
+                    "total_path_limit": config.total_path_limit,
+                    "per_pair_limit_reached": capped_pairs,
+                    "enumeration_exhaustiveness_proven_within_graph": not capped_pairs,
+                    "scope": "Retained graph topology and existing path eligibility filters",
+                },
             )
             logging.info(
                 "SUCCESS at %s, with %d paths",

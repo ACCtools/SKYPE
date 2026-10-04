@@ -39,6 +39,8 @@ _STAGE_OPTION_SPECS = {
     "--add_indel_graph": ("10", "--add-indel-graph", 0),
     "--limit-combinations": ("10", "--limit-combinations", 1),
     "--limit_combinations": ("10", "--limit-combinations", 1),
+    "--per-pair-path-limit": ("10", "--per-pair-path-limit", 1),
+    "--total-path-limit": ("10", "--total-path-limit", 1),
 }
 
 _REPEATABLE_OPTIONS = {

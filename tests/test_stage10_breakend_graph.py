@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from collections import defaultdict
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import breakend_graph as bg
@@ -398,6 +399,9 @@ class Stage10CliTests(unittest.TestCase):
             self.assertFalse((prefix / "path_di_data.pkl").exists())
             self.assertIn("chr1f_chr1b", path_data)
             self.assertEqual(len(path_data["chr1f_chr1b"]), 1)
+            diagnostics = json.loads((prefix / "path_search_diagnostics.json").read_text())
+            self.assertTrue(diagnostics["enumeration_exhaustiveness_proven_within_graph"])
+            self.assertEqual(diagnostics["per_pair_limit_reached"], [])
 
     def test_hard_nclose_failure_replaces_stale_type4_edges(self):
         contig_data = [make_node("a", "chr1", 0, 10)]
@@ -436,7 +440,7 @@ class Stage10CliTests(unittest.TestCase):
 
 class GraphLimitFallbackTests(unittest.TestCase):
     @staticmethod
-    def run_with_counts(count_by_limit, *, fixed_limit=None):
+    def run_with_counts(count_by_limit, *, fixed_limit=None, per_pair_limit=bg.PAT_PATH_LIMIT):
         attempts = []
 
         class FakePool:
@@ -482,6 +486,7 @@ class GraphLimitFallbackTests(unittest.TestCase):
             graph_depth=2,
             fixed_limit_combination=fixed_limit,
             total_path_limit=10,
+            per_pair_path_limit=per_pair_limit,
         )
         with patch.object(bg, "Pool", FakePool), patch.object(
             bg,
@@ -531,6 +536,16 @@ class GraphLimitFallbackTests(unittest.TestCase):
         self.assertIsNone(result)
         self.assertEqual(attempts, [(2, 1)])
 
+    def test_per_pair_budget_does_not_claim_exhaustive_search(self):
+        result, attempts = self.run_with_counts(
+            {(2, 1): 2}, fixed_limit=(2, 1), per_pair_limit=2,
+        )
+        self.assertIsNotNone(result)
+        self.assertEqual(attempts, [(2, 1)])
+        self.assertFalse(result.diagnostics["enumeration_exhaustiveness_proven_within_graph"])
+        self.assertEqual(len(result.diagnostics["per_pair_limit_reached"]), 1)
+        self.assertEqual(result.diagnostics["per_pair_limit_reached"][0]["retained_paths"], 2)
+
 
 class Stage21PathScoreContractTests(unittest.TestCase):
     def test_stage21_no_longer_reads_or_sorts_by_path_di(self):
@@ -546,6 +561,79 @@ class Stage21PathScoreContractTests(unittest.TestCase):
         self.assertNotIn("nonzero_telo_set", source)
         self.assertNotIn("path_di_list", source)
         self.assertNotIn("path_di_data.pkl", source)
+
+
+class DistinctPathRetentionTests(unittest.TestCase):
+    """Two equal-size deletions at different loci are different hypotheses."""
+
+    def retained_deletion_paths(self, reverse_enumeration=False):
+        nodes = [
+            make_node("left", "chr1", 0, 1000),
+            make_node("right", "chr1", 9_999_000, 10_000_000),
+            make_node("deletion_A", "chr1", 1_000_000, 1_001_000),
+            make_node("deletion_A", "chr1", 2_000_000, 2_001_000),
+            make_node("deletion_B", "chr1", 3_000_000, 3_001_000),
+            make_node("deletion_B", "chr1", 4_000_000, 4_001_000),
+        ]
+        paths = [
+            [("chr1f", 0, 0), (bg.DIR_FOR, 0, 0, 0),
+             (bg.DIR_FOR, a, 0, 0), (bg.DIR_FOR, b, 0, 0),
+             (bg.DIR_FOR, 1, 0, 0), ("chr1b", 0, 0)]
+            for a, b in [(2, 3), (4, 5)]
+        ]
+        graph = bg.nx.DiGraph()
+        for path in reversed(paths) if reverse_enumeration else paths:
+            graph.add_edges_from(zip(path, path[1:]))
+        context = bg._PathWorkerContext(
+            graph=graph, contig_data=nodes, contig_data_size=len(nodes),
+            chr_rev_corr={6: "chr1f", 7: "chr1b"}, chr_len={"chr1": 10_000_000},
+            chr_change_limit=0, dir_change_limit=0, per_pair_path_limit=100,
+            verbose=False, raw_output_dir=None,
+        )
+
+        # Exercise the real worker and retention rules with an independent
+        # enumerator; graph-tool need not be installed to check this invariant.
+        def topology_adapter(candidate_graph):
+            node_to_vertex = {node: i for i, node in enumerate(candidate_graph)}
+            vertex_to_node = {i: node for node, i in node_to_vertex.items()}
+            topology = SimpleNamespace(
+                shortest_distance=lambda graph, source, target: bg.nx.shortest_path_length(
+                    graph, vertex_to_node[source], vertex_to_node[target]),
+                all_paths=lambda graph, source, target: (
+                    [node_to_vertex[node] for node in walk]
+                    for walk in bg.nx.all_simple_paths(
+                        graph, vertex_to_node[source], vertex_to_node[target])),
+            )
+            return topology, candidate_graph, node_to_vertex, vertex_to_node
+
+        with patch.object(bg, "_WORKER_CONTEXT", context), patch.object(
+            bg, "CHROMOSOME_COUNT", 1
+        ), patch.object(bg, "_to_graph_tool", topology_adapter):
+            _, count, retained = bg._run_terminal_pair((6, 7))
+        return count, {tuple(walk) for walk, _ in retained}, {tuple(walk) for walk in paths}
+
+    def test_equal_chromosome_lengths_preserve_coordinate_distinct_deletions(self):
+        count, observed, expected = self.retained_deletion_paths()
+        self.assertEqual(count, 2)
+        self.assertEqual(observed, expected)
+
+    def test_retained_deletion_hypotheses_do_not_depend_on_enumeration_order(self):
+        _, forward, expected = self.retained_deletion_paths()
+        _, reverse, _ = self.retained_deletion_paths(reverse_enumeration=True)
+        self.assertEqual(forward, expected)
+        self.assertEqual(reverse, expected)
+
+    def test_walk_identity_preserves_order_direction_and_source(self):
+        forward = [("chr1f", 0, 0), (bg.DIR_FOR, 2, 0, 0),
+                   (bg.DIR_FOR, 3, 0, 0), ("chr1b", 1, 1)]
+        same_walk = [("chr1f", 1, 0), (bg.DIR_FOR, 2, 2, 1),
+                     (bg.DIR_FOR, 3, 2, 1), ("chr1b", 2, 1)]
+        reordered = [forward[0], forward[2], forward[1], forward[-1]]
+        reversed_node = [forward[0], (bg.DIR_BAK, 2, 0, 0), *forward[2:]]
+        other_source = [forward[0], (bg.DIR_FOR, 4, 0, 0), *forward[2:]]
+        self.assertEqual(bg._path_walk_key(forward), bg._path_walk_key(same_walk))
+        for different in [reordered, reversed_node, other_source]:
+            self.assertNotEqual(bg._path_walk_key(forward), bg._path_walk_key(different))
 
 
 if __name__ == "__main__":

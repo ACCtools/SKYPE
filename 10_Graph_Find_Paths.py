@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import pickle
@@ -18,6 +19,8 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from breakend_graph import (  # noqa: E402
     FAIL_NCLOSE_COUNT,
     LIMIT_COMBINATIONS_JSON,
+    PAT_PATH_LIMIT,
+    TOT_PATH_LIMIT,
     PathSearchConfig,
     build_graph_state,
     count_nclose_nodes,
@@ -49,6 +52,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("-t", "--thread", type=int, required=True)
     parser.add_argument("-d", "--graph-depth", type=int, default=4)
     parser.add_argument("--progress", action="store_true")
+    parser.add_argument("--per-pair-path-limit", type=int, default=PAT_PATH_LIMIT,
+                        help="Maximum retained paths per terminal pair; reaching it is reported")
+    parser.add_argument("--total-path-limit", type=int, default=TOT_PATH_LIMIT,
+                        help="Total retained-path budget used by the graph-limit search")
     parser.add_argument(
         "--verbose",
         action="store_true",
@@ -81,6 +88,7 @@ def _remove_stale_stage10_outputs(prefix: Path, verbose: bool) -> Path:
         TYPE4_INDEL_GRAPH_EDGE_PKL,
         LIMIT_COMBINATIONS_JSON,
         "report.txt",
+        "path_search_diagnostics.json",
     ):
         path = prefix / filename
         if path.is_file():
@@ -110,6 +118,8 @@ def main(argv=None) -> int:
         parser.error("--thread must be positive")
     if args.graph_depth < 0:
         parser.error("--graph-depth cannot be negative")
+    if args.per_pair_path_limit < 1 or args.total_path_limit < 1:
+        parser.error("Path budgets must be positive")
     if args.add_indel_graph and (
         args.main_stat_path is None or args.censat_bed_path is None
     ):
@@ -183,6 +193,8 @@ def main(argv=None) -> int:
             progress=args.progress,
             verbose=args.verbose,
             raw_output_dir=str(raw_output_dir),
+            per_pair_path_limit=args.per_pair_path_limit,
+            total_path_limit=args.total_path_limit,
         ),
     )
     if result is None:
@@ -198,6 +210,9 @@ def main(argv=None) -> int:
         prefix / LIMIT_COMBINATIONS_JSON,
         (result.chr_change_limit, result.dir_change_limit),
     )
+    with (prefix / "path_search_diagnostics.json").open("wt", encoding="utf-8") as handle:
+        json.dump(result.diagnostics, handle, indent=2, sort_keys=True)
+        handle.write("\n")
 
     total_path_count = sum(count for _, count in result.counts)
     with (prefix / "report.txt").open("wt", encoding="utf-8") as handle:
