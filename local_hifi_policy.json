@@ -1,0 +1,30 @@
+{
+  "schema": "SKYPE.local_hifi_evidence_policy.v1",
+  "scope": "Optional descriptive local alignment evidence for every exact retained native primitive; inference and default calls are not changed.",
+  "decoder_sha256": "ff94b7e21fd1ef1a3fa44e83781e98efe42d658a545283a4ffdc62e552a837e4",
+  "primary_tolerance_bp": 100,
+  "sensitivity_tolerance_bp": 500,
+  "mapq_min": 20,
+  "query_and_reference_span_anchor_bp": 500,
+  "cigar_indel_min_bp": 50,
+  "query_gap_range_bp": [-500, 1000],
+  "minimum_query_reference_gap_discrepancy_bp": 50,
+  "minimum_distinct_read_names": 3,
+  "query_flank_bp": 2000,
+  "candidate_selection": "All retained exact primitive geometries, before local-support or coefficient selection, including unassessable boundaries and candidates without a modeled carrier.",
+  "coordinates": "Zero-based reference boundaries with retained sides L/R.",
+  "support_unit": "Distinct read names; the supplied HiFi input must use one name per physical CCS molecule.",
+  "reference_check": "All BAM SQ names and lengths must agree with the supplied reference; missing BAM contigs remain unassessable per target. Available SQ M5 values are checked. Missing M5 does not attest historical alignment-reference generation.",
+  "model_reference_check": "Record all native-node chromosome-length disagreements with the supplied reference. Every candidate endpoint on such a chromosome is unassessable, retaining the candidate and original N. No chromosome-specific exception, coordinate correction or mismatch suppression is performed.",
+  "local_states": ["LOCAL_HIFI_SUPPORTED", "LOCAL_HIFI_BELOW_GATE", "UNMEASURED", "UNASSESSABLE_WITH_REASON"],
+  "export": "Optional supported-only reciprocal BND records, all FILTER=ExperimentalEvidence, QUAL missing, no genotype or sample columns.",
+  "alias_tolerance_bp": [100, 500],
+  "limitations": [
+    "Local alignment support is not biological existence, unique locus origin, insertion-sequence identity, full-chain linkage or calibrated accuracy.",
+    "HiFi input may also have been used for assembly; no independent validation is claimed. The declared assembly-input relationship is recorded separately.",
+    "Conditional flank exposure is not a VAF denominator, strict spanning opportunity or detection-power estimate.",
+    "Conditional model contribution N is not absolute copy number, purity, ploidy or clone fraction, and zero is not biological absence.",
+    "Normal, ONT, whole-chain and dosage-identifiability assessments are unmeasured unless separately supplied by another explicit analysis.",
+    "Exact geometries and nearby/shared-read relations are retained. Shared molecules do not prove that different adjacencies are the same allele or independent new events."
+  ]
+}

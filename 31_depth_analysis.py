@@ -11,6 +11,11 @@ from structure_nclose import (
 )
 from native_structure_output import display_events, write_native_bed, write_native_vcf
 from terminal_evidence import write_terminal_evidence
+from local_hifi_evidence import (
+    add_arguments as add_local_hifi_arguments,
+    run_from_arguments as write_local_hifi_from_arguments,
+    validate_arguments as validate_local_hifi_arguments,
+)
 from bp_step_depth_ratio import (
     BP_STEP_DEPTH_RATIO_B,
     BP_STEP_DEPTH_RATIO_PREDICT_B,
@@ -947,6 +952,7 @@ parser.add_argument("--progress",
 
 for option in ("source-fasta", "reference-fasta", "raw-paf", "source-binding"):
     parser.add_argument("--terminal-" + option, help="Optional terminal evidence input; does not change fitting or calls.")
+add_local_hifi_arguments(parser)
 
 args = parser.parse_args()
 
@@ -962,6 +968,7 @@ main_stat_loc = args.main_stat_loc
 TELOMERE_INFO_FILE_PATH = args.telomere_bed_path
 PREPROCESSED_PAF_FILE_PATH = args.ppc_paf_file_path
 pipeline_input_config = load_pipeline_input(PREFIX)
+validate_local_hifi_arguments(args, native=not pipeline_input_is_vcf(pipeline_input_config))
 native_context = None
 native_display_events = None
 
@@ -1968,6 +1975,8 @@ else:
 
 if native_context is not None:
     write_native_bed(PREFIX, native_display_events)
+
+write_local_hifi_from_arguments(args, PREFIX, native_context, contig_data)
 
 matrix_path = f'{PREFIX}/matrix.h5'
 if os.path.isfile(matrix_path):

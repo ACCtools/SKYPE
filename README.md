@@ -178,6 +178,67 @@ Only the upstream fresh-generation producer may issue this attestation.
 Readable legacy sequences are explicitly unverified; a downstream hash or an
 old existence/size/mtime cache never upgrades them to bound source evidence.
 
+## Optional local HiFi evidence
+
+For native assembly models, local read support can be reported separately from
+conditional fitted contributions. Supply a coordinate-sorted, indexed HiFi BAM
+and its uncompressed reference FASTA with `--local-hifi-bam` and
+`--local-hifi-reference` inside the existing pipeline `--option_skype` string.
+Add `--local-hifi-export` for separate experimental BND VCFs. Declare the known
+assembly-input relationship with `--local-hifi-same-input-as-assembly yes`, `no`,
+or `unknown` (the default). This declaration is not independent validation.
+These options do not change fitting, weights, candidates, or the default VCF/BED.
+The separate full-assembly-only and VCF-input workflows are outside this scope.
+
+A completed native result can be annotated without rerunning the pipeline:
+
+```bash
+python local_hifi_evidence.py PREFIX \
+  --local-hifi-bam sample.sorted.bam \
+  --local-hifi-reference reference.fa \
+  --local-hifi-same-input-as-assembly yes \
+  --local-hifi-export
+```
+
+Every exact retained primitive is included before support or coefficient
+selection, including candidates without a modeled carrier and unencodable
+reference boundaries. Both fixed tolerances (100 bp primary, 500 bp sensitivity)
+use MAPQ ≥20, 500 bp query/reference-span anchors, query gaps from −500 to 1,000 bp,
+and at least three distinct read names. The small decoder and
+`local_hifi_policy.json` define the complete versioned rule. One read name must
+identify one physical CCS molecule. The BAM's SQ names/lengths and all available
+M5 checksums are compared to the supplied FASTA; missing M5 remains explicitly
+unverified. Matching lengths do not certify the historical model/reference
+generation relationship. Native-node/reference length disagreements are recorded
+per chromosome. Candidate endpoints on those chromosomes remain unassessable
+with null support and an explicit VCF exclusion reason; other candidates retain
+the same gate. Coordinates are never silently renumbered.
+
+`PREFIX/local_hifi_evidence/` contains separate attempt directories. A successful
+attempt publishes `latest.json`; failures retain a failed manifest and do not
+replace that pointer. Each attempt records input and implementation hashes,
+all-candidate JSON/TSV evidence, supporting read names, per-endpoint exposure
+witnesses, source/structure memberships, and nearby/shared-molecule relations.
+`--local-hifi-matrix PATH` can supply a retained matrix for depth-design states;
+otherwise the current matrix is used when available. Missing design data remain
+unavailable rather than zero. Zero design, entirely masked design and no modeled
+carrier are distinct from a fitted coefficient of zero.
+
+`LOCAL_HIFI_SUPPORTED` means the fixed local alignment gate passed. It does not
+establish biological existence, unique locus origin, insertion sequence identity,
+somatic origin, full-chain linkage, identified dosage, absolute CN, or VAF.
+Normal, ONT and whole-chain evidence are null here. Conditional flank exposure
+is neither a VAF denominator nor a detection-power estimate. Nearby candidates
+and candidates sharing reads are retained as representations; they must not be
+counted automatically as independent biological events.
+
+Optional `ExperimentalEvidence.100bp.vcf` and `.500bp.vcf` contain supported
+reciprocal BND pairs only. Every record has `FILTER=ExperimentalEvidence`, missing
+QUAL and no sample/genotype columns. They are distinct from the default calls.
+Unencodable candidates remain in the full sidecar with explicit export reasons.
+Any benchmark of these files must explicitly opt into that experimental filter
+and retain the full candidate denominator and unresolved cases.
+
 ## Further documentation
 
 - [Usage](docs/usage.md): setup, inputs, options, rescue, caches and restarting.
