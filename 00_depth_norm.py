@@ -3,6 +3,7 @@ import sys
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from skype_utils import *
+from depth_stats_io import atomic_gzip_text
 
 import numpy as np
 import pandas as pd
@@ -136,11 +137,11 @@ main_df['totaldepth'] = (main_df['meandepth'] * 100000).round().astype(int)
 
 cols = ['chr','st','nd','length','covsite','totaldepth','cov','meandepth']
 output_path = "/".join(main_stat_loc.split("/")[:-1]) + f"/{main_stat_loc.split("/")[-1].split(".")[0]}_normalized.win.stat.gz"
-main_df.to_csv(
-    output_path,
-    sep='\t',
-    columns=cols,
-    header=False,
-    index=False,
-    compression='gzip'
-)
+with atomic_gzip_text(output_path) as output:
+    main_df.to_csv(
+        output,
+        sep='\t',
+        columns=cols,
+        header=False,
+        index=False,
+    )

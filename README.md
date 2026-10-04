@@ -52,6 +52,10 @@ Native assembly runs default to raw-read rescue (`read`); VCF input defaults to
 rescue `off`. Local OLC rescue is an explicit option. Full-assembly input uses
 its own workflow. See [input workflows](docs/usage.md#input-workflows).
 
+Depth normalization keeps an existing output intact until the replacement
+gzip is complete, so overlapping runs do not expose a partially written table
+at the final output path.
+
 ## NCloses and structures
 
 An **NClose** is SKYPE's tracked assembly-junction unit. It includes Type 1,
