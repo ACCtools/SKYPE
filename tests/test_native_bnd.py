@@ -88,6 +88,23 @@ class NativeBndTests(unittest.TestCase):
                     self.assertEqual(b.ALT[0].mate_pos, a.POS)
                     self.assertEqual(a.INFO["STRANDS"], b.INFO["STRANDS"][::-1])
 
+    def test_native_variant_quality_is_unmeasured_for_bnd_and_symbolic_calls(self):
+        ns = export_namespace()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "quality.vcf"
+            with vcfpy.Writer.from_path(path, ns['build_vcf_header']({'chr1': 1000, 'chr2': 1000})) as writer:
+                ns['write_bnd_vcf_pair'](writer, 'bnd', 'chr1', 200, '+', 'chr2', 300, '-', 1.25, 'u')
+                for svtype in ['DEL', 'DUP']:
+                    ns['write_symbolic_vcf_record'](writer, 'chr1', 100, svtype, svtype,
+                                                    500, -400 if svtype == 'DEL' else 400, 1.25, 'u')
+            with vcfpy.Reader.from_path(path) as reader:
+                records = list(reader)
+            self.assertEqual(len(records), 4)
+            self.assertTrue(all(record.QUAL is None for record in records))
+            self.assertTrue(all(record.INFO['WEIGHT'] == 1.25 for record in records))
+            self.assertTrue(all(line.split('\t')[5] == '.' for line in path.read_text().splitlines()
+                                if not line.startswith('#')))
+
 
 def virtual_record():
     def endpoint(chrom, coord, direction, name):

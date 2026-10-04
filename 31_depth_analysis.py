@@ -479,12 +479,14 @@ def write_bnd_vcf_pair(
     dir_b,
     weight_N,
     ctg_name,
-    quality=60,
+    quality=None,
     filter_str='.',
     merge_mate_ids=None,
     bp_ratio_info=None,
     extra_info=None,
 ):
+    # Mapping quality and fitted dosage are not calibrated variant-error
+    # probabilities. Native callers leave VCF QUAL missing by default.
     # Arguments are native PAF boundaries (0-based, half-open). VCF POS is
     # the retained anchor base: left side = boundary, right = boundary + 1.
     pos_a = int(pos_a) + (dir_a == '-')
@@ -557,7 +559,7 @@ def write_symbolic_vcf_record(
         ID=[sv_id],
         REF="N",
         ALT=[vcfpy.SymbolicAllele(svtype)],
-        QUAL=60,
+        QUAL=None,  # No calibrated variant-error probability is fitted.
         FILTER=[],
         INFO=info,
     ))

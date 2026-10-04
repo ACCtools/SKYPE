@@ -28,6 +28,13 @@ Projection never creates a junction between different constituent unitigs or
 feeds split events back into the graph, matrix or fitted depth.
 This does not change the graph's broader spatial compression or AMP eligibility.
 
+Native BND and symbolic DEL/DUP records use missing VCF `QUAL` (`.`). SKYPE does
+not fit a calibrated variant-error probability, so a fixed Phred score would
+overstate confidence. `WEIGHT` describes conditional model dosage; it is not a
+probability that the junction or its chromosome assignment is correct. Mapping
+quality, local molecule evidence, full-chain linkage and normal-sample exposure
+are separate forms of evidence. An unmeasured quantity must not be read as zero.
+
 | Term | Role |
 | --- | --- |
 | Type 1 NClose | Junction connecting different reference chromosomes. |
