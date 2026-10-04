@@ -272,14 +272,22 @@ outward-continuity-length gate or rescue VAF cutoff. An insertion at one
 unchanged reference coordinate does not add a reference-depth edge.
 
 - `read` uses complete raw molecules, primary/SA discovery and whole-reference
-  realignment, then selects each molecule's two reliable outer alignments.
+  realignment, then groups molecules by their complete ordered primitive
+  junction chain. Equal outer anchors alone cannot pool different interiors.
+  Reverse-complement chains are equivalent; exact reference-continuation
+  fragments do not add junctions.
 - `olc` uses [local_olc.py](../local_olc.py): canonical minimizer seeds, banded
   overlap alignment, an oriented graph, transitive reduction, paths ending at
   branches and alignment-based consensus. Fully covered reads remain evidence;
   tips and bubbles are not pruned. Unitigs are realigned to the whole reference.
-  Both terminal junctions require raw-molecule support, which can come from
-  different molecules for a longer path. Paired outer-read support is reported
-  separately; assembly input-read count is not junction support.
+  Every primitive junction, including internal junctions, requires distinct
+  raw-molecule support. Different molecules can support different junctions of
+  a longer path; OLC layout supplies its inferred linkage. This does not by
+  itself establish unique chromosome placement or a uniquely resolved path.
+  Per-junction read names/counts and complete-chain molecule support are
+  reported separately from outer-pair and assembly input-read counts.
+  Passing the per-junction gate establishes local junction evidence; it does
+  not verify clone-specific linkage or repeated-junction multiplicity.
 
 Standalone same-chromosome, same-strand DEL/DUP candidates must span at least
 100 kb, inclusive. Smaller candidates are reported as `below_min_indel_span`.

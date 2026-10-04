@@ -144,7 +144,7 @@ def adaptive_query_interval(run,cut,left,right,sigma,direction,args):
         query_model_windows=windows)
 
 
-def detect_depth(coords, observed, predicted, args):
+def detect_depth(coords, observed, predicted, args, *, filter_prediction=True):
     runs = depth_runs(coords, observed, predicted)
     differences = defaultdict(list)
     for run in runs:
@@ -167,7 +167,7 @@ def detect_depth(coords, observed, predicted, args):
         for i, cut in enumerate(cuts, 1):
             local = boundary_stats(run, cut, max(edges[i-1], cut-args.local_bins), min(edges[i+1], cut+args.local_bins), sigma)
             full = boundary_stats(run, cut, edges[i-1], edges[i+1], sigma)
-            shape = lambda r: r['pred_range'] <= args.prediction_ratio*abs(r['observed_step']) and r['hom'] <= args.max_hom
+            shape = lambda r: (not filter_prediction or r['pred_range'] <= args.prediction_ratio*abs(r['observed_step'])) and r['hom'] <= args.max_hom
             route, reason = '', 'local_shape'
             if shape(local):
                 reason = 'insufficient_evidence'
@@ -447,28 +447,74 @@ def pair_event(first, last):
     return dict(endpoint_a=ends[0],endpoint_b=ends[1])
 
 
-def junction_support(chain, raw_chains, names, args):
-    """Support both outer junctions of a possibly longer assembled path.
+def chain_junctions(chain):
+    """Ordered primitive adjacencies, ignoring exact reference continuation.
 
-A long unitig need not be spanned by one molecule. Each terminal junction must
-have independent read support, while overlap layout links its interior.
-"""
-    targets=[pair_event(chain[0],chain[1]),pair_event(chain[-2],chain[-1])]
-    support=[set(),set()]
-    for name in names:
-        rows=reliable_chain(raw_chains.get(name,[]),args)
-        for a,b in zip(rows[:-1],rows[1:]):
-            event=pair_event(a,b)
-            for i,target in enumerate(targets):
-                if same_event(event,target,args.breakpoint_cluster):
-                    support[i].add(name)
-    return [sorted(s) for s in support]
+    Use the same continuation rule as native_vcf_bnd.source_junctions so that
+    splitting an otherwise collinear alignment does not invent a junction.
+    """
+    result = []
+    for a, b in zip(chain, chain[1:]):
+        if a['chrom'] == b['chrom'] and a['strand'] == b['strand']:
+            query_gap = b['qstart'] - a['qend']
+            ref_gap = b['start0'] - a['end0'] if a['strand'] == '+' else a['start0'] - b['end0']
+            if query_gap == ref_gap:
+                continue
+        result.append(pair_event(a, b))
+    return result
+
+
+def contains_junction_chain(targets, observed, distance):
+    """A whole ordered junction chain may be observed in either orientation."""
+    if not targets:
+        return False
+    for order in (targets, targets[::-1]):
+        for start in range(len(observed) - len(order) + 1):
+            if all(same_event(a, b, distance)
+                   for a, b in zip(order, observed[start:start+len(order)])):
+                return True
+    return False
+
+
+def same_chain(a, b, distance):
+    left, right = chain_junctions(a['chain']), chain_junctions(b['chain'])
+    return len(left) == len(right) and contains_junction_chain(left, right, distance)
+
+
+def junction_evidence(chain, raw_chains, names, args):
+    targets = chain_junctions(chain)
+    support, linked = [set() for _ in targets], set()
+    for name in set(names):
+        observed = chain_junctions(reliable_chain(raw_chains.get(name, []), args))
+        for i, target in enumerate(targets):
+            if any(same_event(target, event, args.breakpoint_cluster) for event in observed):
+                support[i].add(name)
+        if contains_junction_chain(targets, observed, args.breakpoint_cluster):
+            linked.add(name)
+    return targets, [sorted(names) for names in support], sorted(linked)
+
+
+def junction_support(chain, raw_chains, names, args):
+    """Distinct-molecule support for every emitted primitive junction."""
+    return junction_evidence(chain, raw_chains, names, args)[1]
+
+
+def annotate_junction_evidence(event, raw_chains, names, args):
+    targets, support, linked = junction_evidence(event['chain'], raw_chains, names, args)
+    counts = list(map(len, support))
+    event.update(primitive_junctions=targets, junction_support_reads=support,
+                 junction_support_counts=counts, full_chain_support_reads=linked,
+                 minimum_junction_support=min(counts, default=0),
+                 left_junction_support=counts[0] if counts else 0,
+                 right_junction_support=counts[-1] if counts else 0)
+    event['status'] = ('supported' if event['minimum_junction_support'] >= args.min_support
+                       else 'insufficient_raw_support')
 
 
 def cluster_events(events, distance):
     groups = []
     for event in sorted(events, key=lambda e: (-e['minimum_anchor'], -e['minimum_mapq'], e['name'])):
-        group = next((g for g in groups if same_event(event, g[0], distance)), None)
+        group = next((g for g in groups if same_chain(event, g[0], distance)), None)
         if group is None:
             groups.append([event])
         else:
@@ -521,6 +567,9 @@ def event_table_row(event):
         outer_pair_raw_support=event.get('outer_pair_raw_support',len(event.get('support_reads',[]))),
         left_junction_support=event.get('left_junction_support',''),
         right_junction_support=event.get('right_junction_support',''),
+        junction_support_counts=json.dumps(event.get('junction_support_counts',[])),
+        minimum_junction_support=event.get('minimum_junction_support',''),
+        full_chain_support=len(event.get('full_chain_support_reads',[])),
         bam_support=len(event.get('bam_support_reads',[])),
         olc_input_reads=event.get('olc_input_reads',0),extension_bp=event.get('extension_bp',0),
         status=event.get('status','candidate'),duplicate_of=event.get('duplicate_of',''),
@@ -601,8 +650,10 @@ def discover_events(queries, outdir, args):
             qid=query['query_id']
             for group in raw_groups[qid]:
                 event=dict(group[0],method='read',support_reads=sorted({e['name'] for e in group}))
-                event['bam_support_reads'] = sorted({e['name'] for e in bam_events[qid] if same_event(e,event,args.breakpoint_cluster)})
-                event['status'] = 'supported' if len(event['support_reads']) >= args.min_support else 'insufficient_raw_support'
+                event['outer_pair_raw_support'] = len({e['name'] for e in raw_events[qid]
+                    if same_event(e,event,args.breakpoint_cluster)})
+                event['bam_support_reads'] = sorted({e['name'] for e in bam_events[qid] if same_chain(e,event,args.breakpoint_cluster)})
+                annotate_junction_evidence(event,raw_chains,event['support_reads'],args)
                 candidates.append(event)
     else:
         config=OLCConfig(min_overlap=args.olc_min_overlap,min_identity=args.olc_min_identity,
@@ -661,12 +712,10 @@ def discover_events(queries, outdir, args):
             for group in cluster_events(events,args.breakpoint_cluster):
                 event=group[0]
                 exact_support={e['name'] for e in raw_events[qid] if same_event(e,event,args.breakpoint_cluster)}
-                terminal_support=junction_support(event['chain'],raw_chains,sequences_by_query[qid],args)
+                annotate_junction_evidence(event,raw_chains,sequences_by_query[qid],args)
                 event['outer_pair_raw_support']=len(exact_support)
-                event['left_junction_support'],event['right_junction_support']=map(len,terminal_support)
-                event['support_reads']=sorted(set(terminal_support[0])|set(terminal_support[1]))
-                event['bam_support_reads']=sorted({e['name'] for e in bam_events[qid] if same_event(e,event,args.breakpoint_cluster)})
-                event['status']='supported' if min(map(len,terminal_support)) >= args.min_support else 'insufficient_raw_support'
+                event['support_reads']=sorted({name for names in event['junction_support_reads'] for name in names})
+                event['bam_support_reads']=sorted({e['name'] for e in bam_events[qid] if same_chain(e,event,args.breakpoint_cluster)})
                 candidates.append(event)
     for i,event in enumerate(candidates,1):
         event['candidate_id']=f'R{i:04d}'
