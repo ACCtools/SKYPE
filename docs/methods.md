@@ -99,6 +99,14 @@ and the last `--original-paf-loc` value. The positional primary PAF is retained
 for command/file-name compatibility; the resulting primary-named `*.ppc.paf`
 contains unitig-only rows.
 
+Despite its filename, `*.ppc.paf` is an internal node table, not standard PAF.
+Its first nine fields retain the query/reference coordinate layout, but the
+following fields hold SKYPE metadata: field 10 (1-based) is the original MAPQ,
+field 11 is the node type, and fields 12–13 are the source's start/end node
+indices. In particular, field 12 is **not** PAF MAPQ. Use raw or selected
+alignment PAFs for standard PAF tooling and the saved `contig_data` schema for
+node-level analysis.
+
 The graph handoff, `01_nclose_data.pkl`, contains exactly `contig_data`,
 `nclose_nodes` and `telo_contig`. Downstream stages read canonical NClose pairs
 from `nclose_nodes.pkl`. Ordered stage counts and first-rejection reasons are
@@ -118,7 +126,7 @@ retained per accepted Type 1/2 unitig.
 CEN-SAT-pair unitigs are processed independently by
 [censat_endpoints.py](../censat_endpoints.py):
 
-1. Same-chromosome, same-strand endpoint pairs are excluded.
+1. Same-chromosome endpoint pairs are excluded, including opposite strands.
 2. Raw primary and secondary alignments covering at least 50% of each original
    end chunk must agree on that end's chromosome and strand.
 3. Passing ends are traced through `xi:Z:P_<index>` to raw PAF query intervals,
@@ -132,6 +140,13 @@ The endpoint realignment uses:
 ```text
 minimap2 --cs -x asm20 --no-long-join -r2k -K10G -N 5000 -p 0.5
 ```
+
+`realigned_consistent` means that the reported qualifying alignments agree on
+chromosome and strand under these alignment options. It does not establish
+unique sequence origin, exact breakpoint accuracy, or independent biological
+validation. Alternative mappings may depend on the alignment options and query
+context. Reusing the same assembly sequence in the two checks is not an
+independent molecular assay.
 
 Accepted unitigs keep their original endpoint chunks and internal alignment
 rows. They bypass the standard route's trimming, clustering and filters, and

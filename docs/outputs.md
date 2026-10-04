@@ -26,6 +26,15 @@ Reports include zero-weight entries. Native variant displays apply the strict
 the structure's own CN. Positive support in a report does not by itself mean
 that an event passes the display threshold or establishes biological accuracy.
 
+A zero fitted coefficient means no contribution in the current candidate
+model and fit; it does not establish absence of the junction from the sample.
+Keep this distinct from a source with no modeled carrier, a carrier whose
+depth-design column is entirely masked, and a zero depth-design column.
+Type 4 columns can represent signed depth differences, so their entries need
+not all be nonnegative even though fitted coefficients are nonnegative.
+Independent molecule support, somatic status and whole-chain linkage require
+their own evidence; none follows solely from the coefficient or display gate.
+
 ## Weight accounting
 
 Let `w[s]` be a structure's original weight, `count[s, j]` its use count for
