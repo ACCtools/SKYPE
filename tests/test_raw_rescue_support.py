@@ -35,6 +35,54 @@ def reverse_chain(chain):
 
 
 class RawRescueSupportTests(unittest.TestCase):
+    def test_resolved_internal_template_survives_collinear_outer_anchors(self):
+        query = dict(chrom="chr1", start0=9000, end0=15000, query_id="Q001")
+        for last_start in [12000, 14000]:
+            chain = [anchor("chr1", 10000, 0), anchor("chr2", 30000, 2000),
+                     anchor("chr1", last_start, 4000)]
+            for oriented in [chain, reverse_chain(chain)]:
+                found, reason = rescue.find_outer_event("template", oriented, query, ARGS)
+                self.assertIsNotNone(found, reason)
+                self.assertEqual(len(rescue.chain_junctions(found['chain'])), 2)
+
+    def test_unmapped_insertion_and_reference_continuation_stay_excluded(self):
+        query = dict(chrom="chr1", start0=9000, end0=20000, query_id="Q001")
+        for last_ref, last_query in [(12000, 4000), (14000, 4000)]:
+            chain = [anchor("chr1", 10000, 0), anchor("chr1", last_ref, last_query)]
+            found, _ = rescue.find_outer_event("negative", chain, query, ARGS)
+            self.assertIsNone(found)
+        small_changes = [anchor("chr1", 10000, 0), anchor("chr1", 12010, 2000),
+                         anchor("chr1", 14000, 4000)]
+        self.assertIsNone(rescue.find_outer_event("small", small_changes, query, ARGS)[0])
+
+    def test_compound_reference_template_is_not_zero_span_standalone_indel(self):
+        chain = [anchor("chr1", 10000, 0), anchor("chr1", 300000, 2000, 200000),
+                 anchor("chr1", 12000, 202000)]
+        candidate = dict(event("compound", chain), status="supported")
+        rescue.filter_small_indel_candidates([candidate])
+        self.assertEqual(candidate['status'], 'supported')
+        self.assertEqual(rescue.rescue_handoff_type(chain), 2)
+
+    def test_compression_keeps_different_internal_templates(self):
+        chain = [anchor("chr1", 10000, 0), anchor("chr2", 30000, 2000),
+                 anchor("chr5", 10000, 4000)]
+        nodes = [["original", r['qlen'], r['qstart'], r['qend'], r['strand'],
+                  r['chrom'], 1000000, r['start0'], r['end0'], r['mapq']] for r in chain]
+        original = event("original", chain)
+        changed = event("changed", [chain[0], anchor("chr3", 30000, 2000), chain[-1]])
+        self.assertTrue(rescue.same_event(original, changed, 200))
+        self.assertFalse(rescue.compatible_source_chain(changed, nodes, (0, 2), 200))
+        reverse = event("reverse", reverse_chain(chain))
+        self.assertTrue(rescue.compatible_source_chain(reverse, nodes, (0, 2), 200))
+
+    def test_simple_indel_size_gate_uses_primitive_span(self):
+        for span, expected in [(99999, 'below_min_indel_span'), (100000, 'supported')]:
+            chain = [anchor("chr1", 10000, 0), anchor("chr1", 12000+span, 2000)]
+            candidate = dict(event("simple", chain), status="supported")
+            rescue.filter_small_indel_candidates([candidate])
+            self.assertEqual(candidate['status'], expected)
+            self.assertEqual(rescue.rescue_handoff_type(chain), 4)
+
     def test_cn_control_removes_only_prediction_condition(self):
         args = rescue.build_parser().parse_args(["unused"])
         coords = [("chr1", i*100000+1) for i in range(80)]

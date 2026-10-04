@@ -260,7 +260,7 @@ are reused only when query coordinates match.
 ### Read and OLC evidence
 
 Both methods use reliable terminal alignments and native NClose compression.
-At least one breakend coordinate must lie in the query region; read overlap
+At least one primitive breakend coordinate must lie in the query region; read overlap
 alone is insufficient. Short internal repeat alignments cannot become selected
 terminal anchors. Large CIGAR indels split alignments into pieces while keeping
 their original query coordinates and exact per-piece cs strings; indel lengths
@@ -270,6 +270,13 @@ Default gates include MAPQ `20`, anchor length `500` bp, alignment identity
 `0.9`, and `3` distinct supporting molecules. There is no additional
 outward-continuity-length gate or rescue VAF cutoff. An insertion at one
 unchanged reference coordinate does not add a reference-depth edge.
+This exclusion applies to an unmapped insertion. A mapped internal template
+adds explicit reference adjacencies and is retained even when its outer anchors
+are adjacent or collinear. Reference-continuation fragments outside the first
+and last junction are trimmed before selecting the source's outer coordinates.
+Candidate admission keeps the 1 kb query/reference discrepancy requirement for
+same-strand adjacencies; a collection of smaller discrepancies alone does not
+become a compound rescue. Chromosome or orientation changes remain eligible.
 
 - `read` uses complete raw molecules, primary/SA discovery and whole-reference
   realignment, then groups molecules by their complete ordered primitive
@@ -289,13 +296,17 @@ unchanged reference coordinate does not add a reference-depth edge.
   Passing the per-junction gate establishes local junction evidence; it does
   not verify clone-specific linkage or repeated-junction multiplicity.
 
-Standalone same-chromosome, same-strand DEL/DUP candidates must span at least
+Standalone single-junction, same-chromosome, same-strand DEL/DUP candidates must span at least
 100 kb, inclusive. Smaller candidates are reported as `below_min_indel_span`.
 The separate alignment-splitting threshold is 1 kb, so short internal indels can
 still support a compound NClose. Accepted standalone DEL/DUP chains enter as
-Type 4 with their internal pieces retained. DEL and DUP are compared separately
+Type 4. Compound sources retain their primitive junctions through the BND
+route, including same-chromosome, same-strand templates. DEL and DUP are compared separately
 with existing Type 4/catalog events using the stage-11 10 kb endpoint tolerance.
 Other chains use the BND discovery/compression route.
+For compound sources, compression also requires equivalent ordered primitive
+chains within the existing compression tolerance, so equal outer anchors
+cannot merge different internal templates.
 
 After compression retains a new NClose, the orchestrator installs the augmented
 PAF/catalog and reruns stages 10–23 once. `24_raw_rescue/round.json` prevents a

@@ -411,17 +411,57 @@ def endpoint(row, first):
     return dict(chrom=row['chrom'], pos0=int(coordinate), side=side)
 
 
+def reference_continuation(a, b):
+    if a['chrom'] != b['chrom'] or a['strand'] != b['strand']:
+        return False
+    query_gap = b['qstart'] - a['qend']
+    ref_gap = b['start0'] - a['end0'] if a['strand'] == '+' else a['start0'] - b['end0']
+    return query_gap == ref_gap
+
+
+def single_indel_pair(chain):
+    pairs = [(a, b) for a, b in zip(chain, chain[1:]) if not reference_continuation(a, b)]
+    if len(pairs) != 1:
+        return None
+    a, b = pairs[0]
+    return (a, b) if a['chrom'] == b['chrom'] and a['strand'] == b['strand'] else None
+
+
+def rescue_handoff_type(chain):
+    if single_indel_pair(chain) is not None:
+        return 4
+    return 1 if len({row['chrom'] for row in chain}) > 1 else 2
+
+
+def significant_reference_junction(a, b, minimum):
+    if a['chrom'] != b['chrom'] or a['strand'] != b['strand']:
+        return True
+    query_gap = b['qstart'] - a['qend']
+    ref_gap = b['start0'] - a['end0'] if a['strand'] == '+' else a['start0'] - b['end0']
+    return abs(ref_gap - query_gap) >= minimum
+
+
 def find_outer_event(name, rows, query, args):
     chain = reliable_chain(rows, args)
     if len(chain) < 2:
         return None, 'fewer_than_two_reliable_alignments'
+    boundaries = [i for i, (a, b) in enumerate(zip(chain, chain[1:]))
+                  if significant_reference_junction(a, b, args.min_sv_size)]
+    if not boundaries:
+        return None, 'collinear_alignments'
+    # Reference-only fragments outside the first/last junction cannot supply
+    # its breakend coordinates. Retain all interior alignments and linkage.
+    chain = chain[boundaries[0]:boundaries[-1]+2]
     first, last = chain[0], chain[-1]
     a, b = endpoint(first, True), endpoint(last, False)
     inside = lambda ep: ep['chrom'] == query['chrom'] and query['start0'] <= ep['pos0'] < query['end0']
-    if not (inside(a) or inside(b)):
-        return None, 'neither_outer_breakend_in_query'
+    primitives = chain_junctions(chain)
+    query_primitives = [pair_event(a, b) for a, b in zip(chain, chain[1:])
+                        if significant_reference_junction(a, b, args.min_sv_size)]
+    if not any(inside(p[key]) for p in query_primitives for key in ('endpoint_a', 'endpoint_b')):
+        return None, 'no_primitive_breakend_in_query'
     qgap = last['qstart']-first['qend']
-    if first['chrom'] == last['chrom'] and first['strand'] == last['strand']:
+    if len(primitives) == 1 and first['chrom'] == last['chrom'] and first['strand'] == last['strand']:
         rgap = last['start0']-first['end0'] if first['strand'] == '+' else first['start0']-last['end0']
         if rgap==0 and qgap>=args.min_sv_size:
             return None,'pure_insertion_without_new_reference_edge'
@@ -455,11 +495,8 @@ def chain_junctions(chain):
     """
     result = []
     for a, b in zip(chain, chain[1:]):
-        if a['chrom'] == b['chrom'] and a['strand'] == b['strand']:
-            query_gap = b['qstart'] - a['qend']
-            ref_gap = b['start0'] - a['end0'] if a['strand'] == '+' else a['start0'] - b['end0']
-            if query_gap == ref_gap:
-                continue
+        if reference_continuation(a, b):
+            continue
         result.append(pair_event(a, b))
     return result
 
@@ -479,6 +516,20 @@ def contains_junction_chain(targets, observed, distance):
 def same_chain(a, b, distance):
     left, right = chain_junctions(a['chain']), chain_junctions(b['chain'])
     return len(left) == len(right) and contains_junction_chain(left, right, distance)
+
+
+def compatible_source_chain(event, nodes, pair, distance):
+    """Outer-anchor compression cannot identify incompatible compound paths."""
+    lo, hi = sorted(pair)
+    selected = list(nodes[lo:hi+1])
+    if any(row[0] != selected[0][0] for row in selected):
+        selected = [nodes[lo], nodes[hi]]
+    selected.sort(key=lambda row: (int(row[2]), int(row[3])))
+    chain = [dict(chrom=row[5], start0=int(row[7]), end0=int(row[8]),
+                  strand=row[4], qstart=int(row[2]), qend=int(row[3])) for row in selected]
+    if len(chain_junctions(event['chain'])) <= 1 and len(chain_junctions(chain)) <= 1:
+        return True
+    return same_chain(event, {'chain': chain}, distance)
 
 
 def junction_evidence(chain, raw_chains, names, args):
@@ -734,12 +785,11 @@ def filter_small_indel_candidates(candidates):
     for event in candidates:
         if event['status'] != 'supported':
             continue
-        chain=event['chain']
-        if len(chain) < 2 or len({(row['chrom'],row['strand']) for row in chain}) != 1:
+        pair=single_indel_pair(event['chain'])
+        if pair is None:
             continue
-        a,b=event['endpoint_a'],event['endpoint_b']
-        if a['side'] == b['side']:
-            continue
+        primitive=pair_event(*pair)
+        a,b=primitive['endpoint_a'],primitive['endpoint_b']
         span=abs(a['pos0']-b['pos0'])
         event['indel_span_bp']=span
         if span < VCF_TYPE4_MIN_SPAN:
@@ -798,8 +848,8 @@ def prepare_augmented_handoff(prefix, outdir, candidates, args):
             continue
         start=len(nodes); owner=f"raw_rescue_{args.method}_{event['candidate_id']}"
         chain=event['chain']; end=start+len(chain)-1
-        is_type4=len({(row['chrom'],row['strand']) for row in chain})==1
-        handoff_type=4 if is_type4 else 1 if len({row['chrom'] for row in chain})>1 else 2
+        handoff_type=rescue_handoff_type(chain)
+        is_type4=handoff_type==4
         event['handoff_type']=handoff_type
         chrom_span=defaultdict(int)
         for row in chain:
@@ -834,7 +884,8 @@ def prepare_augmented_handoff(prefix, outdir, candidates, args):
             duplicate=None
             for representative in representatives[bucket]:
                 limit=pre.ALL_REPEAT_NCLOSE_COMPRESS_LIMIT if is_repeat and representative.contig_name in repeat_names else pre.NCLOSE_COMPRESS_LIMIT
-                if pre.nclose_cluster_candidate_matches(nodes,stored,directions,representative,limit):
+                if (pre.nclose_cluster_candidate_matches(nodes,stored,directions,representative,limit)
+                        and compatible_source_chain(event,nodes,representative.path_pair,limit)):
                     duplicate=representative.contig_name
                     break
             if duplicate:
