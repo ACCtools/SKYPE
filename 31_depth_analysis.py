@@ -10,12 +10,6 @@ from structure_nclose import (
     save_structure_model, write_structure_reports,
 )
 from native_structure_output import display_events, write_native_bed, write_native_vcf
-from terminal_evidence import write_terminal_evidence
-from local_hifi_evidence import (
-    add_arguments as add_local_hifi_arguments,
-    run_from_arguments as write_local_hifi_from_arguments,
-    validate_arguments as validate_local_hifi_arguments,
-)
 from bp_step_depth_ratio import (
     BP_STEP_DEPTH_RATIO_B,
     BP_STEP_DEPTH_RATIO_PREDICT_B,
@@ -950,10 +944,6 @@ parser.add_argument("-t", "--thread",
 parser.add_argument("--progress", 
                     help="Show progress bar", action='store_true')
 
-for option in ("source-fasta", "reference-fasta", "raw-paf", "source-binding"):
-    parser.add_argument("--terminal-" + option, help="Optional terminal evidence input; does not change fitting or calls.")
-add_local_hifi_arguments(parser)
-
 args = parser.parse_args()
 
 # t = "31_depth_analysis.py public_data/chm13v2.0_censat_v2.1.m.bed /home/hyunwoo/ACCtools-pipeline/90_skype_run/Caki-1/20_alignasm/Caki-1.ctg.aln.paf.ppc.paf /home/hyunwoo/ACCtools-pipeline/90_skype_run/Caki-1/01_depth/Caki-1_normalized.win.stat.gz public_data/chm13v2.0_telomere.bed public_data/chm13v2.0.fa.fai public_data/chm13v2.0_cytobands_allchrs.bed 30_skype_pipe/Caki-1_18_22_40 -t 128"
@@ -968,7 +958,6 @@ main_stat_loc = args.main_stat_loc
 TELOMERE_INFO_FILE_PATH = args.telomere_bed_path
 PREPROCESSED_PAF_FILE_PATH = args.ppc_paf_file_path
 pipeline_input_config = load_pipeline_input(PREFIX)
-validate_local_hifi_arguments(args, native=not pipeline_input_is_vcf(pipeline_input_config))
 native_context = None
 native_display_events = None
 
@@ -1895,13 +1884,6 @@ if not pipeline_input_is_vcf(pipeline_input_config):
     native_context = StructureWeights(structure_model, weights, N)
     save_structure_model(PREFIX, structure_model)
     write_structure_reports(PREFIX, native_context, nclose_filter_status)
-    write_terminal_evidence(
-        PREFIX, native_context, contig_data,
-        source_fasta=args.terminal_source_fasta,
-        reference_fasta=args.terminal_reference_fasta,
-        raw_paf=args.terminal_raw_paf,
-        source_binding=args.terminal_source_binding,
-    )
     native_display_events = display_events(native_context, contig_data, cen_fragment_meta)
 else:
     # Assign report IDs to ecDNA inversion NCloses whose Amplicon is visible in
@@ -1975,8 +1957,6 @@ else:
 
 if native_context is not None:
     write_native_bed(PREFIX, native_display_events)
-
-write_local_hifi_from_arguments(args, PREFIX, native_context, contig_data)
 
 matrix_path = f'{PREFIX}/matrix.h5'
 if os.path.isfile(matrix_path):

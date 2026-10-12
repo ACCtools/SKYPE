@@ -16,7 +16,6 @@ from pathlib import Path
 import psutil
 
 from skype_options import normalize_extra_args
-from local_hifi_evidence import add_arguments as add_local_hifi_arguments, validate_arguments as validate_local_hifi_arguments
 
 MEM_SAFE_RATIO = 0.8
 
@@ -49,7 +48,7 @@ def run_skype(CELL_LINE, PREFIX, ctg_paf, ctg_aln_paf, utg_paf, utg_aln_paf,
               unitig_fasta=None, alignment_force=False, *,
               alignasm_ref, chr_fai, tel_bed, rpt_bed, rcs_bed, cyt_bed,
               ref_stat=None, raw_rescue_method=None, raw_rescue_options=None,
-              reference_index_cache=None, terminal_source_binding=None):
+              reference_index_cache=None):
     # Execute the core SKYPE analysis scripts.
     dep_folder = os.path.abspath(dep_folder)
     reference_index_cache = os.path.abspath(
@@ -62,22 +61,9 @@ def run_skype(CELL_LINE, PREFIX, ctg_paf, ctg_aln_paf, utg_paf, utg_aln_paf,
     rescue_parser.add_argument('--raw-rescue-options', default='')
     rescue_parser.add_argument('--depth-policy', choices=('legacy', 'all', 'nclose_l2', 'nclose_huber'), default='legacy')
     rescue_parser.add_argument('--robust-sigma-multiplier', type=float, default=3.)
-    add_local_hifi_arguments(rescue_parser)
     rescue_options, remaining_options = rescue_parser.parse_known_args(
         normalize_extra_args(option_skype)
     )
-    try:
-        local_hifi_enabled = validate_local_hifi_arguments(rescue_options, native=not benchmark_vcf_loc)
-    except ValueError as exc:
-        raise SkypeArgumentError(str(exc)) from exc
-    local_hifi_args = []
-    if local_hifi_enabled:
-        for option in ("bam", "reference", "matrix", "same-input-as-assembly"):
-            value = getattr(rescue_options, "local_hifi_" + option.replace("-", "_"))
-            if value is not None:
-                local_hifi_args.extend(["--local-hifi-" + option, value])
-        if rescue_options.local_hifi_export:
-            local_hifi_args.append("--local-hifi-export")
     raw_rescue_method = raw_rescue_method or rescue_options.raw_rescue_method
     previous_rescue = Path(PREFIX) / '24_raw_rescue' / 'summary.json'
     if raw_rescue_method is None and skype_start_at > 1 and previous_rescue.exists():
@@ -323,24 +309,11 @@ def run_skype(CELL_LINE, PREFIX, ctg_paf, ctg_aln_paf, utg_paf, utg_aln_paf,
                     round_path.write_text(json.dumps(dict(applied=True, refit_complete=True, rounds=1), indent=2)+'\n')
 
         if skype_start_at <= 31:
-            report_cmd = [
+            subprocess_run([
                 "python", os.path.join(skype_folder_loc, "31_depth_analysis.py"),
                 RCS_BED, PPC_PAF_LOC, MAIN_STAT_NORM_LOC,
                 TEL_BED, CHR_FAI, CYT_BED, PREFIX, "-t", THREAD
-            ]
-            if not benchmark_vcf_loc:
-                for option, value in (("source-fasta", unitig_fasta),
-                                      ("reference-fasta", alignasm_ref),
-                                      ("raw-paf", utg_paf),
-                                      ("source-binding", terminal_source_binding)):
-                    if value is not None:
-                        report_cmd.extend(["--terminal-" + option, value])
-            subprocess_run(report_cmd + local_hifi_args + PROGRESS, check=True)
-    elif local_hifi_enabled:
-        # An explicit evidence request also applies to a cached completed run;
-        # annotation does not require rebuilding the graph or refitting it.
-        subprocess_run(["python", os.path.join(skype_folder_loc, "local_hifi_evidence.py"),
-                        PREFIX] + local_hifi_args, check=True)
+            ] + PROGRESS, check=True)
 
 
 def build_parser():
@@ -375,7 +348,6 @@ def build_parser():
     parser.add_argument('--raw-rescue-method', choices=('off', 'read', 'olc'))
     parser.add_argument('--raw-rescue-options')
     parser.add_argument('--reference-index-cache')
-    parser.add_argument('--terminal-source-binding')
     return parser
 
 

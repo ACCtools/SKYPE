@@ -88,9 +88,6 @@ Files are written to the selected SKYPE output directory.
 | `nclose_sources.tsv` | Original node pairs/unitigs and their shared NClose identities. |
 | `structure_report.tsv` | Each native structure's own weight and provenance. |
 | `structure_nclose_usage.tsv` | NClose occurrence counts and each structure's contribution. |
-| `terminal_evidence.json` | Physical terminal contexts and explicitly assembly-derived sequence evidence, with source/reference verification states. |
-| `structure_terminal_usage.tsv` | Every native PATH start and end, including zero weights, joined to its evidence context. |
-| `terminal_host_inventory.tsv` | All graph terminal hosts, including hosts with no modeled PATH use. |
 | `total_cov.png`, `total_cov.pdf` | Observed and fitted depth with NClose and structure links. |
 | `SV_benchmark_result.vcf` | VCF-input records annotated with `SKYPE_CN` and `SKYPE_STATUS`. |
 
@@ -127,121 +124,6 @@ See [weight accounting](docs/outputs.md#weight-accounting) for AMP normalization
 virtual contributions, Type 4 path contributions and worked examples, and
 [output representations](docs/outputs.md#output-representations) for original
 NClose endpoints and compound summaries.
-
-## Native terminal evidence
-
-Stage 21 records its actual resolved terminal traversal in
-`terminal_component_context.json`, including a host whose depth row was trimmed
-to zero. Input hashes are captured before resolution and checked again before
-publication; rebuilding stage 21 invalidates any older capture first.
-Stage 31 joins this record to each PATH end and writes separate evidence
-reports. Graph labels and unused direct edges do not substitute for the physical
-port used in a path. Both occurrences of a terminal node in one path are retained.
-The annotation does not change graph construction, PAFs, depth, weights, or calls.
-It applies to the native PATH workflow; it does not annotate the separate
-full-assembly-only or VCF-only workflows.
-
-The four display classes are ordinary graph anchor, observed nonreference
-telomeric extension, donor-route repeat, and unavailable sequence/ambiguous port.
-Always read the separate physical-port, `assembly_evidence_state`, source-repeat,
-reference-comparison, anchor-quality and internal-repeat/farther-flank fields.
-An ordinary graph anchor is a model label, not a measured absence of a telomere.
-A repeat extension can still be internal. An assembly boundary does not establish
-a chromosome cap, healing event, somatic event, or complete chromosome path.
-The usage table's conditional fitted contributions do not measure identified
-telomere dosage or chromosome-end counts.
-
-`terminal_evidence_rules.json` fixes the uniform motif and context rules.
-Full tract span, canonical-covered bases, aligned-side overlap, and outward-only
-coverage are distinct quantities. Strong extension descriptions require the
-primary span/canonical minima on the outward partition and a complete callable
-reference comparison. A clipped reference-end window cannot supply a negative
-comparison. No independent-molecule evidence is assumed by these reports.
-
-The pipeline passes its effective assembly FASTA, assembly-alignment reference,
-and raw PAF to the report. Input FASTAs are read without creating indexes.
-Existing runs can be annotated with `python terminal_evidence.py PREFIX` and
-optional `--source-fasta`, `--reference-fasta`, `--raw-paf`, and `--source-binding`.
-Missing stage-21 capture or source inputs remain explicit unknown states; this
-command does not rebuild the graph, alignment, or fit. `terminal_source_inputs.json`
-records requested files only and never certifies historical generation.
-
-Historical source verification requires an upstream
-`<raw_paf>.source_binding.json` (or explicit binding path) with schema
-`SKYPE.assembly_alignment_source.v1`, complete fresh-generation status,
-`producer_stage=raw_and_alternate_alignment_generation`, equal `inputs_before`
-and `inputs_after` FASTA/reference path-SHA pairs, primary/alternate output
-path-SHA pairs, matching `outputs_at_generation` recorded immediately after each
-mapper finishes, and recorded generation argv. Its `reference_index_binding` must
-use `SKYPE.reference_index_source.v1`, bind the exact reference, preset and
-minimap2 to the index, and link the actual `-d` generation output to the published
-index by equal content SHA. The gap-extraction step, when present, retains its
-script identity and source/raw/query-file argument linkage. The existing
-`.aln.paf.alignasm.json` must then link those exact PAF inputs to the selected PAF.
-Only the upstream fresh-generation producer may issue this attestation.
-Readable legacy sequences are explicitly unverified; a downstream hash or an
-old existence/size/mtime cache never upgrades them to bound source evidence.
-
-## Optional local HiFi evidence
-
-For native assembly models, local read support can be reported separately from
-conditional fitted contributions. Supply a coordinate-sorted, indexed HiFi BAM
-and its uncompressed reference FASTA with `--local-hifi-bam` and
-`--local-hifi-reference` inside the existing pipeline `--option_skype` string.
-Add `--local-hifi-export` for separate experimental BND VCFs. Declare the known
-assembly-input relationship with `--local-hifi-same-input-as-assembly yes`, `no`,
-or `unknown` (the default). This declaration is not independent validation.
-These options do not change fitting, weights, candidates, or the default VCF/BED.
-The separate full-assembly-only and VCF-input workflows are outside this scope.
-
-A completed native result can be annotated without rerunning the pipeline:
-
-```bash
-python local_hifi_evidence.py PREFIX \
-  --local-hifi-bam sample.sorted.bam \
-  --local-hifi-reference reference.fa \
-  --local-hifi-same-input-as-assembly yes \
-  --local-hifi-export
-```
-
-Every exact retained primitive is included before support or coefficient
-selection, including candidates without a modeled carrier and unencodable
-reference boundaries. Both fixed tolerances (100 bp primary, 500 bp sensitivity)
-use MAPQ ≥20, 500 bp query/reference-span anchors, query gaps from −500 to 1,000 bp,
-and at least three distinct read names. The small decoder and
-`local_hifi_policy.json` define the complete versioned rule. One read name must
-identify one physical CCS molecule. The BAM's SQ names/lengths and all available
-M5 checksums are compared to the supplied FASTA; missing M5 remains explicitly
-unverified. Matching lengths do not certify the historical model/reference
-generation relationship. Native-node/reference length disagreements are recorded
-per chromosome. Candidate endpoints on those chromosomes remain unassessable
-with null support and an explicit VCF exclusion reason; other candidates retain
-the same gate. Coordinates are never silently renumbered.
-
-`PREFIX/local_hifi_evidence/` contains separate attempt directories. A successful
-attempt publishes `latest.json`; failures retain a failed manifest and do not
-replace that pointer. Each attempt records input and implementation hashes,
-all-candidate JSON/TSV evidence, supporting read names, per-endpoint exposure
-witnesses, source/structure memberships, and nearby/shared-molecule relations.
-`--local-hifi-matrix PATH` can supply a retained matrix for depth-design states;
-otherwise the current matrix is used when available. Missing design data remain
-unavailable rather than zero. Zero design, entirely masked design and no modeled
-carrier are distinct from a fitted coefficient of zero.
-
-`LOCAL_HIFI_SUPPORTED` means the fixed local alignment gate passed. It does not
-establish biological existence, unique locus origin, insertion sequence identity,
-somatic origin, full-chain linkage, identified dosage, absolute CN, or VAF.
-Normal, ONT and whole-chain evidence are null here. Conditional flank exposure
-is neither a VAF denominator nor a detection-power estimate. Nearby candidates
-and candidates sharing reads are retained as representations; they must not be
-counted automatically as independent biological events.
-
-Optional `ExperimentalEvidence.100bp.vcf` and `.500bp.vcf` contain supported
-reciprocal BND pairs only. Every record has `FILTER=ExperimentalEvidence`, missing
-QUAL and no sample/genotype columns. They are distinct from the default calls.
-Unencodable candidates remain in the full sidecar with explicit export reasons.
-Any benchmark of these files must explicitly opt into that experimental filter
-and retain the full candidate denominator and unresolved cases.
 
 ## Further documentation
 
