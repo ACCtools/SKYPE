@@ -11,7 +11,10 @@ import sys
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from skype_utils import *
-from path_geometry import conjoined_outer_geometry, reference_connection_allowed, walked_strand
+from path_geometry import (
+    assert_nclose_reference_connections,
+    conjoined_outer_geometry, reference_connection_allowed, walked_strand,
+)
 from parse_vcf import parse_vcf_events, select_vcf_type4_graph_events
 from nclose_tracking import (
     build_bnd_event_catalog,
@@ -3266,14 +3269,16 @@ def initialize_inversion_only_graph(contig_data : list, nclose_nodes_original : 
                                 j_str = contig_j[CHR_STR]
                                 i_end = contig_i[CHR_END]
                                 j_end = contig_j[CHR_END]
-                                is_overlap = distance_checker(contig_i, contig_j)==0
+                                # A zero gap is not a positive overlap. Only
+                                # true overlap may bypass the ordering check.
+                                is_overlap = max(i_str, j_str) < min(i_end, j_end)
                                 if i_ind == 'f+':
                                     if j_ind == 'f-':
                                         if i_str > j_str or is_overlap:
                                             bnd_adjacency[(DIR_BAK, n1[i])].append([DIR_FOR, n2[j]])
                                             bnd_adjacency[(DIR_BAK, n2[j])].append([DIR_FOR, n1[i]])
                                     elif j_ind == 'b+':
-                                        if i_str > j_end or is_overlap:
+                                        if i_str >= j_end or is_overlap:
                                             bnd_adjacency[(DIR_FOR, n2[j])].append([DIR_FOR, n1[i]])
                                             bnd_adjacency[(DIR_BAK, n1[i])].append([DIR_BAK, n2[j]])
                                 elif i_ind == 'b+':
@@ -3282,7 +3287,7 @@ def initialize_inversion_only_graph(contig_data : list, nclose_nodes_original : 
                                             bnd_adjacency[(DIR_FOR, n1[i])].append([DIR_BAK, n2[j]])
                                             bnd_adjacency[(DIR_FOR, n2[j])].append([DIR_BAK, n1[i]])
                                     elif j_ind == 'f+':
-                                        if j_str > i_end or is_overlap:
+                                        if j_str >= i_end or is_overlap:
                                             bnd_adjacency[(DIR_BAK, n2[j])].append([DIR_BAK, n1[i]])
                                             bnd_adjacency[(DIR_FOR, n1[i])].append([DIR_FOR, n2[j]])
                                 elif i_ind == 'f-':
@@ -3304,6 +3309,9 @@ def initialize_inversion_only_graph(contig_data : list, nclose_nodes_original : 
                                             bnd_adjacency[(DIR_BAK, n2[j])].append([DIR_BAK, n1[i]])
                                             bnd_adjacency[(DIR_FOR, n1[i])].append([DIR_FOR, n2[j]])
 
+    assert_nclose_reference_connections(
+        contig_data, bnd_adjacency, context="stage01 ecDNA graph",
+    )
     return bnd_adjacency
 
 
@@ -3396,9 +3404,12 @@ def circuit_length_calculator(circuit, contig_rows):
         if not reference_connection_allowed(first, start_type, last, end_type):
             return float("inf")
         if walked_strand(first[CTG_DIR], start_type) == '+':
-            length += last[CHR_END] - first[CHR_STR]
+            span = last[CHR_END] - first[CHR_STR]
         else:
-            length += first[CHR_END] - last[CHR_STR]
+            span = first[CHR_END] - last[CHR_STR]
+        if span <= 0:
+            return float("inf")
+        length += span
     return length
 
 

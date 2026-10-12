@@ -26,6 +26,45 @@ def reference_connection_allowed(first, first_type, last, last_type):
     return True
 
 
+def assert_nclose_reference_connections(contig_rows, adjacency, *, context):
+    """Check directed reference edges between different NClose sources.
+
+    Reference components include their two anchors. Consecutive touching
+    anchors therefore have positive length; an inward contact trimmed to one
+    boundary does not. Same-source NClose jumps and named telomeres are outside
+    this check.
+    """
+    for source, targets in adjacency.items():
+        if isinstance(source, str):
+            continue
+        for target in targets:
+            if isinstance(target, str):
+                continue
+            first, last = contig_rows[source[1]], contig_rows[target[1]]
+            if first[0] == last[0]:
+                continue
+            first_strand = walked_strand(first[4], source[0])
+            last_strand = walked_strand(last[4], target[0])
+            span = None
+            if first_strand == '+':
+                span = int(last[8]) - int(first[7])
+            elif first_strand == '-':
+                span = int(first[8]) - int(last[7])
+            assert (
+                first[5] == last[5]
+                and first_strand in ('+', '-')
+                and first_strand == last_strand
+                and span > 0
+            ), (
+                f"{context}: invalid NClose reference connection "
+                f"{tuple(source)} {first[0]} {first[5]}:[{first[7]},{first[8]}) "
+                f"PAF={first[4]} walked={first_strand} -> "
+                f"{tuple(target)} {last[0]} {last[5]}:[{last[7]},{last[8]}) "
+                f"PAF={last[4]} walked={last_strand}; reference_span_bp={span}; "
+                "expected the same chromosome and walked strand with positive reference span"
+            )
+
+
 def conjoined_outer_geometry(first, last, circuit):
     """Outer breakends and depth baseline for the ordered A,B,C,D path.
 

@@ -25,6 +25,7 @@ import numpy as np
 import pandas as pd
 from tqdm import tqdm
 
+from path_geometry import assert_nclose_reference_connections
 from skype_utils import (
     CHROMOSOME_COUNT,
     K,
@@ -469,20 +470,22 @@ def initialize_bnd_graph(
                             end_b = ("b" if endpoint_b % 2 else "f") + contig_b[CTG_DIR]
                             a_st, a_end = contig_a[CHR_STR], contig_a[CHR_END]
                             b_st, b_end = contig_b[CHR_STR], contig_b[CHR_END]
-                            overlaps = distance_checker(contig_a, contig_b) == 0
+                            # Boundary contact must pass the ordering check;
+                            # only positive overlap can be trimmed to connect.
+                            overlaps = max(a_st, b_st) < min(a_end, b_end)
 
                             if end_a == "f+":
                                 if end_b == "f-" and (a_st > b_st or overlaps):
                                     adjacency[(DIR_BAK, idx_a)].append([DIR_FOR, idx_b])
                                     adjacency[(DIR_BAK, idx_b)].append([DIR_FOR, idx_a])
-                                elif end_b == "b+" and (a_st > b_end or overlaps):
+                                elif end_b == "b+" and (a_st >= b_end or overlaps):
                                     adjacency[(DIR_FOR, idx_b)].append([DIR_FOR, idx_a])
                                     adjacency[(DIR_BAK, idx_a)].append([DIR_BAK, idx_b])
                             elif end_a == "b+":
                                 if end_b == "b-" and (b_end > a_end or overlaps):
                                     adjacency[(DIR_FOR, idx_a)].append([DIR_BAK, idx_b])
                                     adjacency[(DIR_FOR, idx_b)].append([DIR_BAK, idx_a])
-                                elif end_b == "f+" and (b_st > a_end or overlaps):
+                                elif end_b == "f+" and (b_st >= a_end or overlaps):
                                     adjacency[(DIR_BAK, idx_b)].append([DIR_BAK, idx_a])
                                     adjacency[(DIR_FOR, idx_a)].append([DIR_FOR, idx_b])
                             elif end_a == "f-":
@@ -499,6 +502,10 @@ def initialize_bnd_graph(
                                 elif end_b == "f-" and (a_end > b_st or overlaps):
                                     adjacency[(DIR_BAK, idx_b)].append([DIR_BAK, idx_a])
                                     adjacency[(DIR_FOR, idx_a)].append([DIR_FOR, idx_b])
+
+    assert_nclose_reference_connections(
+        contig_data, adjacency, context="stage10 NClose graph",
+    )
 
     for telo_name, telo_edges in telo_contig.items():
         for telo_edge in telo_edges:

@@ -218,6 +218,21 @@ correction to an otherwise unchanged saved graph.
 
 ### Graph traversal
 
+Stage 01's ecDNA graph and stage 10's NClose graph distinguish positive interval
+overlap from boundary contact when connecting different NClose sources. Only
+positive overlap can bypass the coordinate ordering check; ordinary consecutive
+touching anchors satisfy the ordering check and retain both anchors. Inward
+contacts with zero retained span are excluded during graph construction. The
+ecDNA length gate also rejects any circuit containing a nonpositive reference
+bridge, even if its other components give it a positive total length.
+
+Both graph builders independently assert that each generated reference edge
+stays on the same chromosome and walked strand and retains positive reference
+span. A violation stops construction before enumeration and reports node indices,
+source names, coordinates, PAF strands, walked strands, and span. Same-source
+NClose jumps are handled separately and are exempt from this check. Restart from
+stage 01 to regenerate saved ecDNA candidates and downstream results.
+
 Stage 10 permits two visits to a reference chromosome-end telomere anchor,
 including a synthetic `virtual_telo_*` anchor for a missing reference end.
 Qualification uses the reference telomere annotation and matching terminal label;
