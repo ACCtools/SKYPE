@@ -49,7 +49,9 @@ class KaryotypeModeDecisionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as prefix:
             names = ["weight.npy", "SKYPE_result.bed", "weight_filter.npy",
                      "SKYPE_result_cluster.bed", "SV_call_result_filter.nclose_bnds.tsv",
-                     "karyotype_cluster.txt"]
+                     "karyotype_cluster.txt", "nclose_report_filter.tsv",
+                     "nclose_sources_cluster.tsv", "structure_report_filter.tsv",
+                     "structure_nclose_usage_cluster.tsv"]
             for name in names:
                 Path(prefix, name).write_text("")
             removed = {Path(path).name for path in remove_suffixed_outputs(prefix)}

@@ -95,8 +95,8 @@ Files are written to the selected SKYPE output directory.
 
 Karyotype mode (the default) also refits the matrix after greedy NClose
 filtering and after karyotype clustering, and writes `_filter` and `_cluster`
-versions of the Virtual SKY, karyotype, Circos, VCF and BED results. Variant
-mode (`--variant_mode`), VCF input and graphs with more than 1000 NClose nodes
+versions of the Virtual SKY, karyotype, Circos, VCF, BED and native accounting
+reports. Variant mode (`--variant_mode`), VCF input and graphs with more than 1000 NClose nodes
 write only the unsuffixed results. See
 [karyotype mode](docs/usage.md#karyotype-and-variant-mode).
 

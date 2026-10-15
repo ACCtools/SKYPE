@@ -6,7 +6,7 @@ from skype_utils import *
 from circos_plotting import render_total_coverage_circos
 from skype_vcf_writer import write_vcf_record_with_fallback
 from structure_nclose import (
-    StructureWeights, add_bnd_metadata, add_virtual_structure, load_or_build_structure_model,
+    build_stage_weight_contexts, load_or_build_structure_model,
     save_structure_model, write_structure_reports,
 )
 from native_structure_output import display_events, write_native_bed, write_native_vcf
@@ -47,7 +47,6 @@ import h5py
 import logging
 import argparse
 import collections
-import copy
 import scipy.stats
 import vcfpy
 import glob
@@ -399,7 +398,7 @@ def make_strands(dir_a, dir_b):
     b = invert_strand(dir_b) if dir_b in ('+', '-') else '.'
     return f"{a}{b}"
 
-def build_vcf_header(contig_lengths):
+def build_vcf_header(contig_lengths, report_suffix=''):
     header = vcfpy.Header(lines=[
         vcfpy.HeaderLine("fileformat", "VCFv4.3"),
         vcfpy.HeaderLine("source", SKYPE_VCF_SOURCE),
@@ -424,11 +423,11 @@ def build_vcf_header(contig_lengths):
         ("WEIGHT", 1, "Float", "Summed normalized structure contributions; for BNDs includes NClose occurrences and exact junction multiplicity within each source NClose"),
         ("CTG_NAME", 1, "String", "Name of contig for supporting variant"),
         ("SVCLASS", ".", "String", "SKYPE source event classes"),
-        ("PARENT_IDS", ".", "String", "Contributing structure IDs, linked to structure_report.tsv"),
+        ("PARENT_IDS", ".", "String", f"Contributing structure IDs, linked to structure_report{report_suffix}.tsv"),
         ("PARENT_WEIGHTS", ".", "Float", "Original normalized structure weights in PARENT_IDS order"),
         ("PARENT_MULTIPLICITY", ".", "Integer", "Number of constituent occurrences with this exact adjacency in each parent, in PARENT_IDS order"),
         ("NCLOSE_KEYS", ".", "String", "Original NClose node-index pairs, encoded as first:second"),
-        ("NCLOSE_IDS", ".", "String", "NClose IDs after exact native BND identity reuse, linked to nclose_report.tsv; source pairs are in nclose_sources.tsv"),
+        ("NCLOSE_IDS", ".", "String", f"NClose IDs after exact native BND identity reuse, linked to nclose_report{report_suffix}.tsv; source pairs are in nclose_sources{report_suffix}.tsv"),
         ("WEIGHT_METHOD", 1, "String", "STRUCTURE_SUM: sum of original structure weights times exported event occurrence counts"),
         ("MODEL_WEIGHT", 1, "Float", "Sum of unique fitted feature occurrence contributions normalized by median depth divided by two"),
         ("MODEL_FEATURE_COUNT", 1, "Integer", "Number of distinct positive fitted columns contributing to this BND"),
@@ -1885,15 +1884,9 @@ def qualified_virtual_structures(stage_weights):
         virtual_by_pair[pair_id].append((chrom, st, nd, raw_weight))
     return virtual_by_pair
 
-def build_stage_context(model, stage_weights, virtual_by_pair):
-    for pair_id, views in sorted(virtual_by_pair.items()):
-        add_virtual_structure(model, virtual_records[pair_id], views[0][3],
-                              [(c, st, nd) for c, st, nd, _ in views], contig_data)
-    context = StructureWeights(model, stage_weights, N)
-    return context, display_events(context, contig_data, cen_fragment_meta)
-
 if not pipeline_input_is_vcf(pipeline_input_config):
     structure_model = load_or_build_structure_model(PREFIX, contig_data)
+    save_structure_model(PREFIX, structure_model)
     stage_weights = {'': weights}
     for stage_suffix in stage_suffixes:
         stage_weights[stage_suffix] = np.load(f'{PREFIX}/weight{stage_suffix}.npy')
@@ -1906,23 +1899,22 @@ if not pipeline_input_is_vcf(pipeline_input_config):
     if virtual_pair_ids:
         with open(f"{PREFIX}/{RAW_TRANSLOCATION_RESULT_PKL}", "rb") as handle:
             virtual_records = {int(record["pair_id"]): record for record in pkl.load(handle)}
-        # Register every qualified virtual NClose once so all stages share IDs.
-        for pair_id in virtual_pair_ids:
-            for side in ("a", "b"):
-                add_bnd_metadata(structure_model, virtual_records[pair_id][f"nclose_key_{side}"],
-                                 contig_data, "VIRTUAL_INV",
-                                 virtual_records[pair_id][f"layout_{side}"])
-    stage_models = {stage_suffix: copy.deepcopy(structure_model) for stage_suffix in stage_suffixes}
-    native_context, native_display_events = build_stage_context(
-        structure_model, weights, stage_virtuals[''])
-    save_structure_model(PREFIX, structure_model)
+    contexts = build_stage_weight_contexts(
+        structure_model, stage_weights, stage_virtuals, virtual_records, contig_data, N)
+    native_context = contexts['']
+    native_display_events = display_events(native_context, contig_data, cen_fragment_meta)
     for stage_suffix in stage_suffixes:
-        stage_contexts[stage_suffix] = build_stage_context(
-            stage_models[stage_suffix], stage_weights[stage_suffix], stage_virtuals[stage_suffix])
+        context = contexts[stage_suffix]
+        stage_contexts[stage_suffix] = (
+            context, display_events(context, contig_data, cen_fragment_meta))
+    report_contexts = {stage_suffix[1:]: context
+                       for stage_suffix, (context, _) in stage_contexts.items()}
     write_structure_reports(
-        PREFIX, native_context, nclose_filter_status,
-        stage_contexts={stage_suffix[1:]: context for stage_suffix, (context, _) in stage_contexts.items()},
-    )
+        PREFIX, native_context, nclose_filter_status, stage_contexts=report_contexts)
+    for stage_suffix, (context, _) in stage_contexts.items():
+        write_structure_reports(
+            PREFIX, context, nclose_filter_status, stage_contexts=report_contexts,
+            suffix=stage_suffix)
 else:
     # Assign report IDs to ecDNA inversion NCloses whose Amplicon is visible in
     # the single raw-weight BED, using its strict >5%-of-median raw-depth gate.
@@ -1983,7 +1975,8 @@ def pairs_to_vcf(out_prefix='', context=None):
     )
     bnd_count, record_count = write_native_vcf(
         context, chr_len, f"{PREFIX}/SV_call_result{out_prefix}.vcf", ratios,
-        build_vcf_header, write_bnd_vcf_pair, write_symbolic_vcf_record,
+        lambda lengths: build_vcf_header(lengths, out_prefix),
+        write_bnd_vcf_pair, write_symbolic_vcf_record,
         nodes=contig_data,
     )
     logging.info("%sNative VCF: %d unique BND adjacencies, %d records",

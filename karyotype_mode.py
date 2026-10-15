@@ -89,6 +89,10 @@ def suffixed_output_names(suffix):
         f"SV_call_result{suffix}.bnd_weights.tsv",
         f"SV_call_result{suffix}.nclose_bnds.tsv",
         f"SKYPE_result{suffix}.bed",
+        f"nclose_report{suffix}.tsv",
+        f"nclose_sources{suffix}.tsv",
+        f"structure_report{suffix}.tsv",
+        f"structure_nclose_usage{suffix}.tsv",
     ]
 
 

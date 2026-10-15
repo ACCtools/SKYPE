@@ -15,7 +15,7 @@ from native_structure_output import bnd_calls, display_events, write_native_bed,
 from nclose_tracking import _build_bnd_event
 from structure_nclose import (
     MODEL_FILE, MODEL_VERSION, StructureWeights, add_bnd_metadata,
-    add_virtual_structure, count_path_members, load_or_build_structure_model,
+    add_virtual_structure, build_stage_weight_contexts, count_path_members, load_or_build_structure_model,
     save_structure_model, write_structure_reports,
 )
 from test_native_bnd import export_namespace, node
@@ -106,6 +106,7 @@ class StructureWeightTests(unittest.TestCase):
                 build_virtual_inv_events=lambda *args, **kwargs: [],
                 VCF_FILTER_DEPTH_N=.1, defaultdict=collections.defaultdict,
                 StructureWeights=StructureWeights, save_structure_model=save_structure_model,
+                build_stage_weight_contexts=build_stage_weight_contexts,
                 write_structure_reports=write_structure_reports, display_events=display_events,
                 nclose_filter_status={}, cen_fragment_meta={},
                 paf_ans_list=paths, int2key=int2key, output_folder=f"{tmp}/21_pat_depth",
@@ -136,7 +137,7 @@ class StructureWeightTests(unittest.TestCase):
             self.assertEqual(context.totals[pair], 12.)
 
     def test_old_split_cache_rebuilds_and_round_trips_without_split_metadata(self):
-        for old_version in (1, 2):
+        for old_version in (1, 2, 3):
             with self.subTest(version=old_version), tempfile.TemporaryDirectory() as tmp:
                 nodes, pair, _, _ = write_internal_chromosome_fixture(Path(tmp))
                 old = load_or_build_structure_model(tmp)
@@ -146,10 +147,10 @@ class StructureWeightTests(unittest.TestCase):
                     column_counts={0: 1})], split_parent_usage={pair: {0: 1}})
                 save_structure_model(tmp, old)
                 rebuilt = load_or_build_structure_model(tmp)
-                self.assertEqual(rebuilt["version"], 3)
+                self.assertEqual(rebuilt["version"], MODEL_VERSION)
                 self.assertNotIn("path_splits", rebuilt)
                 self.assertNotIn("split_parent_usage", rebuilt)
-                context = StructureWeights(rebuilt, [12.], 10.)
+                context = StructureWeights(copy.deepcopy(rebuilt), [12.], 10.)
                 calls = bnd_calls(context, nodes)
                 self.assertEqual([call["weight"] for call in calls], [1.2, 1.2])
                 self.assertEqual([call["endpoints"] for call in calls], [

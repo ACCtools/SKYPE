@@ -22,7 +22,6 @@ from nclose_tracking import (
     carrier_columns,
     load_filter_status,
     load_path_usage,
-    record_filter_stage,
     save_filter_status,
 )
 
@@ -713,6 +712,28 @@ if 'base' not in nclose_filter_status['stages']:
         "Missing stage-23 NClose filter provenance. Rerun SKYPE from stage 23."
     )
 base_active_columns = set(nclose_filter_status['stages']['base']['active_columns'])
+# Stage 31 also reports restored constituents outside the stage-23 catalog.
+tracked_keys = list(dict.fromkeys(
+    [*nclose_filter_status['event_keys'], *(key for usage in provenance_usage for key in usage)]
+))
+
+
+def record_structure_stage(stage, active_columns, reason_for):
+    """Record each source's status in one fit from its native-structure carriers.
+
+    A source passes while any carrier column stays in the fit, even if an
+    earlier stage removed its own paths, matching the stage-31 accounting.
+    """
+    reasons = {}
+    for key in tracked_keys:
+        reason = reason_for(key, carrier_columns(provenance_usage, key))
+        if reason != 'PASS':
+            reasons[key] = reason
+    nclose_filter_status['stages'][stage] = {
+        'active_columns': sorted(active_columns), 'reasons': reasons,
+    }
+    save_filter_status(PREFIX, nclose_filter_status)
+
 
 final_weights_fullsize = np.zeros(len(weight_base))
 predict_suc_B_base = np.asarray(A_jl * weight_base_jl)
@@ -973,21 +994,20 @@ logging.info(f'Filter relative error : {error/b_norm:.4f}')
 np.save(f'{PREFIX}/weight_filter.npy', final_weights_fullsize)
 np.save(f'{PREFIX}/predict_B_filter.npy', predict_B)
 
-filter_direct_reasons = {
-    event_key: 'FILTERED_24_GREEDY_DEPTH'
-    for event_key in not_essential_nclose
-}
+filter_active_column_set = set(final_idx_list)
+base_reasons = nclose_filter_status['stages']['base'].get('reasons', {})
+
+
+def filter_reason(key, carriers):
+    if carriers & filter_active_column_set:
+        return 'PASS'
+    if not carriers & base_active_columns:
+        return base_reasons.get(key, 'FILTERED_02_COFILTERED_PATH')
+    return 'FILTERED_24_GREEDY_DEPTH' if key in not_essential_nclose else 'FILTERED_24_COFILTERED_PATH'
+
+
 nclose_filter_status['stages'].pop('cluster', None)
-record_filter_stage(
-    nclose_filter_status,
-    'filter',
-    'base',
-    provenance_usage,
-    final_idx_list,
-    filter_direct_reasons,
-    'FILTERED_24_COFILTERED_PATH',
-)
-save_filter_status(PREFIX, nclose_filter_status)
+record_structure_stage('filter', filter_active_column_set, filter_reason)
 
 weights_sorted_data = sorted(enumerate(final_weights_fullsize), key=lambda t:t[1], reverse=True)
 
@@ -1035,7 +1055,6 @@ if len(tot_loc_list) != len(final_weights_fullsize):
         f"{len(tot_loc_list)} locations for {len(final_weights_fullsize)} weights."
     )
 loc2weight = dict(zip(tot_loc_list, final_weights_fullsize))
-filter_active_column_set = set(final_idx_list)
 filter_active_locations = {
     tot_loc_list[col_idx]
     for col_idx in filter_active_column_set
@@ -1189,32 +1208,19 @@ cluster_positive_columns = {
     for i, weight in enumerate(cluster_weight_before_min)
     if weight > CLUSTER_START_DEPTH * N
 }
-cluster_active_columns = set(using_merge_ncnt_list) - cluster_thresholded_columns
-filter_active_columns = set(
-    nclose_filter_status['stages']['filter']['active_columns']
-)
 selected_columns = set(using_merge_ncnt_list)
-cluster_direct_reasons = {}
-for event_key in nclose_filter_status['event_keys']:
-    if event_key in nclose_filter_status['stages']['filter'].get('reasons', {}):
-        continue
-    carriers = carrier_columns(provenance_usage, event_key) & filter_active_columns
-    selected_carriers = carriers & selected_columns
-    if not selected_carriers:
-        cluster_direct_reasons[event_key] = 'FILTERED_24_CLUSTER_SELECTION'
-    elif not (selected_carriers & cluster_positive_columns) and (
-        selected_carriers & cluster_thresholded_columns
-    ):
-        cluster_direct_reasons[event_key] = 'FILTERED_24_CLUSTER_MIN_WEIGHT'
+cluster_active_columns = selected_columns - cluster_thresholded_columns
+filter_reasons = nclose_filter_status['stages']['filter']['reasons']
 
-record_filter_stage(
-    nclose_filter_status,
-    'cluster',
-    'filter',
-    provenance_usage,
-    cluster_active_columns,
-    cluster_direct_reasons,
-    'FILTERED_24_CLUSTER_COFILTERED_PATH',
-    forced_reasons=cluster_direct_reasons,
-)
-save_filter_status(PREFIX, nclose_filter_status)
+
+def cluster_reason(key, carriers):
+    # The floor cut wins even if an exact-zero carrier stays selected.
+    selected = carriers & selected_columns
+    if (selected & cluster_thresholded_columns) and not (selected & cluster_positive_columns):
+        return 'FILTERED_24_CLUSTER_MIN_WEIGHT'
+    if carriers & cluster_active_columns:
+        return 'PASS'
+    return filter_reasons.get(key, 'FILTERED_24_CLUSTER_SELECTION')
+
+
+record_structure_stage('cluster', cluster_active_columns, cluster_reason)

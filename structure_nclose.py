@@ -7,6 +7,7 @@ structure coefficient. The legacy event catalog remains preprocessing history.
 from __future__ import annotations
 
 import csv
+import copy
 import hashlib
 import pickle
 from collections import Counter, defaultdict
@@ -16,11 +17,11 @@ from pathlib import Path
 from native_bnd import constituent_pairs, layout_endpoints, node_pair_endpoints
 from nclose_tracking import (
     REPORT_COLUMNS, _build_bnd_event, compressed_bnd_event_keys,
-    load_type4_edge_event_map, nclose_event_id_by_key, stage_reason,
+    load_type4_edge_event_map, nclose_event_id_by_key,
 )
 
 MODEL_FILE = "structure_nclose_model.pkl"
-MODEL_VERSION = 3
+MODEL_VERSION = 4
 
 
 def read_pickle(prefix, name):
@@ -156,6 +157,7 @@ def build_structure_model(prefix, nodes=None):
     model = dict(version=MODEL_VERSION, source_signature=source_signature(prefix),
                  ncloses={}, structures=[],
                  next_nclose_id=len(catalog) + 1, column_count=len(locations))
+    initialize_nclose_registry(model)
     constituents = {}
     event_by_location = {}
     for original in sorted(catalog, key=lambda e: e.get("source") != "compressed_nclose_nodes_list.txt"):
@@ -221,7 +223,15 @@ def build_structure_model(prefix, nodes=None):
     return model
 
 
+def has_virtual_entries(model):
+    return (any(s["kind"] == "VIRTUAL_INV" for s in model["structures"])
+            or any(e.get("source") == "VIRTUAL_INV"
+                   for e in model.get("nclose_sources", model["ncloses"]).values()))
+
+
 def save_structure_model(prefix, model):
+    """Cache base topology only; stage-specific identities live in output views."""
+    assert not has_virtual_entries(model), "virtual NCloses are not base topology"
     with (Path(prefix) / MODEL_FILE).open("wb") as handle:
         pickle.dump(model, handle)
 
@@ -232,8 +242,6 @@ def load_or_build_structure_model(prefix, nodes=None):
         model = read_pickle(prefix, MODEL_FILE)
         if (model.get("version") == MODEL_VERSION
                 and model.get("source_signature") == source_signature(prefix)):
-            # Virtual qualification is re-evaluated against the final weights.
-            model["structures"] = [s for s in model["structures"] if s["kind"] != "VIRTUAL_INV"]
             return model
     return build_structure_model(prefix, nodes)
 
@@ -252,6 +260,37 @@ def add_virtual_structure(model, record, raw_weight, views, nodes):
         telomere_counts=Counter(), raw_weight=float(raw_weight), views=views)
     set_structure_membership(model, structure, counts)
     model["structures"].append(structure)
+
+
+def add_qualified_virtuals(model, virtuals, records, nodes):
+    for pair_id, views in sorted(virtuals.items()):
+        add_virtual_structure(model, records[pair_id], views[0][3],
+                              [(chrom, start, end) for chrom, start, end, _ in views], nodes)
+
+
+def build_stage_weight_contexts(model, stage_weights, stage_virtuals, records, nodes, n_unit):
+    """Keep raw identities fixed, then share extra IDs across the other fits."""
+    raw_model = copy.deepcopy(model)
+    raw_virtuals = stage_virtuals[""]
+    add_qualified_virtuals(raw_model, raw_virtuals, records, nodes)
+    models = {"": raw_model}
+    if len(stage_weights) > 1:
+        template = copy.deepcopy(raw_model)
+        template["structures"] = [s for s in template["structures"] if s["kind"] != "VIRTUAL_INV"]
+        extra_pairs = set().union(*(set(v) for v in stage_virtuals.values())) - set(raw_virtuals)
+        for pair_id in sorted(extra_pairs):
+            record = records[pair_id]
+            for side in ("a", "b"):
+                add_bnd_metadata(template, record[f"nclose_key_{side}"], nodes,
+                                 "VIRTUAL_INV", record[f"layout_{side}"])
+        for stage in stage_weights:
+            if not stage:
+                continue
+            stage_model = copy.deepcopy(template)
+            add_qualified_virtuals(stage_model, stage_virtuals[stage], records, nodes)
+            models[stage] = stage_model
+    return {stage: StructureWeights(stage_model, stage_weights[stage], n_unit)
+            for stage, stage_model in models.items()}
 
 
 class StructureWeights:
@@ -331,18 +370,40 @@ def write_tsv(path, columns, rows):
         writer.writerows(rows)
 
 
+def removal_order(reason):
+    """Latest stage first, then a direct cause before a co-filtered one."""
+    stage = (2 if reason.startswith("FILTERED_24_CLUSTER_")
+             else 1 if reason.startswith("FILTERED_24_") else 0)
+    return -stage, "COFILTERED" in reason, reason
+
+
 def stage_report_values(status, stage, key, context):
-    """Karyotype-mode filter/cluster columns: -1 plus reason once filtered."""
+    """Combine the stage-25 reasons of every source of a canonical NClose.
+
+    Positive support passes even if a source was removed. Otherwise a floor cut
+    wins, then a source that kept a carrier (an NNLS zero, ``0 / PASS``), then
+    the source removed at the latest stage.
+    """
     if context is None or stage not in status.get("stages", {}):
         return "NA", "NOT_RUN_RAW_NNLS"
-    reason = stage_reason(status, stage, key)
-    if reason != "PASS":
-        return -1, reason
-    return context.totals.get(key, 0.0) / context.n_unit, "PASS"
+    key = context.model["nclose_aliases"].get(key, key)
+    cn = context.totals.get(key, 0.0) / context.n_unit
+    if cn > 0:
+        return cn, "PASS"
+    stage_reasons = status["stages"][stage]["reasons"]
+    reasons = [stage_reasons.get(source, "PASS")
+               for source, canonical in context.model["nclose_aliases"].items()
+               if canonical == key
+               and context.model["nclose_sources"][source].get("source") != "VIRTUAL_INV"]
+    if "FILTERED_24_CLUSTER_MIN_WEIGHT" in reasons:
+        return -1, "FILTERED_24_CLUSTER_MIN_WEIGHT"
+    if not reasons or "PASS" in reasons:
+        return 0.0, "PASS"
+    return -1, min(reasons, key=removal_order)
 
 
-def write_structure_reports(prefix, context, status, stage_contexts=None):
-    """``stage_contexts`` maps ``filter``/``cluster`` to their weight contexts."""
+def write_structure_reports(prefix, context, status, stage_contexts=None, *, suffix=""):
+    """Write one fit's reports; ``stage_contexts`` supplies both stage summaries."""
     stage_contexts = stage_contexts or {}
     structures = []
     for s in context.structures.values():
@@ -352,7 +413,7 @@ def write_structure_reports(prefix, context, status, stage_contexts=None):
             raw_weight=s["raw_weight"], weight_N=s["weight_N"], source=s["source"],
             legacy_ids=";".join(s["legacy_ids"]),
             nclose_occurrence_count=sum(s["nclose_counts"].values())))
-    write_tsv(Path(prefix) / "structure_report.tsv",
+    write_tsv(Path(prefix) / f"structure_report{suffix}.tsv",
               ["structure_id", "kind", "feature_index", "raw_weight", "weight_N",
                "source", "legacy_ids", "nclose_occurrence_count"], structures)
     usage = []
@@ -362,7 +423,7 @@ def write_structure_reports(prefix, context, status, stage_contexts=None):
                          ";".join(map(str, v)) if k == "source_occurrence_counts" else
                          "." if v is None else v)
                       for k, v in row.items()})
-    write_tsv(Path(prefix) / "structure_nclose_usage.tsv",
+    write_tsv(Path(prefix) / f"structure_nclose_usage{suffix}.tsv",
               ["structure_id", "kind", "feature_index", "nclose_key", "nclose_id",
                "occurrence_count", "structure_weight", "structure_weight_N",
                "contribution", "contribution_N", "source_nclose_keys", "source_occurrence_counts"], usage)
@@ -375,7 +436,7 @@ def write_structure_reports(prefix, context, status, stage_contexts=None):
                             canonical_nclose_key=key_text(canonical), is_alias=int(key != canonical),
                             contig_names=";".join(event.get("contig_names", ())),
                             source=event.get("source", ".")))
-    write_tsv(Path(prefix) / "nclose_sources.tsv",
+    write_tsv(Path(prefix) / f"nclose_sources{suffix}.tsv",
               ["source_nclose_key", "source_nclose_id", "nclose_id", "canonical_nclose_key",
                "is_alias", "contig_names", "source"], sources)
     reports = []
@@ -396,5 +457,5 @@ def write_structure_reports(prefix, context, status, stage_contexts=None):
                    model_cn=fsum(r["contribution_N"] for r in rows if r["feature_index"] is not None),
                    virtual_cn=fsum(r["contribution_N"] for r in rows if r["feature_index"] is None))
         reports.append(row)
-    write_tsv(Path(prefix) / "nclose_report.tsv",
+    write_tsv(Path(prefix) / f"nclose_report{suffix}.tsv",
               list(REPORT_COLUMNS) + ["preprocessing_reason", "kind", "nclose_key", "model_cn", "virtual_cn"], reports)

@@ -288,12 +288,16 @@ Catalog coordinates and preprocessing history describe the selected representati
 | `preprocessing_reason` | Original exclusion/history status or restored-constituent provenance, independent of the current sum. |
 | `kind`, `nclose_key` | Internal representation (`bnd` or `indel`) and original key. |
 | `model_cn`, `virtual_cn` | Fitted and virtual parts of `nclose_cn`. |
-| `nclose_filter`, `nclose_cluster` and their reason columns | Karyotype mode: the NClose sum under the `_filter`/`_cluster` weights with `PASS`, or `-1` with the stage reason when that stage removed every carrier. Variant mode: `NA` / `NOT_RUN_RAW_NNLS`. |
+| `nclose_filter`, `nclose_cluster` and their reason columns | Karyotype mode: the canonical NClose sum under the corresponding stage's weights and qualified virtual support, with `PASS`; `-1` when all carriers were removed or the explicit minimum-weight floor cut the remaining positive support. A selected NNLS zero is `0 / PASS`. Variant mode: `NA` / `NOT_RUN_RAW_NNLS`. |
 
 An original path exclusion does not hide support supplied by another structure.
 For example, a NClose with `FILTERED_02_NO_ELIGIBLE_PATH` history can have positive
 AMP support. Native reports show that sum and retain the history separately;
 they do not replace the CN with `-1`.
+
+The same rule applies to the filter and cluster columns: a removed source cannot
+hide support from a surviving alias, compound constituent or qualified virtual
+structure. The fit's active columns distinguish a natural NNLS zero from removal.
 
 Existing representative NClose IDs are preserved when reconstructing a result's
 accounting table. Missing constituents receive new IDs only when their exact BND
@@ -355,14 +359,27 @@ centromere fragments.
 | `total_cov.*`, `cn_data.pkl` | `total_cov_filter.*`, `cn_data_filter.pkl` | `total_cov_cluster.*`, `cn_data_cluster.pkl` |
 | `SV_call_result.vcf` and its two TSVs | `SV_call_result_filter.vcf` and its two TSVs | `SV_call_result_cluster.vcf` and its two TSVs |
 | `SKYPE_result.bed` | `SKYPE_result_filter.bed` | `SKYPE_result_cluster.bed` |
+| `nclose_report.tsv`, `nclose_sources.tsv` | `nclose_report_filter.tsv`, `nclose_sources_filter.tsv` | `nclose_report_cluster.tsv`, `nclose_sources_cluster.tsv` |
+| `structure_report.tsv`, `structure_nclose_usage.tsv` | `structure_report_filter.tsv`, `structure_nclose_usage_filter.tsv` | `structure_report_cluster.tsv`, `structure_nclose_usage_cluster.tsv` |
 
-Each set applies the native accounting above to its own weights, including its
-own qualified virtual structures. NClose IDs are shared by all sets.
-`nclose_report.tsv` and the structure reports describe the raw fit; the
-`nclose_filter`/`nclose_cluster` columns summarize the other two.
-`nclose_filter_status.pkl` records the stage reasons (`FILTERED_24_*`, named
-after the former stage number). A stage counts a column as a carrier of a NClose
-when the column's path uses it or its merged Type 4/ecDNA structure contains it.
+Each set applies the native accounting above to its own weights, including only
+its own qualified virtual structures. Raw virtual NCloses receive IDs first in
+the original order. A copy of that registry then allocates IDs for candidates
+qualified only in filter/cluster, so the other sets share IDs without renumbering
+raw events or adding rows to raw reports.
+
+`nclose_report.tsv` and the unsuffixed structure/source reports describe the raw
+fit. Its `nclose_filter`/`nclose_cluster` columns summarize the other fits for
+those same raw rows. The suffixed reports include the extended registry, so
+stage-only virtual candidates and their contributing structures can be traced.
+Their `nclose_cn`, `model_cn`, `virtual_cn` and structure weights refer to the
+fit named by the suffix; an unqualified virtual candidate has zero contribution.
+Each VCF header names the matching suffixed reports.
+
+`nclose_filter_status.pkl` retains source-level stage reasons (`FILTERED_24_*`,
+named after the former stage number), judged from the same structure
+memberships as the native reports and including restored constituents. Native
+reports combine the reasons of all sources sharing an ID.
 `karyotype_mode.json` records the requested and effective mode.
 
 ## VCF-input outputs
@@ -396,15 +413,15 @@ and native structure reports do not apply to it.
 | `B.npy`, `weight.npy`, `predict_B.npy` | Observed depth, raw fitted coefficients and reconstructed depth. |
 | `weight_filter.npy`, `weight_cluster.npy` and their `predict_B_*.npy` | Karyotype-mode filter and cluster fits. |
 | `karyotype_mode.json` | Requested/effective output mode, NClose node count and limit. |
-| `structure_nclose_model.pkl` | Versioned native structure membership, original NClose metadata, source signature, and stage-31 weights. |
+| `structure_nclose_model.pkl` | Versioned base structure membership, original NClose metadata and source signature. Stage-specific weights and virtual entries are excluded. |
 | `raw_translocation_result.pkl`, `raw_translocation_read_counts.tsv` | Paired-junction evidence used to qualify and estimate virtual structures. |
 | `24_raw_rescue/` | D queries, read/OLC evidence, candidates, summaries, installation state and pre-rescue snapshots. |
 
 The shared structure model is built at stage 22 without display thresholds.
-Stage 31 joins final coefficients, adds qualified virtual structures and saves
-the normalization unit. Its model membership is checked against the source
-signature on reload. Regenerating stage 22 rebuilds the table for the current
-matrix columns.
+Stage 31 keeps this base topology in the cache and joins weights and qualified
+virtual structures into separate in-memory models for each fit. Membership is
+checked against the source signature on reload. Regenerating stage 22 rebuilds
+the table for the current matrix columns.
 
 ## Regenerating existing results
 
@@ -413,15 +430,14 @@ inputs and result directory. If the structure model is absent, it is reconstruct
 from saved path, node, catalog and circuit artifacts. This does not require
 refitting the depth model, but does require those original provenance artifacts.
 
-Structure-model version 3 removes the former `PATH_SPLIT` representation and its saved
-membership fields. Stage 31 rebuilds older cached structure models from the
-original intermediate artifacts, retaining the fitted coefficients and predicted
-depth. Former split children disappear; their path contributions remain on the
-original NClose. The current VCF-only projection is calculated on export and
-does not add split children or membership fields to the cached structure model.
-It works with existing version-3 models and original node artifacts. Exported
-BND counts, coordinates, weights and sequential IDs can change. Existing result
-files are updated only when stage 31 is rerun.
+Structure-model version 4 caches only base topology. Stage 31 rebuilds older
+caches from the original intermediate artifacts, retaining fitted coefficients
+and predicted depth. This removes virtual registry entries from previous runs
+before assigning raw IDs, so repeated output generation and mode changes do not
+accumulate stale virtual identities. Earlier `PATH_SPLIT` fields are also
+discarded; path contributions remain on the original NClose. VCF projection is
+calculated on export without adding membership fields to the cached model.
+Existing result files are updated only when stage 31 is rerun.
 
 The BND contribution TSV no longer has the redundant `source_occurrence` column;
 use `nclose_id` instead. The other columns retain their order. Update consumers
@@ -441,7 +457,7 @@ When updating older native outputs, account for these format/meaning changes:
 | BED | Adds `weight_scope` and `source_id`; numeric weights retain full output precision. |
 | Circos/CN distributions | Full NClose contributions; CN lists exclude compound summaries. |
 | Output selection | Contributions are summed before thresholding; low-weight paths can collectively produce a visible original NClose. |
-| Exact native BND aliases | Reuse a shared NClose ID/report row; original source mappings are in `nclose_sources.tsv`. Version-1 and version-2 cached structure models are rebuilt as version 3. |
+| Exact native BND aliases | Reuse a shared NClose ID/report row; original source mappings are in `nclose_sources.tsv`. Older cached models are rebuilt as version 4 base topology. |
 | VCF-only decomposition | Projects each eligible source NClose, including read and OLC rescue, into adjacent junctions, then merges exact endpoint/side pairs. Rescue uses `ADJACENT_ALIGNMENT` instead of the former `RAW_RESCUE_OUTER` mode. |
 
 These changes can alter exported weights, adjacency sets and sequential BND IDs

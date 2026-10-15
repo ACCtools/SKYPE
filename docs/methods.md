@@ -311,11 +311,17 @@ the fewest NCloses. Type 4 events longer than 1 Mb and ecDNA above 0.2N and all
 centromere fragments are kept as well, restricted to columns the filter kept. After the refit, coefficients at or below
 0.1N are set to zero.
 
-Stage 25 records the reasons in `nclose_filter_status.pkl`
-(`FILTERED_24_GREEDY_DEPTH`, `FILTERED_24_CLUSTER_SELECTION`,
-`FILTERED_24_CLUSTER_MIN_WEIGHT` and their co-filtered forms). A column counts as
-a carrier of a NClose when its path uses it or its merged Type 4/ecDNA structure
-contains it, matching the stage-31 accounting.
+Stage 25 records a reason in `nclose_filter_status.pkl` for every source NClose
+a fit removes (`FILTERED_24_GREEDY_DEPTH`, `FILTERED_24_COFILTERED_PATH`,
+`FILTERED_24_CLUSTER_SELECTION`, `FILTERED_24_CLUSTER_MIN_WEIGHT`), including
+merged Type 4/ecDNA constituents outside the stage-23 catalog. A source passes
+while any column carrying it stays in the fit, even if preprocessing removed its
+own paths. When the 0.1N floor removes the only positive support, the source
+keeps the minimum-weight reason even if an exact-zero carrier stays selected.
+Stage 31 combines the sources sharing a canonical NClose: positive support,
+including qualified virtual support, is `PASS`; otherwise a minimum-weight cut
+wins, then a source that kept a carrier (`0 / PASS`), then the source removed at
+the latest stage. Preprocessing exclusions remain separate history.
 
 [30_virtual_sky.py](../30_virtual_sky.py) draws each fit's paths above 0.2N,
 Type 4 events over 10 Mb, virtual inversions and centromere fragments, and writes

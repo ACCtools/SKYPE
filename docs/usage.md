@@ -168,8 +168,8 @@ Native runs use karyotype mode by default. After the raw fit, stage 25
 ([25_cluster_weight.py](../25_cluster_weight.py)) refits the matrix twice:
 once after greedy NClose filtering (`_filter`) and once with karyotype
 clustering (`_cluster`). Stages 30 and 31 then write `_filter` and `_cluster`
-versions of the Virtual SKY, karyotype, Circos, VCF and BED results next to the
-unsuffixed raw-fit results. Select the mode through the extra-option string:
+versions of the Virtual SKY, karyotype, Circos, VCF, BED and native accounting
+reports next to the unsuffixed raw-fit results. Select the mode through the extra-option string:
 
 ```bash
 python SKYPE.py analysis --reference hg38 \
