@@ -160,12 +160,15 @@ class RawNnlsTests(unittest.TestCase):
             ],
         )
 
-    def test_mode_cli_and_postprocessing_stages_are_removed(self):
+    def test_mode_cli_lives_in_the_orchestrator_with_restored_output_stages(self):
+        # The graph never changes with the output mode; only stages 25/30/31 do.
         source = BUILD_GRAPH_PATH.read_text(encoding="utf-8")
         self.assertNotIn('"--karyotype_mode"', source)
         self.assertNotIn('"--variant_mode"', source)
+        self.assertIn("--variant-mode", (SKYPE_ROOT / "pipeline.py").read_text(encoding="utf-8"))
         self.assertFalse((SKYPE_ROOT / "24_cluster_weight.py").exists())
-        self.assertFalse((SKYPE_ROOT / "30_virtual_sky.py").exists())
+        self.assertTrue((SKYPE_ROOT / "25_cluster_weight.py").exists())
+        self.assertTrue((SKYPE_ROOT / "30_virtual_sky.py").exists())
 
 
 if __name__ == "__main__":

@@ -118,8 +118,8 @@ def display_events(context, nodes, centromeres, min_cn=0.1):
     return events
 
 
-def write_native_bed(prefix, events):
-    with (Path(prefix) / "SKYPE_result.bed").open("w") as handle:
+def write_native_bed(prefix, events, suffix=""):
+    with (Path(prefix) / f"SKYPE_result{suffix}.bed").open("w") as handle:
         output = csv.writer(handle, delimiter="\t", lineterminator="\n")
         output.writerow(("#chrom", "cordst", "cordnd", "type", "weight (N)", "nclose_id", "weight_scope", "source_id"))
         for event in events:

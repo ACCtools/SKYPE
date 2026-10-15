@@ -20,6 +20,11 @@ separate reporting rules.
 | `structure_nclose_usage.tsv` | One structure–original NClose association | Trace occurrence counts and contributions, including zero-weight structures. |
 | `total_cov.png`, `total_cov.pdf` | Whole-genome plot | Compare observed/fitted depth and inspect displayed junctions/structure summaries. |
 | `cn_data.pkl` | Four lists of normalized support values | Analyze CN distributions using the units described below. |
+| `virtual_sky.png`, `virtual_sky.pdf` | Whole-genome diagram | Inspect fitted chromosome paths above 0.2N, large Type 4 events, virtual inversions and centromere fragments (`cen frag` row). |
+| `karyotype.txt` | One displayed path or event | ISCN-style labels and normalized depth, including `i(<chr>)(p10/q10)` rows for centromere fragments. |
+
+Karyotype mode adds `_filter` and `_cluster` result sets; see
+[karyotype-mode result sets](#karyotype-mode-result-sets).
 
 Reports include zero-weight entries. Native variant displays apply the strict
 `CN > 0.1` threshold after aggregation; compound summary displays apply it to
@@ -283,7 +288,7 @@ Catalog coordinates and preprocessing history describe the selected representati
 | `preprocessing_reason` | Original exclusion/history status or restored-constituent provenance, independent of the current sum. |
 | `kind`, `nclose_key` | Internal representation (`bnd` or `indel`) and original key. |
 | `model_cn`, `virtual_cn` | Fitted and virtual parts of `nclose_cn`. |
-| `nclose_filter`, `nclose_cluster` and their reason columns | Retained compatibility columns: `NA` / `NOT_RUN_RAW_NNLS` in this native workflow. |
+| `nclose_filter`, `nclose_cluster` and their reason columns | Karyotype mode: the NClose sum under the `_filter`/`_cluster` weights with `PASS`, or `-1` with the stage reason when that stage removed every carrier. Variant mode: `NA` / `NOT_RUN_RAW_NNLS`. |
 
 An original path exclusion does not hide support supplied by another structure.
 For example, a NClose with `FILTERED_02_NO_ELIGIBLE_PATH` history can have positive
@@ -335,6 +340,31 @@ list retains its existing telomere-selection rules and uses path coefficients.
 The lists contain numbers only; use the TSV reports when IDs and coordinates
 are needed.
 
+## Karyotype-mode result sets
+
+In karyotype mode stage 25 refits the matrix twice; see
+[karyotype-mode refits](methods.md#karyotype-mode-refits). The filter fit drops
+the paths of greedily removed NCloses. The cluster fit keeps one representative
+path per karyotype cluster together with large Type 4 events, ecDNA and
+centromere fragments.
+
+| Raw fit | Filter fit | Cluster fit |
+| --- | --- | --- |
+| `weight.npy`, `predict_B.npy` | `weight_filter.npy`, `predict_B_filter.npy` | `weight_cluster.npy`, `predict_B_cluster.npy` |
+| `virtual_sky.*`, `karyotype.txt` | `virtual_sky_filter.*`, `karyotype_filter.txt` | `virtual_sky_cluster.*`, `karyotype_cluster.txt` |
+| `total_cov.*`, `cn_data.pkl` | `total_cov_filter.*`, `cn_data_filter.pkl` | `total_cov_cluster.*`, `cn_data_cluster.pkl` |
+| `SV_call_result.vcf` and its two TSVs | `SV_call_result_filter.vcf` and its two TSVs | `SV_call_result_cluster.vcf` and its two TSVs |
+| `SKYPE_result.bed` | `SKYPE_result_filter.bed` | `SKYPE_result_cluster.bed` |
+
+Each set applies the native accounting above to its own weights, including its
+own qualified virtual structures. NClose IDs are shared by all sets.
+`nclose_report.tsv` and the structure reports describe the raw fit; the
+`nclose_filter`/`nclose_cluster` columns summarize the other two.
+`nclose_filter_status.pkl` records the stage reasons (`FILTERED_24_*`, named
+after the former stage number). A stage counts a column as a carrier of a NClose
+when the column's path uses it or its merged Type 4/ecDNA structure contains it.
+`karyotype_mode.json` records the requested and effective mode.
+
 ## VCF-input outputs
 
 VCF input writes `SV_benchmark_result.vcf` instead of the native VCF/BED. It
@@ -364,6 +394,8 @@ and native structure reports do not apply to it.
 | `nclose_event_catalog.pkl`, `nclose_path_usage.pkl`, `nclose_filter_status.pkl` | Original event tracking and preprocessing provenance; native output reconstruction leaves these intact. |
 | `tot_loc_list.pkl`, `23_input.pkl` | Matrix-column identities and depth-coordinate metadata. |
 | `B.npy`, `weight.npy`, `predict_B.npy` | Observed depth, raw fitted coefficients and reconstructed depth. |
+| `weight_filter.npy`, `weight_cluster.npy` and their `predict_B_*.npy` | Karyotype-mode filter and cluster fits. |
+| `karyotype_mode.json` | Requested/effective output mode, NClose node count and limit. |
 | `structure_nclose_model.pkl` | Versioned native structure membership, original NClose metadata, source signature, and stage-31 weights. |
 | `raw_translocation_result.pkl`, `raw_translocation_read_counts.tsv` | Paired-junction evidence used to qualify and estimate virtual structures. |
 | `24_raw_rescue/` | D queries, read/OLC evidence, candidates, summaries, installation state and pre-rescue snapshots. |

@@ -1,5 +1,6 @@
 import ast
 import collections
+import copy
 import csv
 from pathlib import Path
 import pickle
@@ -92,6 +93,8 @@ class StructureWeightTests(unittest.TestCase):
                   and any(isinstance(n, ast.Assign)
                           and any(isinstance(t, ast.Name) and t.id == "structure_model"
                                   for t in n.targets) for n in statement.body)]
+        helpers = [statement for statement in tree.body if isinstance(statement, ast.FunctionDef)
+                   and statement.name in {"qualified_virtual_structures", "build_stage_context"}]
         with tempfile.TemporaryDirectory() as tmp:
             nodes, pair, paths, int2key = write_internal_chromosome_fixture(Path(tmp))
             weights = [12.]
@@ -107,8 +110,10 @@ class StructureWeightTests(unittest.TestCase):
                 nclose_filter_status={}, cen_fragment_meta={},
                 paf_ans_list=paths, int2key=int2key, output_folder=f"{tmp}/21_pat_depth",
                 nclose2idx={pair: 1}, idx2nclose={1: pair},
+                stage_suffixes=(), stage_contexts={}, copy=copy,
             )
-            exec(compile(ast.Module(body=[block], type_ignores=[]), str(source), "exec"), namespace)
+            exec(compile(ast.Module(body=helpers + [block], type_ignores=[]), str(source), "exec"),
+                 namespace)
             context = namespace["native_context"]
             calls = bnd_calls(context, nodes)
             self.assertEqual([call["endpoints"] for call in calls], [
@@ -334,6 +339,36 @@ class StructureWeightTests(unittest.TestCase):
             with open(Path(tmp)/"SKYPE_result.bed") as handle:
                 rows = list(csv.DictReader(handle, delimiter="\t"))
         self.assertEqual([float(r["weight (N)"]) for r in rows if r["type"] == "Amplicon"], [2.])
+
+    def test_karyotype_stage_columns_follow_filter_provenance(self):
+        structures = [dict(kind="PATH", nclose_counts={PAIR: 1}),
+                      dict(kind="PATH", nclose_counts={OTHER: 1})]
+        _, model = fixture(structures)
+        stage_models = {stage: copy.deepcopy(model) for stage in ("filter", "cluster")}
+        base = StructureWeights(model, [10., 20.], 10.)
+        contexts = {"filter": StructureWeights(stage_models["filter"], [15., 0.], 10.),
+                    "cluster": StructureWeights(stage_models["cluster"], [12., 0.], 10.)}
+        status = {"stages": {"base": {"reasons": {}},
+                             "filter": {"reasons": {OTHER: "FILTERED_24_GREEDY_DEPTH"}},
+                             "cluster": {"reasons": {OTHER: "FILTERED_24_GREEDY_DEPTH"}}}}
+        with tempfile.TemporaryDirectory() as tmp:
+            write_structure_reports(tmp, base, status, stage_contexts=contexts)
+            with open(Path(tmp)/"nclose_report.tsv") as handle:
+                karyotype = list(csv.DictReader(handle, delimiter="\t"))
+            write_structure_reports(tmp, base, status)
+            with open(Path(tmp)/"nclose_report.tsv") as handle:
+                variant = list(csv.DictReader(handle, delimiter="\t"))
+            write_native_bed(tmp, display_events(contexts["filter"], fixture(structures)[0], {}),
+                             "_filter")
+            self.assertTrue((Path(tmp)/"SKYPE_result_filter.bed").is_file())
+        pair, other, type4 = karyotype
+        self.assertEqual((float(pair["nclose_filter"]), pair["nclose_filter_reason"]), (1.5, "PASS"))
+        self.assertEqual((float(pair["nclose_cluster"]), pair["nclose_cluster_reason"]), (1.2, "PASS"))
+        self.assertEqual((other["nclose_filter"], other["nclose_filter_reason"]),
+                         ("-1", "FILTERED_24_GREEDY_DEPTH"))
+        self.assertEqual((float(type4["nclose_cluster"]), type4["nclose_cluster_reason"]), (0., "PASS"))
+        self.assertEqual({(r["nclose_filter"], r["nclose_cluster_reason"]) for r in variant},
+                         {("NA", "NOT_RUN_RAW_NNLS")})
 
     def test_preprocessing_exclusion_does_not_hide_other_structure_support(self):
         _, model = fixture([dict(kind="AMP", nclose_counts={PAIR: 1})])

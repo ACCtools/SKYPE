@@ -6,10 +6,11 @@ from skype_utils import *
 from circos_plotting import render_total_coverage_circos
 from skype_vcf_writer import write_vcf_record_with_fallback
 from structure_nclose import (
-    StructureWeights, add_virtual_structure, load_or_build_structure_model,
+    StructureWeights, add_bnd_metadata, add_virtual_structure, load_or_build_structure_model,
     save_structure_model, write_structure_reports,
 )
 from native_structure_output import display_events, write_native_bed, write_native_vcf
+from karyotype_mode import STAGE_SUFFIXES, karyotype_mode_enabled
 from bp_step_depth_ratio import (
     BP_STEP_DEPTH_RATIO_B,
     BP_STEP_DEPTH_RATIO_PREDICT_B,
@@ -46,6 +47,7 @@ import h5py
 import logging
 import argparse
 import collections
+import copy
 import scipy.stats
 import vcfpy
 import glob
@@ -1674,7 +1676,7 @@ def write_annotated_input_vcf(weights):
         )
 
 
-def draw_circos_plot(fig_prefix=''):
+def draw_circos_plot(fig_prefix='', context=None, events=None):
     weights = np.load(f'{PREFIX}/weight{fig_prefix}.npy')
     smooth_B = rebin_dataframe_B(df, 10)[chr_filt_idx_list + chr_no_filt_idx_list]
     predicted_B = np.maximum(np.load(f'{PREFIX}/predict_B{fig_prefix}.npy'), 0)
@@ -1695,18 +1697,18 @@ def draw_circos_plot(fig_prefix=''):
 
     logging.info(f'{msg_prefix} ratio : {round(sum(color_label[miss_B] == 3) / len(B) * 100, 3)}%')
 
-    if native_context is not None:
+    if context is not None:
         rdf = rebin_dataframe(df, 2)
         fragment_depth_per_chrom = {
             structure["chrom"]: (structure["side"], structure["raw_weight"])
-            for structure in native_context.structures.values()
+            for structure in context.structures.values()
             if structure["kind"] == "CENTROMERE"
         }
-        telo_cn = defaultdict(float, native_context.telomere_weights)
-        inv_val_list, transloc_val_list, indel_val_list = native_context.cn_lists()
+        telo_cn = defaultdict(float, context.telomere_weights)
+        inv_val_list, transloc_val_list, indel_val_list = context.cn_lists()
         bnd_cn_data = [
             [event["link"][0], event["link"][1], event["weight"], event["link_type"]]
-            for event in native_display_events if "link" in event
+            for event in events if "link" in event
         ]
     else:
         nclose_cn = aggregate_bnd_weights_by_index(weights)
@@ -1842,7 +1844,7 @@ def draw_circos_plot(fig_prefix=''):
                 (chrom, start, end, cn, telo_zorder_dict[node_id])
             )
 
-    with open(f'{PREFIX}/cn_data.pkl', 'wb') as f:
+    with open(f'{PREFIX}/cn_data{fig_prefix}.pkl', 'wb') as f:
         pkl.dump((inv_val_list, transloc_val_list, indel_val_list, new_telo_val_list), f)
 
     return render_total_coverage_circos(
@@ -1862,29 +1864,65 @@ def draw_circos_plot(fig_prefix=''):
     )
 
 weights = np.load(f'{PREFIX}/weight.npy')
+# Karyotype mode adds the stage-25 filter/cluster fits as suffixed outputs.
+stage_suffixes = (
+    STAGE_SUFFIXES
+    if not pipeline_input_is_vcf(pipeline_input_config) and karyotype_mode_enabled(PREFIX)
+    else ()
+)
+stage_contexts = {}
 
-if not pipeline_input_is_vcf(pipeline_input_config):
-    structure_model = load_or_build_structure_model(PREFIX, contig_data)
+def qualified_virtual_structures(stage_weights):
     # The path-span qualification keeps its original CN threshold. Only the
     # display cutoff is deferred until all structure contributions are summed.
     qualified_virtual_views = build_virtual_inv_events(
-        PREFIX, meandepth, chr_len, min_depth_N=0.0, weights=weights,
+        PREFIX, meandepth, chr_len, min_depth_N=0.0, weights=stage_weights,
         span_min_depth_N=VCF_FILTER_DEPTH_N,
     )
     virtual_by_pair = defaultdict(list)
     for chrom, st, nd, raw_weight, _, name in qualified_virtual_views:
         pair_id = int(re.fullmatch(r"RAW_TRANSLOCATION_PAIR_(\d+)(?:_[AB])?", name)[1])
         virtual_by_pair[pair_id].append((chrom, st, nd, raw_weight))
-    if virtual_by_pair:
+    return virtual_by_pair
+
+def build_stage_context(model, stage_weights, virtual_by_pair):
+    for pair_id, views in sorted(virtual_by_pair.items()):
+        add_virtual_structure(model, virtual_records[pair_id], views[0][3],
+                              [(c, st, nd) for c, st, nd, _ in views], contig_data)
+    context = StructureWeights(model, stage_weights, N)
+    return context, display_events(context, contig_data, cen_fragment_meta)
+
+if not pipeline_input_is_vcf(pipeline_input_config):
+    structure_model = load_or_build_structure_model(PREFIX, contig_data)
+    stage_weights = {'': weights}
+    for stage_suffix in stage_suffixes:
+        stage_weights[stage_suffix] = np.load(f'{PREFIX}/weight{stage_suffix}.npy')
+    stage_virtuals = {
+        stage_suffix: qualified_virtual_structures(stage_weight)
+        for stage_suffix, stage_weight in stage_weights.items()
+    }
+    virtual_pair_ids = sorted({pair_id for virtuals in stage_virtuals.values() for pair_id in virtuals})
+    virtual_records = {}
+    if virtual_pair_ids:
         with open(f"{PREFIX}/{RAW_TRANSLOCATION_RESULT_PKL}", "rb") as handle:
             virtual_records = {int(record["pair_id"]): record for record in pkl.load(handle)}
-        for pair_id, views in sorted(virtual_by_pair.items()):
-            add_virtual_structure(structure_model, virtual_records[pair_id], views[0][3],
-                                  [(c, st, nd) for c, st, nd, _ in views], contig_data)
-    native_context = StructureWeights(structure_model, weights, N)
+        # Register every qualified virtual NClose once so all stages share IDs.
+        for pair_id in virtual_pair_ids:
+            for side in ("a", "b"):
+                add_bnd_metadata(structure_model, virtual_records[pair_id][f"nclose_key_{side}"],
+                                 contig_data, "VIRTUAL_INV",
+                                 virtual_records[pair_id][f"layout_{side}"])
+    stage_models = {stage_suffix: copy.deepcopy(structure_model) for stage_suffix in stage_suffixes}
+    native_context, native_display_events = build_stage_context(
+        structure_model, weights, stage_virtuals[''])
     save_structure_model(PREFIX, structure_model)
-    write_structure_reports(PREFIX, native_context, nclose_filter_status)
-    native_display_events = display_events(native_context, contig_data, cen_fragment_meta)
+    for stage_suffix in stage_suffixes:
+        stage_contexts[stage_suffix] = build_stage_context(
+            stage_models[stage_suffix], stage_weights[stage_suffix], stage_virtuals[stage_suffix])
+    write_structure_reports(
+        PREFIX, native_context, nclose_filter_status,
+        stage_contexts={stage_suffix[1:]: context for stage_suffix, (context, _) in stage_contexts.items()},
+    )
 else:
     # Assign report IDs to ecDNA inversion NCloses whose Amplicon is visible in
     # the single raw-weight BED, using its strict >5%-of-median raw-depth gate.
@@ -1929,12 +1967,14 @@ else:
         nclose_stage_weights,
         False,
     )
-draw_circos_plot()
+draw_circos_plot('', native_context, native_display_events)
+for stage_suffix, (stage_context, stage_events) in stage_contexts.items():
+    draw_circos_plot(stage_suffix, stage_context, stage_events)
 
 # Parse as vcf
-def pairs_to_vcf():
+def pairs_to_vcf(out_prefix='', context=None):
     observed_clean_depth = B[:filter_len]
-    predicted_clean_depth = np.load(f'{PREFIX}/predict_B.npy')[:filter_len]
+    predicted_clean_depth = np.load(f'{PREFIX}/predict_B{out_prefix}.npy')[:filter_len]
     ratios = BreakpointStepDepthRatio(
         chr_filt_st_list,
         observed_clean_depth,
@@ -1942,21 +1982,26 @@ def pairs_to_vcf():
         bed_data,
     )
     bnd_count, record_count = write_native_vcf(
-        native_context, chr_len, f"{PREFIX}/SV_call_result.vcf", ratios,
+        context, chr_len, f"{PREFIX}/SV_call_result{out_prefix}.vcf", ratios,
         build_vcf_header, write_bnd_vcf_pair, write_symbolic_vcf_record,
         nodes=contig_data,
     )
-    logging.info("Native VCF: %d unique BND adjacencies, %d records", bnd_count, record_count)
+    logging.info("%sNative VCF: %d unique BND adjacencies, %d records",
+                 f"{out_prefix[1:].capitalize()} " if out_prefix else "", bnd_count, record_count)
 
 if pipeline_input_is_vcf(pipeline_input_config):
     write_annotated_input_vcf(weights)
 else:
-    pairs_to_vcf()
+    pairs_to_vcf('', native_context)
+    for stage_suffix, (stage_context, _) in stage_contexts.items():
+        pairs_to_vcf(stage_suffix, stage_context)
 
 # Bed output for further analysis
 
 if native_context is not None:
     write_native_bed(PREFIX, native_display_events)
+    for stage_suffix, (_, stage_events) in stage_contexts.items():
+        write_native_bed(PREFIX, stage_events, stage_suffix)
 
 matrix_path = f'{PREFIX}/matrix.h5'
 if os.path.isfile(matrix_path):

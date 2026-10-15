@@ -16,7 +16,7 @@ from pathlib import Path
 from native_bnd import constituent_pairs, layout_endpoints, node_pair_endpoints
 from nclose_tracking import (
     REPORT_COLUMNS, _build_bnd_event, compressed_bnd_event_keys,
-    load_type4_edge_event_map, nclose_event_id_by_key,
+    load_type4_edge_event_map, nclose_event_id_by_key, stage_reason,
 )
 
 MODEL_FILE = "structure_nclose_model.pkl"
@@ -331,7 +331,19 @@ def write_tsv(path, columns, rows):
         writer.writerows(rows)
 
 
-def write_structure_reports(prefix, context, status):
+def stage_report_values(status, stage, key, context):
+    """Karyotype-mode filter/cluster columns: -1 plus reason once filtered."""
+    if context is None or stage not in status.get("stages", {}):
+        return "NA", "NOT_RUN_RAW_NNLS"
+    reason = stage_reason(status, stage, key)
+    if reason != "PASS":
+        return -1, reason
+    return context.totals.get(key, 0.0) / context.n_unit, "PASS"
+
+
+def write_structure_reports(prefix, context, status, stage_contexts=None):
+    """``stage_contexts`` maps ``filter``/``cluster`` to their weight contexts."""
+    stage_contexts = stage_contexts or {}
     structures = []
     for s in context.structures.values():
         structures.append(dict(
@@ -372,9 +384,13 @@ def write_structure_reports(prefix, context, status):
         rows = context.by_nclose[key]
         cn = context.totals[key] / context.n_unit
         row = {k: event[k] for k in REPORT_COLUMNS[:7]}
+        nclose_filter, nclose_filter_reason = stage_report_values(
+            status, "filter", key, stage_contexts.get("filter"))
+        nclose_cluster, nclose_cluster_reason = stage_report_values(
+            status, "cluster", key, stage_contexts.get("cluster"))
         row.update(nclose_cn=cn, nclose_cn_reason="SUPPORTED" if cn > 0 else "ZERO_SUPPORT",
-                   nclose_filter="NA", nclose_filter_reason="NOT_RUN_RAW_NNLS",
-                   nclose_cluster="NA", nclose_cluster_reason="NOT_RUN_RAW_NNLS",
+                   nclose_filter=nclose_filter, nclose_filter_reason=nclose_filter_reason,
+                   nclose_cluster=nclose_cluster, nclose_cluster_reason=nclose_cluster_reason,
                    preprocessing_reason=history.get(key, "PASS" if event.get("source") not in {"AMP", "MERGE_TYPE4", "VIRTUAL_INV"} else "RESTORED_CONSTITUENT"),
                    kind=event["kind"], nclose_key=key_text(key),
                    model_cn=fsum(r["contribution_N"] for r in rows if r["feature_index"] is not None),

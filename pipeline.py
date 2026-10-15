@@ -61,6 +61,11 @@ def run_skype(CELL_LINE, PREFIX, ctg_paf, ctg_aln_paf, utg_paf, utg_aln_paf,
     rescue_parser.add_argument('--raw-rescue-options', default='')
     rescue_parser.add_argument('--depth-policy', choices=('legacy', 'all', 'nclose_l2', 'nclose_huber'), default='legacy')
     rescue_parser.add_argument('--robust-sigma-multiplier', type=float, default=3.)
+    mode_group = rescue_parser.add_mutually_exclusive_group()
+    mode_group.add_argument('--karyotype-mode', '--karyotype_mode', dest='output_mode',
+                            action='store_const', const='karyotype', default=None)
+    mode_group.add_argument('--variant-mode', '--variant_mode', dest='output_mode',
+                            action='store_const', const='variant')
     rescue_options, remaining_options = rescue_parser.parse_known_args(
         normalize_extra_args(option_skype)
     )
@@ -71,8 +76,15 @@ def run_skype(CELL_LINE, PREFIX, ctg_paf, ctg_aln_paf, utg_paf, utg_aln_paf,
     raw_rescue_method = raw_rescue_method or ('off' if benchmark_vcf_loc else 'read')
     rescue_args = shlex.split(rescue_options.raw_rescue_options if raw_rescue_options is None else raw_rescue_options)
     option_skype = shlex.join(remaining_options)
+    # Karyotype mode (default) adds the stage-25 _filter/_cluster outputs.
+    # Restarts keep the mode requested by the previous stage-25 run.
+    output_mode = rescue_options.output_mode
+    previous_mode = Path(PREFIX) / 'karyotype_mode.json'
+    if output_mode is None and skype_start_at > 1 and previous_mode.exists():
+        output_mode = json.loads(previous_mode.read_text())['requested_mode']
+    output_mode = output_mode or 'karyotype'
 
-    valid_start_stages = {0, 1, 10, 11, 21, 22, 23, 24, 31}
+    valid_start_stages = {0, 1, 10, 11, 21, 22, 23, 24, 25, 30, 31}
     if skype_start_at not in valid_start_stages:
         valid_text = ", ".join(map(str, sorted(valid_start_stages)))
         raise SkypeArgumentError(
@@ -108,6 +120,8 @@ def run_skype(CELL_LINE, PREFIX, ctg_paf, ctg_aln_paf, utg_paf, utg_aln_paf,
 
     expected_outputs = [
         os.path.join(PREFIX, "total_cov.png"),
+        os.path.join(PREFIX, "virtual_sky.png"),
+        os.path.join(PREFIX, "karyotype.txt"),
         os.path.join(PREFIX, "nclose_report.tsv"),
     ]
     if benchmark_vcf_loc:
@@ -143,6 +157,23 @@ def run_skype(CELL_LINE, PREFIX, ctg_paf, ctg_aln_paf, utg_paf, utg_aln_paf,
             22: ["path_data.pkl", "contig_pat_vec_data.pkl"],
             23: ["23_input.pkl"],
             24: ["01_nclose_data.pkl", "23_input.pkl", "B.npy", "predict_B.npy", "paf_file_path.pkl"],
+            25: [
+                "nclose_nodes.pkl",
+                "nclose_filter_status.pkl",
+                "nclose_path_usage.pkl",
+                "weight.npy",
+                "A_idx_list.pkl",
+                "tot_loc_list.pkl",
+                "23_input.pkl",
+            ] + (["matrix.h5"] if output_mode == 'karyotype' else []),
+            30: [
+                "weight.npy",
+                "path_data.pkl",
+                "contig_pat_vec_data.pkl",
+                "tot_loc_list.pkl",
+                "cen_fragment_data.pkl",
+                "telomere_connected_list.txt",
+            ],
             31: [
                 "B.npy",
                 "weight.npy",
@@ -307,6 +338,25 @@ def run_skype(CELL_LINE, PREFIX, ctg_paf, ctg_aln_paf, utg_paf, utg_aln_paf,
                     logging.info('Stage 24 added %d NClose(s); rerunning stages 10--23 once', summary['added_count'])
                     run_fit(10)
                     round_path.write_text(json.dumps(dict(applied=True, refit_complete=True, rounds=1), indent=2)+'\n')
+
+        if skype_start_at <= 25:
+            core_num = psutil.cpu_count(logical=False)
+            julia_thread = thread if core_num is None else min(int(thread), core_num)
+            # Julia runs from the SKYPE folder, so every path is absolute.
+            subprocess_run([
+                "python", "-X", f"juliacall-threads={THREAD}", "-X", "juliacall-handle-signals=yes",
+                "25_cluster_weight.py",
+                os.path.abspath(PPC_PAF_LOC), os.path.abspath(MAIN_STAT_NORM_LOC),
+                os.path.abspath(TEL_BED), os.path.abspath(CHR_FAI), os.path.abspath(RCS_BED),
+                os.path.abspath(PREFIX), "-t", str(julia_thread), "--mode", output_mode,
+            ], check=True, cwd=skype_folder_loc)
+
+        if skype_start_at <= 30:
+            subprocess_run([
+                "python", os.path.join(skype_folder_loc, "30_virtual_sky.py"),
+                PPC_PAF_LOC, MAIN_STAT_NORM_LOC,
+                TEL_BED, CHR_FAI, PREFIX, CELL_LINE,
+            ], check=True)
 
         if skype_start_at <= 31:
             subprocess_run([

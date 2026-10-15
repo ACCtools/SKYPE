@@ -84,12 +84,14 @@ completion checks, option routing and partial restarts.
 | 22 | The observed-depth system, column metadata and structure–NClose membership. |
 | 23 | One raw non-negative least-squares fit over the candidate matrix columns. |
 | 24 | Optional raw-read rescue, followed by one refit if new candidates are retained. |
-| 31 | Variant output, structure/NClose reports, CN lists and the depth plot. |
+| 25 | Karyotype mode only: greedy NClose-filter and karyotype-cluster refits. |
+| 30 | Virtual SKY diagram and ISCN-style karyotype for each fit. |
+| 31 | Variant output, structure/NClose reports, CN lists and the depth plot for each fit. |
 
-Native fitting has no normal-chromosome prior, post-NNLS NClose-filtering pass,
-or post-NNLS clustering pass. Candidate preprocessing and graph filters still
-apply before fitting. The optional rescue refit is a second model fit after
-candidate augmentation, not a post-fit weight-filtering stage.
+Native fitting has no normal-chromosome prior. Candidate preprocessing and graph
+filters apply before fitting, and the optional rescue refit is a second model
+fit after candidate augmentation. The unsuffixed outputs always come from the
+raw fit; the stage-25 refits only add the `_filter` and `_cluster` result sets.
 
 ## Assembly preprocessing
 
@@ -281,6 +283,43 @@ qualified VIRTUAL_INV estimates. It does not feed aggregated NClose totals
 back into the NNLS coefficients. Centromere-only features have empty NClose
 counts, while telomere support uses path-end counts and those same coefficients.
 See [weight accounting](outputs.md#weight-accounting) for the reporting formula.
+
+## Karyotype-mode refits
+
+[25_cluster_weight.py](../25_cluster_weight.py) runs in karyotype mode, the
+default unless variant mode is requested, the input is a VCF or the graph has
+more than 1000 NClose nodes. Both refits use the Julia NNLS solver on the
+stage-22 matrix; the filter refit starts from the raw-fit coefficients.
+
+The filter refit considers cross-chromosome NCloses that carry at least 1% of
+the median depth and have at least one non-CEN-SAT side without a depth step
+between its 1 Mb flanks (a step needs a ratio above 1.2 and a difference of at
+least 5). For each candidate the
+matrix is refitted without the paths that use it. Let the error envelope of a
+chromosome be the largest absolute cumulative difference between predicted and
+observed depth along it. Candidates whose single removal keeps every envelope
+within 1.5 times the raw fit are tried in order of that ratio. A removal is kept
+when, together with the removals already kept, no envelope exceeds twice the
+raw fit. chrY is ignored when it lacks coverage.
+
+The cluster refit starts from the filter fit. It summarizes paths above 0.1N
+and the pure telomere-to-telomere path of each chromosome as chromosome and
+strand segments. A path joins the first cluster whose representative shares at
+least 80% of the longer length after the best shift (90% when the terminal
+segments differ). Each cluster above 0.2N in total contributes its path with
+the fewest NCloses. Type 4 events longer than 1 Mb and ecDNA above 0.2N and all
+centromere fragments are kept as well, restricted to columns the filter kept. After the refit, coefficients at or below
+0.1N are set to zero.
+
+Stage 25 records the reasons in `nclose_filter_status.pkl`
+(`FILTERED_24_GREEDY_DEPTH`, `FILTERED_24_CLUSTER_SELECTION`,
+`FILTERED_24_CLUSTER_MIN_WEIGHT` and their co-filtered forms). A column counts as
+a carrier of a NClose when its path uses it or its merged Type 4/ecDNA structure
+contains it, matching the stage-31 accounting.
+
+[30_virtual_sky.py](../30_virtual_sky.py) draws each fit's paths above 0.2N,
+Type 4 events over 10 Mb, virtual inversions and centromere fragments, and writes
+the matching `karyotype.txt` labels.
 
 ## One raw-read rescue pass
 

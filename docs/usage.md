@@ -162,6 +162,35 @@ a direct `--option_skype=""` selects defaults. Preprocessing changes require a
 stage-01 restart. [skype_options.py](../skype_options.py) defines the accepted
 options and their aliases.
 
+## Karyotype and variant mode
+
+Native runs use karyotype mode by default. After the raw fit, stage 25
+([25_cluster_weight.py](../25_cluster_weight.py)) refits the matrix twice:
+once after greedy NClose filtering (`_filter`) and once with karyotype
+clustering (`_cluster`). Stages 30 and 31 then write `_filter` and `_cluster`
+versions of the Virtual SKY, karyotype, Circos, VCF and BED results next to the
+unsuffixed raw-fit results. Select the mode through the extra-option string:
+
+```bash
+python SKYPE.py analysis --reference hg38 \
+  --option_skype="--variant_mode" \
+  /path/to/work /path/to/contigs.fa /path/to/unitigs.fa \
+  /path/to/depth.win.stat.gz
+```
+
+| Option inside `--option_skype` | Default | Meaning |
+| --- | --- | --- |
+| `--karyotype-mode` (`--karyotype_mode`) | Enabled | Also write the `_filter`/`_cluster` result sets. |
+| `--variant-mode` (`--variant_mode`) | Disabled | Write only the unsuffixed raw-fit results. |
+
+Karyotype mode is forced to variant mode for VCF input and for graphs with more
+than 1000 NClose nodes. Stage 25 records the requested and effective mode in
+`karyotype_mode.json`, and a restart without a mode option keeps the requested
+mode. In variant mode stage 25 removes `_filter`/`_cluster` files left by an
+earlier karyotype-mode run. The Virtual SKY and `karyotype.txt` are written in
+every mode. The filter and cluster fits use the Julia solver
+([nnls_solver.jl](../nnls_solver.jl)) through `juliacall`.
+
 ## Raw-read rescue
 
 Native assembly defaults to `read`; VCF input defaults to `off`. Select a method
@@ -194,7 +223,7 @@ the one-refit behavior.
 
 ## Restarts
 
-Native restart stages are `0, 1, 10, 11, 21, 22, 23, 24, 31`. Use the same
+Native restart stages are `0, 1, 10, 11, 21, 22, 23, 24, 25, 30, 31`. Use the same
 sample, reference, inputs and result directory as the original run. A nonzero
 restart checks the required artifacts from skipped stages.
 
@@ -216,8 +245,13 @@ For VCF-input results, also pass the original `--benchmark_vcf_loc`.
 | Graph options with prepared preprocessing inputs | `10` |
 | Candidate matrix/column membership rebuild | `22`, with current upstream depth artifacts |
 | Raw-read rescue from a prepared stage-23 baseline | `24` |
+| Karyotype-mode filter/cluster fits or a mode change | `25`, while `matrix.h5` is present; otherwise `22` |
+| Virtual SKY and karyotype regeneration | `30` |
 | Native output accounting/report regeneration with a completed fit | `31` |
 
+Stage 31 removes `matrix.h5` after a complete run, so a stage-25 restart of a
+finished result starts at stage 22 instead. Stages 30 and 31 treat a result
+without `karyotype_mode.json` as variant mode.
 Stage 31 reconstructs a missing `structure_nclose_model.pkl` from saved path,
 catalog and circuit data. Stage 22 rebuilds the table with the matrix columns.
 Output regeneration does not alter the fitted coefficients or predicted depth.

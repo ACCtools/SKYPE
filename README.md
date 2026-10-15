@@ -89,7 +89,16 @@ Files are written to the selected SKYPE output directory.
 | `structure_report.tsv` | Each native structure's own weight and provenance. |
 | `structure_nclose_usage.tsv` | NClose occurrence counts and each structure's contribution. |
 | `total_cov.png`, `total_cov.pdf` | Observed and fitted depth with NClose and structure links. |
+| `virtual_sky.png`, `virtual_sky.pdf` | Virtual SKY diagram of fitted chromosome paths, colored by chromosome of origin and labeled with normalized copy number. |
+| `karyotype.txt` | Tab-separated ISCN-style karyotype labels and their normalized depth (`N`). |
 | `SV_benchmark_result.vcf` | VCF-input records annotated with `SKYPE_CN` and `SKYPE_STATUS`. |
+
+Karyotype mode (the default) also refits the matrix after greedy NClose
+filtering and after karyotype clustering, and writes `_filter` and `_cluster`
+versions of the Virtual SKY, karyotype, Circos, VCF and BED results. Variant
+mode (`--variant_mode`), VCF input and graphs with more than 1000 NClose nodes
+write only the unsuffixed results. See
+[karyotype mode](docs/usage.md#karyotype-and-variant-mode).
 
 The native structure reports do not replace the VCF-input workflow's existing
 reporting rules. Detailed schemas, IDs and intermediate files are documented in
