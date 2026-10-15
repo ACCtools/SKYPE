@@ -15,7 +15,7 @@ from pathlib import Path
 
 import psutil
 
-from skype_options import normalize_extra_args
+from skype_options import normalize_extra_args, split_stage_options
 
 MEM_SAFE_RATIO = 0.8
 
@@ -59,8 +59,6 @@ def run_skype(CELL_LINE, PREFIX, ctg_paf, ctg_aln_paf, utg_paf, utg_aln_paf,
     rescue_parser.add_argument('--raw-rescue-method', '--raw_rescue_method',
                                choices=('off', 'read', 'olc'), default=None)
     rescue_parser.add_argument('--raw-rescue-options', default='')
-    rescue_parser.add_argument('--depth-policy', choices=('legacy', 'all', 'nclose_l2', 'nclose_huber'), default='legacy')
-    rescue_parser.add_argument('--robust-sigma-multiplier', type=float, default=3.)
     mode_group = rescue_parser.add_mutually_exclusive_group()
     mode_group.add_argument('--karyotype-mode', '--karyotype_mode', dest='output_mode',
                             action='store_const', const='karyotype', default=None)
@@ -69,6 +67,11 @@ def run_skype(CELL_LINE, PREFIX, ctg_paf, ctg_aln_paf, utg_paf, utg_aln_paf,
     rescue_options, remaining_options = rescue_parser.parse_known_args(
         normalize_extra_args(option_skype)
     )
+    # Validate even on restarts that skip the stages consuming these options.
+    try:
+        split_stage_options(remaining_options)
+    except ValueError as exc:
+        raise SkypeArgumentError(str(exc)) from None
     raw_rescue_method = raw_rescue_method or rescue_options.raw_rescue_method
     previous_rescue = Path(PREFIX) / '24_raw_rescue' / 'summary.json'
     if raw_rescue_method is None and skype_start_at > 1 and previous_rescue.exists():
@@ -297,8 +300,6 @@ def run_skype(CELL_LINE, PREFIX, ctg_paf, ctg_aln_paf, utg_paf, utg_aln_paf,
                     "python", os.path.join(skype_folder_loc, "22_save_matrix.py"),
                     RCS_BED, MAIN_STAT_NORM_LOC,
                     PREFIX, "-t", THREAD,
-                    '--depth-policy', rescue_options.depth_policy,
-                    '--robust-sigma-multiplier', str(rescue_options.robust_sigma_multiplier),
                 ] + PROGRESS, check=True)
 
             if start_at <= 23:

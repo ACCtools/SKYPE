@@ -138,6 +138,17 @@ class PipelineStageTests(unittest.TestCase):
         forwarded = [arg for arg in preprocess if arg.startswith("--option_skype=")]
         self.assertEqual(forwarded, ["--option_skype=--verbose"])
 
+    def test_removed_depth_options_are_rejected_before_every_restart(self):
+        with tempfile.TemporaryDirectory() as prefix:
+            for start in (0, 22, 25, 31):
+                for option in ("--depth-policy legacy", "--depth-policy all",
+                               "--depth-policy nclose_l2", "--depth-policy=nclose_huber",
+                               "--robust-sigma-multiplier=3"):
+                    with self.subTest(start=start, option=option):
+                        with self.assertRaisesRegex(pipeline.SkypeArgumentError,
+                                                    "Unknown --option_skype argument"):
+                            self.run_commands(prefix, skype_start_at=start, option_skype=option)
+
     def test_restarts_reuse_the_requested_mode(self):
         with tempfile.TemporaryDirectory() as prefix:
             Path(prefix, KARYOTYPE_MODE_JSON).write_text(json.dumps(

@@ -636,6 +636,7 @@ chr_len = find_chr_len(CHROMOSOME_INFO_FILE_PATH)
 # Julia remove small nclose
 with open(f'{PREFIX}/23_input.pkl', 'rb') as f:
     matrix_depth_meta = pkl.load(f)
+require_fixed_depth_matrix(matrix_depth_meta)
 chr_filt_st_list = matrix_depth_meta["chr_filt_st_list"]
 bed_data = import_bed(args.censat_bed_path)
 

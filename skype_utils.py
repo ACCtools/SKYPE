@@ -41,6 +41,15 @@ INDEL_MERGE_TOLERANCE = 10 * K
 RAW_VIRTUAL_INV_MIN_VAF = 0.2
 
 
+def require_fixed_depth_matrix(metadata):
+    """Reject cached matrices built with a retired depth policy before refitting."""
+    if metadata.get("depth_policy", "legacy") != "legacy":
+        raise ValueError(
+            "This matrix was built with a removed depth policy; "
+            "rerun SKYPE from stage 22 to rebuild the fixed depth bins."
+        )
+
+
 def invert_vcf_strand(strand):
     if strand == "+":
         return "-"
