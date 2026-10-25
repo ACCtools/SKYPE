@@ -4,7 +4,9 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from skype_utils import *
 from depth_stats_io import atomic_gzip_text
+import baf_ploidy
 import depth_gc
+import depth_scale
 
 import numpy as np
 import pandas as pd
@@ -61,8 +63,19 @@ parser.add_argument("--gc-table", default=os.path.join(os.path.dirname(os.path.a
                     help="GC and N fraction of each 100 kb window of the reference")
 parser.add_argument("--no-gc-correction", action="store_true",
                     help="Write the reference-normalized depth without the per-sample GC correction")
+parser.add_argument("--prefix", default=None,
+                    help="SKYPE output folder for depth_scale.json; without it the BAF-based 1N is not estimated")
+parser.add_argument("--bam", default=None, help="Sample read BAM for heterozygous sites")
+parser.add_argument("--repeat-bed", default=None, help="Repeat track (segmental duplications and CEN-SAT)")
+parser.add_argument("--no-baf-n", action="store_true",
+                    help="Do not estimate 1N from B-allele fractions (shown copy numbers use median depth / 2)")
+parser.add_argument("-t", "--threads", type=int, default=1, help="Processes for het-site collection")
 args = parser.parse_args()
 logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(levelname)s - %(message)s')
+
+# A 1N from an earlier run must not outlive the depth table it was estimated on.
+if args.prefix is not None:
+    depth_scale.remove(args.prefix)
 
 main_stat_loc = args.main_stat_loc
 ref_stat_loc = args.ref_stat_loc
@@ -141,7 +154,11 @@ def apply_offset(row):
 main_df['meandepth'] = main_df.apply(apply_offset, axis=1).astype(float)
 
 # --- per-sample GC correction (depth_gc.py) ---
+normalized_depth = main_df['meandepth'].to_numpy(dtype=float)
 censat_all = depth_gc.read_censat(censat_path)
+exempt, inside = depth_gc.censat_masks(
+    main_df['chr'].to_numpy(), main_df['st'].to_numpy(dtype=np.int64),
+    main_df['nd'].to_numpy(dtype=np.int64), censat_all)
 gc = None
 if args.no_gc_correction:
     gc_info = {'status': 'disabled', 'reason': '--no-gc-correction'}
@@ -151,8 +168,11 @@ else:
     gc, gc_reason = depth_gc.row_gc(args.gc_table, main_df)
     gc_info = {'status': 'identity', 'reason': gc_reason}
 if gc is not None:
-    corrected, _, gc_info = depth_gc.correct(main_df, gc, censat_all)
+    corrected, train, gc_info = depth_gc.correct(main_df, gc, censat_all)
     main_df['meandepth'] = corrected
+else:
+    # Without GC every row with a usable depth trains the 1N estimate.
+    train = depth_gc.training_mask(normalized_depth, np.zeros(len(main_df)), exempt, inside)
 logging.info(f"GC correction: {gc_info['status']} {gc_info.get('reason', '')}")
 
 main_df['totaldepth'] = (main_df['meandepth'] * 100000).round().astype(int)
@@ -168,3 +188,40 @@ with atomic_gzip_text(output_path) as output:
         header=False,
         index=False,
     )
+
+# --- depth per copy from B-allele fractions (baf_ploidy.py) ---
+if args.prefix is not None:
+    depth = main_df['meandepth'].to_numpy(dtype=float)
+    baf_info = None
+    if args.no_baf_n:
+        baf_info = {'N': None, 'status': 'disabled', 'reason': '--no-baf-n'}
+    elif not np.isfinite(depth).all():
+        baf_info = {'N': None, 'status': 'insufficient_data', 'reason': 'non-finite depth'}
+    elif not args.repeat_bed or not os.path.isfile(args.repeat_bed):
+        baf_info = {'N': None, 'status': 'insufficient_data', 'reason': f'no repeat track ({args.repeat_bed})'}
+    else:
+        problem = baf_ploidy.bam_problem(args.bam)
+        if problem:
+            baf_info = {'N': None, 'status': 'insufficient_data', 'reason': problem}
+    if baf_info is None:
+        detail_dir = os.path.join(args.prefix, depth_scale.DETAIL_DIR)
+        os.makedirs(detail_dir, exist_ok=True)
+        # Sites are sampled on the depth before GC correction; N uses the corrected depth.
+        try:
+            sites, site_bins = baf_ploidy.collect_sites(
+                args.bam, main_df, normalized_depth, exempt, inside, args.repeat_bed, args.threads)
+        except (OSError, ValueError) as exc:
+            baf_info = {'N': None, 'status': 'insufficient_data',
+                        'reason': f'het-site collection failed: {exc}'}
+    if baf_info is None:
+        sites.to_csv(os.path.join(detail_dir, 'het_sites.tsv.gz'), sep='\t', index=False)
+        site_bins.to_csv(os.path.join(detail_dir, 'het_rows.tsv.gz'), sep='\t', index=False)
+        clean = train & baf_ploidy.repeat_free(main_df, args.repeat_bed)
+        N, segments, baf_info = baf_ploidy.estimate(main_df, depth, train, clean, sites, site_bins)
+        segments.to_csv(os.path.join(detail_dir, 'segments.tsv'), sep='\t', index=False)
+        baf_info.update(n_train=int(train.sum()), n_clean=int(clean.sum()), n_sites=int(len(sites)))
+    os.makedirs(args.prefix, exist_ok=True)
+    scale = depth_scale.write(args.prefix, output_path, depth, gc_info, baf_info)
+    logging.info(f"1N: {scale['copy_unit']:.4f} from {scale['copy_unit_source']} "
+                 f"(median depth / 2 = {scale['median_half']:.4f}; BAF status {baf_info.get('status')} "
+                 f"{baf_info.get('reason', '')} {' '.join(baf_info.get('warnings', []))})")

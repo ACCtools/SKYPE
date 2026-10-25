@@ -65,6 +65,7 @@ def run_skype(CELL_LINE, PREFIX, ctg_paf, ctg_aln_paf, utg_paf, utg_aln_paf,
     mode_group.add_argument('--variant-mode', '--variant_mode', dest='output_mode',
                             action='store_const', const='variant')
     rescue_parser.add_argument('--no-gc-correction', '--no_gc_correction', action='store_true')
+    rescue_parser.add_argument('--no-baf-n', '--no_baf_n', action='store_true')
     rescue_options, remaining_options = rescue_parser.parse_known_args(
         normalize_extra_args(option_skype)
     )
@@ -199,10 +200,17 @@ def run_skype(CELL_LINE, PREFIX, ctg_paf, ctg_aln_paf, utg_paf, utg_aln_paf,
             depth_norm_cmd = [
                 "python", os.path.join(skype_folder_loc, "00_depth_norm.py"),
                 MAIN_STAT_LOC, REF_STAT_LOC, RCS_BED,
+                "--prefix", PREFIX, "--bam", READ_BAM_LOC, "--repeat-bed", RPT_BED,
+                "-t", THREAD,
             ]
             if rescue_options.no_gc_correction:
                 depth_norm_cmd.append("--no-gc-correction")
+            if rescue_options.no_baf_n:
+                depth_norm_cmd.append("--no-baf-n")
             subprocess_run(depth_norm_cmd, check=True)
+        elif skype_start_at <= 0 and not print_args:
+            # Without stage 00 there is no 1N of this run; never reuse an older one.
+            Path(PREFIX, 'depth_scale.json').unlink(missing_ok=True)
 
         if skype_start_at <= 1:
             preprocess_cmd = [

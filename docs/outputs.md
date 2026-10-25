@@ -22,6 +22,8 @@ separate reporting rules.
 | `cn_data.pkl` | Four lists of normalized support values | Analyze CN distributions using the units described below. |
 | `virtual_sky.png`, `virtual_sky.pdf` | Whole-genome diagram | Inspect fitted chromosome paths above 0.2N, large Type 4 events, virtual inversions and centromere fragments (`cen frag` row). |
 | `karyotype.txt` | One displayed path or event | ISCN-style labels and normalized depth, including `i(<chr>)(p10/q10)` rows for centromere fragments. |
+| `depth_scale.json` | One record | Stage-00 GC correction diagnostics, the B-allele-fraction 1N with its status, and the 1N (`copy_unit`) used for the copy numbers of this run. |
+| `depth_scale/` | Het sites, rows, segments | `het_sites.tsv.gz`, `het_rows.tsv.gz` and `segments.tsv` behind the B-allele-fraction 1N. |
 
 Karyotype mode adds `_filter` and `_cluster` result sets; see
 [karyotype-mode result sets](#karyotype-mode-result-sets).

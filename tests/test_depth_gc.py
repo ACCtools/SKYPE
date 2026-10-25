@@ -90,7 +90,7 @@ class GcCorrectionTests(unittest.TestCase):
 
 
 class Stage00CliTests(unittest.TestCase):
-    def test_writes_gc_corrected_depth_and_can_skip_it(self):
+    def test_writes_corrected_depth_and_median_unit_without_a_bam(self):
         df = genome()
         with tempfile.TemporaryDirectory() as tmp:
             tmp = Path(tmp)
@@ -103,22 +103,36 @@ class Stage00CliTests(unittest.TestCase):
                     fh.write('#Chr\tStart\tEnd\tLength\tCoveredSite\tTotalDepth\tCoverage(%)\tMeanDepth\n')
                     t[cols].to_csv(fh, sep='\t', header=False, index=False)
 
-            def run(*extra):
-                subprocess.run([sys.executable, str(ROOT / '00_depth_norm.py'), str(tmp / 'sample.win.stat.gz'),
-                                str(tmp / 'ref.win.stat.gz'), str(tmp / 'censat.bed'),
-                                '--gc-table', str(tmp / 'gc.tsv.gz'), *extra], check=True, capture_output=True)
-                return pd.read_csv(tmp / 'sample_normalized.win.stat.gz', sep='\t', header=None, names=cols)
-
             stat(tmp / 'sample.win.stat.gz', df.meandepth.to_numpy())
             stat(tmp / 'ref.win.stat.gz', np.full(len(df), 30.0))
             (tmp / 'censat.bed').write_text('chr1\t0\t1000\tcensat\n')
+            (tmp / 'repeat.bed').write_text('chr1\t0\t1000\trepeat\n')
             write_gc_table(str(tmp / 'gc.tsv.gz'), df)
-            out = run()
-            off = run('--no-gc-correction')
+            subprocess.run([sys.executable, str(ROOT / '00_depth_norm.py'), str(tmp / 'sample.win.stat.gz'),
+                            str(tmp / 'ref.win.stat.gz'), str(tmp / 'censat.bed'), '--gc-table', str(tmp / 'gc.tsv.gz'),
+                            '--prefix', str(tmp / 'out'), '--bam', str(tmp / 'missing.bam'),
+                            '--repeat-bed', str(tmp / 'repeat.bed')], check=True, capture_output=True)
+            out = pd.read_csv(tmp / 'sample_normalized.win.stat.gz', sep='\t', header=None, names=cols)
+            scale = json.loads((tmp / 'out' / 'depth_scale.json').read_text())
+        self.assertEqual(scale['gc_correction']['status'], 'corrected')
+        self.assertEqual(scale['baf']['status'], 'insufficient_data')
+        self.assertIn('no sample BAM', scale['baf']['reason'])
+        self.assertEqual(scale['copy_unit_source'], 'median')
+        self.assertAlmostEqual(scale['copy_unit'], np.median(out.meandepth) / 2, places=9)
         self.assertAlmostEqual(np.median(out.meandepth), np.median(df.meandepth), places=6)
         self.assertLess(abs(gc_slope(out.meandepth.to_numpy(), df)), 0.15 * abs(gc_slope(df.meandepth.to_numpy(), df)))
         np.testing.assert_array_equal(out.totaldepth, np.round(out.meandepth * 100_000).astype(int))
-        np.testing.assert_allclose(off.meandepth, df.meandepth, rtol=1e-12)
+
+    def test_an_earlier_depth_scale_does_not_survive_a_failed_rerun(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            (tmp / 'out').mkdir()
+            (tmp / 'out' / 'depth_scale.json').write_text('{"copy_unit": 7.0, "copy_unit_source": "baf"}')
+            run = subprocess.run([sys.executable, str(ROOT / '00_depth_norm.py'), str(tmp / 'missing.win.stat.gz'),
+                                  str(tmp / 'ref.win.stat.gz'), str(tmp / 'missing_censat.bed'),
+                                  '--prefix', str(tmp / 'out')], capture_output=True)
+            self.assertNotEqual(run.returncode, 0)
+            self.assertFalse((tmp / 'out' / 'depth_scale.json').exists())
 
 
 if __name__ == '__main__':
