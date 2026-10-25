@@ -8,6 +8,7 @@ runs stages 10--23 once; this script never recursively invokes the pipeline.
 from __future__ import annotations
 
 import argparse
+import csv
 from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import asdict
@@ -975,7 +976,45 @@ def build_parser():
     parser.add_argument('--olc-window',type=int,default=40)
     parser.add_argument('--olc-max-seed-copies',type=int,default=2)
     parser.add_argument('--olc-jobs',type=int,default=4)
+    parser.add_argument('--exclude-events',action='append',
+        help='Read-ratio removal list (repeatable); candidates joining the same breakpoints are not added')
     return parser
+
+
+EXCLUDE_TOLERANCE=1000
+
+
+def load_excluded_events(paths):
+    """Member junction breakpoints of every NClose the read-ratio filter removed.
+
+    Rows list each member as 'chrom:bp:side>chrom:bp:side' (side = retained
+    reference side), whatever stage produced the NClose.
+    """
+    excluded=[]
+    for path in paths or ():
+        with open(path) as handle:
+            for row in csv.DictReader(handle,delimiter='\t'):
+                for junction in (row.get('junctions') or '').split(';'):
+                    if '>' not in junction:
+                        continue
+                    ends=[]
+                    for part in junction.split('>'):
+                        chrom,pos,side=part.rsplit(':',2)
+                        ends.append(dict(chrom=chrom,pos0=int(pos),side=side))
+                    excluded.append(tuple(ends))
+    return excluded
+
+
+def excluded_event(event, excluded):
+    """The candidate joins the two breakpoints of a removed junction (either order)."""
+    chain=event.get('chain') or ()
+    if not chain:
+        return False
+    ends=(endpoint(chain[0],True),endpoint(chain[-1],False))
+    def near(a,b):
+        return a['chrom']==b['chrom'] and a['side']==b['side'] and abs(a['pos0']-b['pos0'])<=EXCLUDE_TOLERANCE
+    return any((near(ends[0],x) and near(ends[1],y)) or (near(ends[0],y) and near(ends[1],x))
+               for x,y in excluded)
 
 
 def main(argv=None):
@@ -1003,6 +1042,10 @@ def main(argv=None):
         if (prefix/name).exists() and not (before/name).exists():
             shutil.copyfile(prefix/name,before/name)
     candidates=discover_events(queries,outdir,args) if queries else []
+    excluded=load_excluded_events(args.exclude_events)
+    for event in candidates:
+        if event['status'] == 'supported' and excluded_event(event,excluded):
+            event['status']='read_ratio_excluded'
     added,files=prepare_augmented_handoff(prefix,outdir,candidates,args) if candidates else ([],[])
     summary=dict(method=args.method,query_regions=len(queries),raw_candidates=len(candidates),
         added_count=len(added),added_ids=[e['candidate_id'] for e in added],
@@ -1012,6 +1055,7 @@ def main(argv=None):
         insufficient_support=sum(e['status'] == 'insufficient_raw_support' for e in candidates),
         minimum_indel_span=VCF_TYPE4_MIN_SPAN,
         small_indels_excluded=sum(e['status'] == 'below_min_indel_span' for e in candidates),
+        read_ratio_excluded=sum(e['status'] == 'read_ratio_excluded' for e in candidates),
         augmented_dir=str(outdir/'augmented'),install_files=files,
         seconds=time.monotonic()-started,rounds=1)
     write_json(summary_path,summary)

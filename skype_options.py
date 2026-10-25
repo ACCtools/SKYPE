@@ -28,6 +28,8 @@ _STAGE_OPTION_SPECS = {
     "--nclose_count_vaf_threshold": (
         "01", "--nclose-count-vaf-threshold", 1,
     ),
+    "--nclose-read-ratio": ("01", "--nclose-read-ratio", 1),
+    "--nclose_read_ratio": ("01", "--nclose-read-ratio", 1),
     "--disable-alt-ctg-simple": ("01", "--disable-alt-ctg-simple", 0),
     "--disable_alt_ctg_simple": ("01", "--disable-alt-ctg-simple", 0),
     "--vcf-filter-pass": ("01", "--vcf-filter-pass", "+"),

@@ -215,6 +215,12 @@ class PregraphBuildContext:
     censat_candidates: tuple = ()
     censat_summary: dict = field(default_factory=dict)
     nclose_min_ref_span: int = NCLOSE_DEFAULT_MIN_REF_SPAN
+    read_bam_path: str | None = None
+    unitig_fasta_path: str | None = None
+    reference_fasta_path: str | None = None
+    nclose_read_ratio: bool = False
+    nclose_read_ratio_remove_path: str | None = None
+    thread: int = 1
 
 
 @dataclass(frozen=True)
@@ -547,6 +553,10 @@ class Stage01Config:
         tuple[DebugNCloseEndpoint, DebugNCloseEndpoint], ...
     ] = ()
     nclose_min_ref_span: int = NCLOSE_DEFAULT_MIN_REF_SPAN
+    unitig_fasta_path: str | None = None
+    reference_fasta_path: str | None = None
+    nclose_read_ratio: bool = False
+    nclose_read_ratio_remove_path: str | None = None
 
 
 def iter_contig_ranges(contig_data):
@@ -745,8 +755,13 @@ def cluster_unitig_nclose_pairs(
     extracted,
     repeat_contig_names,
     repeat_censat_data,
+    members=None,
 ):
-    """Apply spatial/direction clustering to the legacy-route candidates."""
+    """Apply spatial/direction clustering to the legacy-route candidates.
+
+    ``members`` (optional dict) receives, per kept representative identity,
+    every extracted pair compressed into it, the representative first.
+    """
 
     representatives_by_bucket = defaultdict(list)
     kept = []
@@ -795,6 +810,11 @@ def cluster_unitig_nclose_pairs(
                 compress_limit,
             ):
                 duplicate = True
+                if members is not None:
+                    members[(
+                        representative.contig_name,
+                        representative.path_pair,
+                    )].append((candidate.contig_name, path_pair))
                 break
         if duplicate:
             continue
@@ -808,6 +828,10 @@ def cluster_unitig_nclose_pairs(
             )
         )
         kept.append(candidate)
+        if members is not None:
+            members[(candidate.contig_name, path_pair)] = [
+                (candidate.contig_name, path_pair)
+            ]
 
     return tuple(kept)
 
@@ -819,17 +843,20 @@ def build_unitig_nclose_candidates(context):
         context.contig_data,
         max_gap=0,
     )
+    members = {}
     clustered = cluster_unitig_nclose_pairs(
         context.contig_data,
         extracted,
         context.repeat_contig_names,
         context.repeat_censat_data,
+        members=members,
     )
     candidates = []
     for candidate in clustered:
         provenance = context.synthetic_candidate_provenance.get(
             candidate.contig_name
         )
+        compressed = tuple(members[(candidate.contig_name, candidate.path_pair)])
         candidates.append(NCloseCandidate(
             contig_name=candidate.contig_name,
             path_pair=candidate.path_pair,
@@ -839,7 +866,7 @@ def build_unitig_nclose_candidates(context):
                 else "paf"
             ),
             synthetic=provenance is not None,
-            provenance=(provenance or {}),
+            provenance=dict(provenance or {}, compressed_members=compressed),
         ))
     candidates = tuple(candidates)
     raw_nodes = candidates_to_legacy(candidates)
@@ -6566,6 +6593,66 @@ def filter_short_nclose_anchors(context, candidates):
     return apply_nclose_filter(candidates, "short_anchor", reject_reason)
 
 
+def filter_read_ratio_ncloses(context, candidates):
+    """Remove NCloses whose crossing reads do not carry their copy number.
+
+    Every member unitig compressed into an NClose is measured on its own
+    (``nclose_read_ratio``).  (A) removes an NClose whose powered read-ratio
+    estimate is at most 0.2N; (B) removes the NCloses that the post-fit check
+    listed after the first full fit.  NCloses without a testable end stay.
+    """
+    build = context.build
+    if not build.nclose_read_ratio or context.source.mode == PregraphSourceMode.VCF:
+        return list(candidates), []
+    if not (build.read_bam_path and build.reference_fasta_path):
+        raise ValueError("NClose read ratio needs the read BAM and reference FASTA")
+    import nclose_read_ratio as read_ratio
+
+    members = {
+        candidate.identity: [
+            (str(name), tuple(int(x) for x in pair))
+            for name, pair in candidate.provenance.get(
+                "compressed_members", (candidate.identity,)
+            )
+        ]
+        for candidate in candidates
+    }
+    read_ratio.save_members(build.prefix, members)
+    decisions, summary = read_ratio.evaluate_stage01(
+        build.prefix,
+        context.contig_data,
+        members,
+        unitig_fasta=build.unitig_fasta_path,
+        reference_fasta=build.reference_fasta_path,
+        bam_path=build.read_bam_path,
+        main_stat_path=build.main_stat_path,
+        paf_paths=context.source.paf_file_paths,
+        threads=build.thread,
+    )
+    removal = read_ratio.read_remove_list(build.nclose_read_ratio_remove_path)
+    present = {candidate.identity for candidate in candidates}
+    for identity, row in removal.items():
+        if identity not in present:
+            logging.warning("Post-fit read-ratio removal %s is not a stage-01 NClose", row["identity"])
+            continue
+        nodes = [context.contig_data[idx] for idx in identity[1]]
+        observed = (nodes[0][CHR_NAM], str(nodes[0][CHR_STR]), nodes[1][CHR_NAM], str(nodes[1][CHR_STR]))
+        listed = (row["start_chr"], row["start_pos"], row["end_chr"], row["end_pos"])
+        if observed != listed:
+            raise ValueError(f"Stale post-fit read-ratio removal list: {row['identity']} {observed} != {listed}")
+    logging.info(
+        "NClose read ratio: %s; post-fit removal list %d",
+        json.dumps(summary["status"]), len(removal),
+    )
+
+    def reject_reason(candidate):
+        if candidate.identity in removal:
+            return "read_ratio_overweight"
+        return decisions.get(candidate.identity, ("", None))[0] or None
+
+    return apply_nclose_filter(candidates, "read_ratio", reject_reason)
+
+
 def _run_initial_rejection_stage(context, state):
     return _store_nclose_filter_result(
         state,
@@ -6967,10 +7054,14 @@ def nclose_calc(
 
     # Apply the final anchor cutoff to both assembly routes before any final
     # NClose handoff. Raw-read rescue enters separately in stage 24.
+    # Read-ratio support is judged on the final anchors of both routes.
     nclose_pipeline_state = run_nclose_pipeline(
         nclose_pipeline_context,
         nclose_pipeline_state,
-        (make_nclose_filter_stage("short_anchor", filter_short_nclose_anchors),),
+        (
+            make_nclose_filter_stage("short_anchor", filter_short_nclose_anchors),
+            make_nclose_filter_stage("read_ratio", filter_read_ratio_ncloses),
+        ),
     )
     nclose_candidates = nclose_pipeline_state.candidates
 
@@ -7234,6 +7325,12 @@ def _make_stage01_context(config: Stage01Config, source: NCloseSourceConfig):
         censat_candidates=tuple(candidates),
         censat_summary=summary,
         nclose_min_ref_span=config.nclose_min_ref_span,
+        read_bam_path=config.read_bam_path,
+        unitig_fasta_path=config.unitig_fasta_path,
+        reference_fasta_path=config.reference_fasta_path,
+        nclose_read_ratio=config.nclose_read_ratio,
+        nclose_read_ratio_remove_path=config.nclose_read_ratio_remove_path,
+        thread=int(config.thread),
     )
 
 

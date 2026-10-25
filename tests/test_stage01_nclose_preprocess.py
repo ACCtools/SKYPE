@@ -843,6 +843,7 @@ class Stage01ContractTests(unittest.TestCase):
                     "user_exclusion",
                     "censat_endpoint_merge",
                     "short_anchor",
+                    "read_ratio",
                 ],
             )
             handoff = load_pipeline_input(prefix)
