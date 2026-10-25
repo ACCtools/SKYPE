@@ -268,7 +268,8 @@ def add_qualified_virtuals(model, virtuals, records, nodes):
                               [(chrom, start, end) for chrom, start, end, _ in views], nodes)
 
 
-def build_stage_weight_contexts(model, stage_weights, stage_virtuals, records, nodes, n_unit):
+def build_stage_weight_contexts(model, stage_weights, stage_virtuals, records, nodes, n_unit,
+                                threshold_unit=None):
     """Keep raw identities fixed, then share extra IDs across the other fits."""
     raw_model = copy.deepcopy(model)
     raw_virtuals = stage_virtuals[""]
@@ -289,16 +290,24 @@ def build_stage_weight_contexts(model, stage_weights, stage_virtuals, records, n
             stage_model = copy.deepcopy(template)
             add_qualified_virtuals(stage_model, stage_virtuals[stage], records, nodes)
             models[stage] = stage_model
-    return {stage: StructureWeights(stage_model, stage_weights[stage], n_unit)
+    return {stage: StructureWeights(stage_model, stage_weights[stage], n_unit, threshold_unit)
             for stage, stage_model in models.items()}
 
 
 class StructureWeights:
-    def __init__(self, model, weights, n_unit):
+    """Structure and NClose weights of one fit.
+
+    ``n_unit`` is the 1N of the reported copy numbers (``*_N`` fields, NClose CN);
+    ``threshold_unit`` (default ``n_unit``) is the 1N of the ``min_cn`` display cuts, so a
+    different reporting unit does not move which events are shown.
+    """
+
+    def __init__(self, model, weights, n_unit, threshold_unit=None):
         initialize_nclose_registry(model)
         if len(weights) != model["column_count"]:
             raise ValueError("Structure model and fitted column count differ; rebuild stage 22")
         self.model, self.n_unit = model, float(n_unit)
+        self.threshold_unit = float(n_unit if threshold_unit is None else threshold_unit)
         self.ncloses = model["ncloses"]
         self.structures = {s["structure_id"]: s for s in model["structures"]}
         self.contributions = []
@@ -337,21 +346,25 @@ class StructureWeights:
                     source_nclose_keys=tuple(sources),
                     source_occurrence_counts=tuple(int(source_counts[k]) for k in sources))
 
+    def above(self, weight, min_cn):
+        """True when a raw weight passes a ``min_cn`` cut in the threshold unit."""
+        return weight / self.threshold_unit > min_cn
+
     def visible_ncloses(self, min_cn=0.1):
         return [(self.ncloses[key], total) for key, total in self.totals.items()
-                if total / self.n_unit > min_cn]
+                if self.above(total, min_cn)]
 
     def structure_summaries(self, min_cn=0.1):
         return [s for s in self.structures.values()
                 if s["kind"] in {"MERGE_TYPE4", "AMP", "VIRTUAL_INV"}
-                and s["weight_N"] > min_cn]
+                and self.above(s["raw_weight"], min_cn)]
 
     def cn_lists(self, min_cn=0.1):
         inv, trans, indel = [], [], []
         for key, event in self.ncloses.items():
-            cn = self.totals[key] / self.n_unit
-            if cn <= min_cn:
+            if not self.above(self.totals[key], min_cn):
                 continue
+            cn = self.totals[key] / self.n_unit
             if event["kind"] == "indel":
                 indel.append(cn)
             else:

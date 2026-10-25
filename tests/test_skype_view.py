@@ -64,6 +64,58 @@ class SkypeViewDataTest(unittest.TestCase):
         self.assertEqual(chr1["predicted_depth"], [3.5, 0.0])
         self.assertEqual(chr1["predicted_depth_raw"], [3.5, -2.0])
 
+    def test_copy_unit_follows_the_depth_scale_of_the_shown_depths(self):
+        import gzip
+        import depth_scale
+
+        run_dir = self.write_run()
+        data = skype_view.load_viewer_data(run_dir)
+        self.assertEqual(json.loads(data.json_bytes)["copy_unit"], 5.0)  # median 10 / 2
+        self.assertEqual(json.loads(data.json_bytes)["copy_unit_source"], "median")
+
+        def write_table(depth):
+            with gzip.open(table, "wt") as handle:
+                for (chrom, start), value in zip(
+                    [("chr1", 1), ("chr1", 100_001), ("chrY", 62_400_001)], depth
+                ):
+                    handle.write(f"{chrom}\t{start}\t{start + 99_999}\t100000\t100000\t0\t100\t{value}\n")
+
+        table = run_dir / "sample_normalized.win.stat.gz"
+        write_table([10.0, 10.0, 10.0])
+        depth_scale.write(run_dir, table, np.array([10.0, 10.0, 10.0]), {}, {"N": 3.5})
+        payload = json.loads(skype_view.load_viewer_data(run_dir).json_bytes)
+        self.assertEqual((payload["copy_unit"], payload["copy_unit_source"]), (3.5, "baf"))
+        self.assertEqual(payload["scale_max"], 30.0)
+
+        # Stage 22 zeroes chrY of a sample without chrY; it never makes a zero depth positive.
+        observed = np.full(31_185, 10, dtype=np.float32)
+        observed[2] = 0
+        self.write_run(observed=observed)
+        payload = json.loads(skype_view.load_viewer_data(run_dir).json_bytes)
+        self.assertEqual(payload["copy_unit_source"], "baf")
+        self.write_run()
+        write_table([10.0, 10.0, 0.0])
+        depth_scale.write(run_dir, table, np.array([10.0, 10.0, 0.0]), {}, {"N": 3.5})
+        with self.assertLogs(level="WARNING"):
+            payload = json.loads(skype_view.load_viewer_data(run_dir).json_bytes)
+        self.assertEqual(payload["copy_unit_source"], "median")
+        write_table([10.0, 10.0, 10.0])
+        depth_scale.write(run_dir, table, np.array([10.0, 10.0, 10.0]), {}, {"N": 3.5})
+
+        # The scale and its table still agree, but B.npy was built from other depths.
+        observed = np.full(31_185, 10, dtype=np.float32)
+        observed[0] = 20
+        self.write_run(observed=observed)
+        with self.assertLogs(level="WARNING"):
+            payload = json.loads(skype_view.load_viewer_data(run_dir).json_bytes)
+        self.assertEqual((payload["copy_unit"], payload["copy_unit_source"]), (5.0, "median"))
+
+        self.write_run()
+        write_table([12.0, 10.0, 0.0])
+        with self.assertLogs(level="WARNING"):
+            payload = json.loads(skype_view.load_viewer_data(run_dir).json_bytes)
+        self.assertEqual((payload["copy_unit"], payload["copy_unit_source"]), (5.0, "median"))
+
     def test_missing_required_file_is_rejected(self):
         self.run_dir.mkdir(exist_ok=True)
         with self.assertRaisesRegex(skype_view.ViewerDataError, "Missing required"):

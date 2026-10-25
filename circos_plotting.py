@@ -188,6 +188,7 @@ def render_total_coverage_circos(
     predicted_depth: np.ndarray,
     prediction_labels: np.ndarray,
     mean_depth: float,
+    copy_unit: float | None = None,
     fragment_depth_per_chrom: Mapping[str, tuple[str, float]] | None = None,
     centromere_fragment_meta: Mapping[str, Mapping[str, int]] | None = None,
     breakend_links: Sequence[
@@ -200,8 +201,13 @@ def render_total_coverage_circos(
     Event inference is deliberately outside this function.  A coverage-only
     mode passes empty ``breakend_links`` and ``telomere_arrows`` while keeping
     the exact same tracks, colors, legends, sizing, and output format.
+
+    ``mean_depth`` (the median depth) sets the depth axis; ``copy_unit`` (1N,
+    default ``mean_depth / 2``) sets the 1N and 4N levels, the loss/gain colours
+    and the breakend CN colour scale.
     """
 
+    one_copy = mean_depth / 2 if copy_unit is None else copy_unit
     fragment_depth_per_chrom = fragment_depth_per_chrom or {}
     centromere_fragment_meta = centromere_fragment_meta or {}
     prediction_coords = [(str(chrom), int(start)) for chrom, start in prediction_coords]
@@ -248,22 +254,17 @@ def render_total_coverage_circos(
         cn_track.axis()
         cn_track.grid(y_grid_num=7, zorder=-2)
         max_start = max(sector_depth["st"])
-        cn_track.line(
-            [0, max_start],
-            [0.5 * mean_depth] * 2,
-            color="blue",
-            vmax=ABS_MAX_COVERAGE_RATIO * mean_depth,
-            zorder=-1,
-            alpha=0.5,
-        )
-        cn_track.line(
-            [0, max_start],
-            [2 * mean_depth] * 2,
-            color="red",
-            vmax=ABS_MAX_COVERAGE_RATIO * mean_depth,
-            zorder=-1,
-            alpha=0.5,
-        )
+        # A 1N or 4N level above the depth axis (3x median) is not drawn.
+        for level, color in ((one_copy, "blue"), (4 * one_copy, "red")):
+            if level <= ABS_MAX_COVERAGE_RATIO * mean_depth:
+                cn_track.line(
+                    [0, max_start],
+                    [level] * 2,
+                    color=color,
+                    vmax=ABS_MAX_COVERAGE_RATIO * mean_depth,
+                    zorder=-1,
+                    alpha=0.5,
+                )
         line_track_plot(
             cn_track,
             x=sector_starts,
@@ -287,7 +288,7 @@ def render_total_coverage_circos(
             y1=sector_depth["meandepth"].to_list(),
             vmax=ABS_MAX_COVERAGE_RATIO * mean_depth,
             target_color=["#6baed6", "#969696", "#fb6a4a"],
-            target_value=[0.5 * mean_depth, 2 * mean_depth],
+            target_value=[one_copy, 4 * one_copy],
         )
 
         if sector.name in fragment_depth_per_chrom:
@@ -320,7 +321,7 @@ def render_total_coverage_circos(
 
     offset = 0.03
     lower = 0
-    upper = mean_depth * 2
+    upper = 4 * one_copy
     cmap = sns.color_palette("rocket_r", as_cmap=True)
     line_style_by_event = {
         "breakend": "-",

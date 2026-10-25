@@ -294,8 +294,14 @@ the largest depth scale at which they sit on whole copy numbers (the fewest copi
 consistent with the anchors). A whole-genome doubling therefore stays invisible.
 The 1N, its status (`supported`, `ambiguous_scale`, `scale_sensitive`, `poor_fit`,
 `insufficient_anchors`, `insufficient_data`) and diagnostics are written to
-`depth_scale.json`; stage 00 removes an older file before it runs. `--no-baf-n`
-skips the estimate.
+`depth_scale.json`. Stages 30 and 31 use this 1N for every copy number they show or
+report whenever it exists, whatever its status, and median depth / 2 otherwise; all
+cuts on small values (0.1N, 0.2N, 5% of the median) stay in median depth / 2. A
+`depth_scale.json` whose row count, median or sum of depths differs from the depth
+table a stage reads is ignored, and stage 00 removes the old file before it runs. The
+depth viewer (`skype_view.py`) uses the same 1N for its 1N and 4N rings and CN values
+when the depths it shows (`B.npy`) are those of the recorded table.
+`--no-baf-n` skips the estimate.
 
 Stages 21–22 construct a reference-depth vector for each candidate feature.
 Paths, independent Type 4, MERGE_TYPE4, AMP and centromere fragments have

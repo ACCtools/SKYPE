@@ -99,7 +99,7 @@ class StructureWeightTests(unittest.TestCase):
             nodes, pair, paths, int2key = write_internal_chromosome_fixture(Path(tmp))
             weights = [12.]
             namespace = dict(
-                PREFIX=tmp, contig_data=nodes, weights=weights, N=10., meandepth=20.,
+                PREFIX=tmp, contig_data=nodes, weights=weights, N=10., COPY_UNIT=10., meandepth=20.,
                 chr_len={c: 1_000_000 for c in ("chr1", "chr2", "chr3")},
                 pipeline_input_config={}, pipeline_input_is_vcf=lambda config: False,
                 load_or_build_structure_model=load_or_build_structure_model,

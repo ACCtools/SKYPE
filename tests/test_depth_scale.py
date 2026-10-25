@@ -1,15 +1,21 @@
+import copy
 import gzip
 import json
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import numpy as np
+import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+import circos_plotting  # noqa: E402
 import depth_scale  # noqa: E402
+from structure_nclose import StructureWeights  # noqa: E402
+from test_stage_nclose_output import alias_fixture, export, read_tsv  # noqa: E402
 
 
 DEPTH = np.array([10.0, 20.0, 30.0])
@@ -99,6 +105,80 @@ class CopyUnitTests(unittest.TestCase):
         self.assertIsNone(scale['baf']['v'])
         self.assertEqual(scale['copy_unit'], 1.0)
         self.assertEqual((scale['depth_rows'], scale['depth_sum']), (2, 4.0))
+
+
+class ThresholdUnitTests(unittest.TestCase):
+    """Reported copy numbers follow n_unit; the min_cn cuts follow threshold_unit."""
+
+    def contexts(self, weight, unit=8.):
+        _, model = alias_fixture()
+        return (StructureWeights(copy.deepcopy(model), [weight, weight], 20., threshold_unit=20.),
+                StructureWeights(copy.deepcopy(model), [weight, weight], unit, threshold_unit=20.))
+
+    def test_cut_does_not_move_with_the_reporting_unit(self):
+        # Two structures of weight 3 give the NClose 6 = 0.3 threshold-unit copies: shown.
+        same, scaled = self.contexts(3.)
+        self.assertEqual(len(same.visible_ncloses()), len(scaled.visible_ncloses()))
+        self.assertGreater(len(scaled.visible_ncloses()), 0)
+        totals = [t for _, t in scaled.visible_ncloses()]
+        inv, trans, indel = scaled.cn_lists()
+        self.assertEqual(sorted(inv + trans + indel), sorted(t / 8. for t in totals))
+        # Total 1.5 is 0.075 threshold-unit copies (0.19 in the reporting unit 8): hidden.
+        same, scaled = self.contexts(0.75)
+        self.assertEqual(same.visible_ncloses(), [])
+        self.assertEqual(scaled.visible_ncloses(), [])
+        self.assertEqual(scaled.cn_lists(), ([], [], []))
+
+    def test_reports_use_the_reporting_unit(self):
+        nodes = alias_fixture()[0]
+        _, scaled = self.contexts(3.)
+        with tempfile.TemporaryDirectory() as prefix:
+            records = export(Path(prefix), scaled, nodes)
+            bed = read_tsv(Path(prefix) / 'SKYPE_result.bed')
+        self.assertTrue(records)
+        self.assertTrue(bed)
+        totals = {round(t / 8., 9) for _, t in scaled.visible_ncloses()}
+        self.assertTrue(all(round(float(r['weight (N)']), 9) in totals for r in bed))
+        _, hidden = self.contexts(0.75)
+        with tempfile.TemporaryDirectory() as prefix:
+            self.assertEqual(export(Path(prefix), hidden, nodes), [])
+            self.assertEqual(read_tsv(Path(prefix) / 'SKYPE_result.bed'), [])
+
+    def test_weight_at_the_cut_is_hidden_in_every_report(self):
+        # Total 2 is exactly 0.1 threshold-unit copies. In the reporting unit 3.9 the rounded
+        # copy number re-expressed in the threshold unit would land just above 0.1.
+        nodes = alias_fixture()[0]
+        _, scaled = self.contexts(1., unit=3.9)
+        self.assertEqual(scaled.visible_ncloses(), [])
+        with tempfile.TemporaryDirectory() as prefix:
+            self.assertEqual(export(Path(prefix), scaled, nodes), [])
+            self.assertEqual(read_tsv(Path(prefix) / 'SKYPE_result.bed'), [])
+
+
+class CircosUnitTests(unittest.TestCase):
+    def test_levels_above_the_depth_axis_are_skipped(self):
+        # 4N = 64 lies above the 3 x median = 60 axis; pycirclize rejects such a line.
+        st = 1 + 100_000 * np.arange(10)
+        depth = pd.DataFrame({'chr': 'chr1', 'st': st, 'meandepth': 20.0})
+        drawn = []
+        line = circos_plotting.Track.line
+
+        def record(track, x, y, **kwargs):
+            if kwargs.get('color') in ('blue', 'red'):
+                drawn.append((y[0], kwargs['color']))
+            return line(track, x, y, **kwargs)
+
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.object(circos_plotting.Track, 'line', record), \
+                mock.patch.object(circos_plotting.Circos, 'plotfig', side_effect=RuntimeError('drawn')):
+            (Path(tmp) / 'cyto.bed').write_text('chr1\t0\t1000000\tp1\tgneg\n')
+            with self.assertRaisesRegex(RuntimeError, 'drawn'):
+                circos_plotting.render_total_coverage_circos(
+                    output_prefix=tmp, fig_prefix='', chromosome_lengths={'chr1': 1_000_000},
+                    cytobands_path=str(Path(tmp) / 'cyto.bed'), observed_depth=depth,
+                    prediction_coords=[('chr1', int(s)) for s in st], predicted_depth=np.full(10, 20.0),
+                    prediction_labels=np.zeros(10), mean_depth=20.0, copy_unit=16.0)
+        self.assertEqual(drawn, [(16.0, 'blue')])
 
 
 if __name__ == '__main__':

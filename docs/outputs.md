@@ -30,7 +30,8 @@ Karyotype mode adds `_filter` and `_cluster` result sets; see
 
 Reports include zero-weight entries. Native variant displays apply the strict
 `CN > 0.1` threshold after aggregation; compound summary displays apply it to
-the structure's own CN. Positive support in a report does not by itself mean
+the structure's own CN. Display thresholds are measured in median depth / 2,
+whatever 1N the reported copy numbers use. Positive support in a report does not by itself mean
 that an event passes the display threshold or establishes biological accuracy.
 
 A zero fitted coefficient means no contribution in the current candidate
@@ -48,7 +49,7 @@ Let `w[s]` be a structure's original weight, `count[s, j]` its use count for
 original NClose `j`, and `N` the reporting normalization unit:
 
 ```text
-N = median read depth excluding chrM / 2
+N = copy_unit of depth_scale.json (median read depth excluding chrM / 2 without it)
 structure_CN[s] = w[s] / N
 NClose_CN[j] = sum(w[s] × count[s, j] for all structures s) / N
 ```

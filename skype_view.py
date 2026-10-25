@@ -14,6 +14,8 @@ from typing import Any
 
 import numpy as np
 
+import depth_scale
+
 
 BIN_SIZE = 100_000
 HOST = "0.0.0.0"
@@ -48,6 +50,7 @@ class ViewerData:
     clean_bins: int
     total_bins: int
     median_depth: float
+    copy_unit: float
     scale_max: float
     payload: dict[str, Any]
     json_bytes: bytes
@@ -212,6 +215,15 @@ def load_viewer_data(run_dir: str | os.PathLike[str]) -> ViewerData:
         raise ViewerDataError(
             f"B.npy median depth must be positive, got {median_depth:g}"
         )
+    # Copy numbers use the stage-00 BAF 1N when its depth table still matches and
+    # is the one B.npy was built from, otherwise half the median depth; the depth
+    # axis stays 3x the median.
+    copy_unit = depth_scale.recorded_copy_unit(
+        resolved, coords, observed_all[: len(coords)]
+    )
+    copy_unit_source = "baf" if copy_unit is not None else "median"
+    if copy_unit is None:
+        copy_unit = median_depth / 2
     payload = {
         "sample": resolved.name,
         "reference": layout.name,
@@ -220,6 +232,8 @@ def load_viewer_data(run_dir: str | os.PathLike[str]) -> ViewerData:
         "total_bins": len(observed_all),
         "ignored_bins": len(observed_all) - len(coords),
         "median_depth": median_depth,
+        "copy_unit": copy_unit,
+        "copy_unit_source": copy_unit_source,
         "scale_max": 3.0 * median_depth,
         "chromosomes": chromosomes,
     }
@@ -236,6 +250,7 @@ def load_viewer_data(run_dir: str | os.PathLike[str]) -> ViewerData:
         clean_bins=len(coords),
         total_bins=len(observed_all),
         median_depth=median_depth,
+        copy_unit=copy_unit,
         scale_max=3.0 * median_depth,
         payload=payload,
         json_bytes=json_bytes,
