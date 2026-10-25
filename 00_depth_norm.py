@@ -4,12 +4,14 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from skype_utils import *
 from depth_stats_io import atomic_gzip_text
+import depth_gc
 
 import numpy as np
 import pandas as pd
 from scipy.ndimage import gaussian_filter1d
 from collections import defaultdict 
 import argparse
+import logging
 
 CENSAT_COMPRESSABLE_THRESHOLD = 1000*K
 INF = 1e9
@@ -54,7 +56,13 @@ parser = argparse.ArgumentParser(description="Find breakend contigs with contig 
 parser.add_argument("main_stat_loc", type=str, help="Path to the main depth statistics file")
 parser.add_argument("ref_stat_loc", type=str, help="Path to the reference depth statistics file")
 parser.add_argument("censat_path", type=str, help="Path to the Censat repeat data file")
+parser.add_argument("--gc-table", default=os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                                       "public_data", "chm13v2.0_gc.win.tsv.gz"),
+                    help="GC and N fraction of each 100 kb window of the reference")
+parser.add_argument("--no-gc-correction", action="store_true",
+                    help="Write the reference-normalized depth without the per-sample GC correction")
 args = parser.parse_args()
+logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(levelname)s - %(message)s')
 
 main_stat_loc = args.main_stat_loc
 ref_stat_loc = args.ref_stat_loc
@@ -131,6 +139,21 @@ def apply_offset(row):
     return row['meandepth'] / offset_dict.get(key, 1.0)
 
 main_df['meandepth'] = main_df.apply(apply_offset, axis=1).astype(float)
+
+# --- per-sample GC correction (depth_gc.py) ---
+censat_all = depth_gc.read_censat(censat_path)
+gc = None
+if args.no_gc_correction:
+    gc_info = {'status': 'disabled', 'reason': '--no-gc-correction'}
+elif not os.path.isfile(args.gc_table):
+    gc_info = {'status': 'identity', 'reason': f'no GC table ({args.gc_table})'}
+else:
+    gc, gc_reason = depth_gc.row_gc(args.gc_table, main_df)
+    gc_info = {'status': 'identity', 'reason': gc_reason}
+if gc is not None:
+    corrected, _, gc_info = depth_gc.correct(main_df, gc, censat_all)
+    main_df['meandepth'] = corrected
+logging.info(f"GC correction: {gc_info['status']} {gc_info.get('reason', '')}")
 
 main_df['totaldepth'] = (main_df['meandepth'] * 100000).round().astype(int)
 

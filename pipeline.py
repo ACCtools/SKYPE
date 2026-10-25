@@ -64,6 +64,7 @@ def run_skype(CELL_LINE, PREFIX, ctg_paf, ctg_aln_paf, utg_paf, utg_aln_paf,
                             action='store_const', const='karyotype', default=None)
     mode_group.add_argument('--variant-mode', '--variant_mode', dest='output_mode',
                             action='store_const', const='variant')
+    rescue_parser.add_argument('--no-gc-correction', '--no_gc_correction', action='store_true')
     rescue_options, remaining_options = rescue_parser.parse_known_args(
         normalize_extra_args(option_skype)
     )
@@ -195,10 +196,13 @@ def run_skype(CELL_LINE, PREFIX, ctg_paf, ctg_aln_paf, utg_paf, utg_aln_paf,
 
     if not all(os.path.isfile(path) for path in expected_outputs) or skype_force or skype_start_at > 0:
         if skype_start_at <= 0 and REF_STAT_LOC is not None:
-            subprocess_run([
+            depth_norm_cmd = [
                 "python", os.path.join(skype_folder_loc, "00_depth_norm.py"),
-                MAIN_STAT_LOC, REF_STAT_LOC, RCS_BED
-            ], check=True)
+                MAIN_STAT_LOC, REF_STAT_LOC, RCS_BED,
+            ]
+            if rescue_options.no_gc_correction:
+                depth_norm_cmd.append("--no-gc-correction")
+            subprocess_run(depth_norm_cmd, check=True)
 
         if skype_start_at <= 1:
             preprocess_cmd = [
