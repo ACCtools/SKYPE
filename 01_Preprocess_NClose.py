@@ -102,6 +102,28 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--unitig-fasta",
+        help="Unitig FASTA whose sequences define each NClose ALT allele",
+    )
+    parser.add_argument(
+        "--reference-fasta",
+        help="Reference FASTA of the read BAM coordinates",
+    )
+    parser.add_argument(
+        "--nclose-read-ratio", "--nclose_read_ratio",
+        choices=("on", "off"),
+        default="on",
+        help=(
+            "Remove assembly NCloses whose REF/ALT read ratio implies at most "
+            "0.2N (needs --reference-fasta; default: on)"
+        ),
+    )
+    parser.add_argument(
+        "--nclose-read-ratio-remove",
+        default=None,
+        help="Post-fit read-ratio removal list written by nclose_read_ratio.py posthoc",
+    )
+    parser.add_argument(
         "--disable-alt-ctg-simple",
         "--disable_alt_ctg_simple",
         dest="disable_alt_ctg_simple",
@@ -192,6 +214,14 @@ def main(argv=None) -> int:
         check_nclose_count=args.check_nclose_count,
         nclose_count_vaf_threshold=args.nclose_count_vaf_threshold,
         nclose_min_ref_span=args.nclose_min_ref_span,
+        unitig_fasta_path=args.unitig_fasta,
+        reference_fasta_path=args.reference_fasta,
+        nclose_read_ratio=(
+            args.nclose_read_ratio == "on"
+            and args.vcf_input is None
+            and args.reference_fasta is not None
+        ),
+        nclose_read_ratio_remove_path=args.nclose_read_ratio_remove,
         disable_alt_ctg_simple=args.disable_alt_ctg_simple,
         vcf_input_path=args.vcf_input,
         vcf_filter_pass=tuple(args.vcf_filter_pass),

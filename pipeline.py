@@ -15,7 +15,7 @@ from pathlib import Path
 
 import psutil
 
-from skype_options import normalize_extra_args, split_stage_options
+from skype_options import load_stage_options, normalize_extra_args, split_stage_options
 
 MEM_SAFE_RATIO = 0.8
 
@@ -76,8 +76,15 @@ def run_skype(CELL_LINE, PREFIX, ctg_paf, ctg_aln_paf, utg_paf, utg_aln_paf,
         raise SkypeArgumentError(str(exc)) from None
     raw_rescue_method = raw_rescue_method or rescue_options.raw_rescue_method
     previous_rescue = Path(PREFIX) / '24_raw_rescue' / 'summary.json'
-    if raw_rescue_method is None and skype_start_at > 1 and previous_rescue.exists():
-        raw_rescue_method = json.loads(previous_rescue.read_text())['method']
+    # Method and options stage 24 last ran (or started) with, also 'off'.  A
+    # read-ratio round's stage-01 rerun removes the summary but not this record,
+    # and 'off' leaves an older summary in place, so the record decides.
+    rescue_record = Path(PREFIX) / 'raw_rescue_options.json'
+    if raw_rescue_method is None and skype_start_at > 1:
+        if rescue_record.exists():
+            raw_rescue_method = json.loads(rescue_record.read_text())['method']
+        elif previous_rescue.exists():
+            raw_rescue_method = json.loads(previous_rescue.read_text())['method']
     raw_rescue_method = raw_rescue_method or ('off' if benchmark_vcf_loc else 'read')
     rescue_args = shlex.split(rescue_options.raw_rescue_options if raw_rescue_options is None else raw_rescue_options)
     option_skype = shlex.join(remaining_options)
@@ -212,7 +219,12 @@ def run_skype(CELL_LINE, PREFIX, ctg_paf, ctg_aln_paf, utg_paf, utg_aln_paf,
             # Without stage 00 there is no 1N of this run; never reuse an older one.
             Path(PREFIX, 'depth_scale.json').unlink(missing_ok=True)
 
-        if skype_start_at <= 1:
+        read_ratio_dir = Path(PREFIX) / 'nclose_read_ratio'
+        read_ratio_round = read_ratio_dir / 'posthoc_round.json'
+        read_ratio_applied = read_ratio_dir / 'posthoc_remove_applied.tsv'
+        read_ratio_prefit = read_ratio_dir / 'prefit_remove.tsv'
+
+        def run_preprocess(remove_list=None, options=None):
             preprocess_cmd = [
                 "python",
                 os.path.join(skype_folder_loc, "01_Preprocess_NClose.py"),
@@ -257,17 +269,32 @@ def run_skype(CELL_LINE, PREFIX, ctg_paf, ctg_aln_paf, utg_paf, utg_aln_paf,
                 subprocess_run(prepare_cmd, check=True)
                 preprocess_cmd.extend([
                     "--censat-endpoints-dir", censat_dir,
+                    "--unitig-fasta", unitig_fasta,
+                    "--reference-fasta", alignasm_ref,
                     "--alt",
                     PAF_UTG_LOC,
                     "--original_paf_loc",
                     ctg_paf,
                     utg_paf,
                 ])
-            subprocess_run(preprocess_cmd + EXTRA_SKYPE + PROGRESS, check=True)
+                if remove_list is not None:
+                    preprocess_cmd.extend(["--nclose-read-ratio-remove", str(remove_list)])
+            extra = EXTRA_SKYPE if options is None else ["--option_skype=" + shlex.join(options)]
+            subprocess_run(preprocess_cmd + extra + PROGRESS, check=True)
             if not print_args:
                 rescue_dir = Path(PREFIX) / '24_raw_rescue'
                 if rescue_dir.exists():
                     shutil.rmtree(rescue_dir)
+
+        if skype_start_at <= 1:
+            if not print_args:
+                # Stage 01 rewrites the summary only when the filter is on; nothing
+                # from an earlier run may switch the post-fit check on.
+                for stale in (read_ratio_round, read_ratio_applied, read_ratio_prefit,
+                              read_ratio_dir / 'stage01_summary.json', rescue_record):
+                    if stale.exists():
+                        stale.unlink()
+            run_preprocess()
 
         def run_fit(start_at):
             if start_at <= 10:
@@ -320,10 +347,25 @@ def run_skype(CELL_LINE, PREFIX, ctg_paf, ctg_aln_paf, utg_paf, utg_aln_paf,
                     "python", "23_run_nnls.py", os.path.abspath(PREFIX), "-t", "1"
                 ], check=True, cwd=skype_folder_loc)
 
-        run_fit(skype_start_at)
-
-        if skype_start_at <= 24 and raw_rescue_method != 'off':
+        def run_rescue():
+            if raw_rescue_method == 'off':
+                if not print_args:
+                    rescue_record.write_text(json.dumps(dict(method='off', options=[])) + '\n')
+                return
             rescue_dir = Path(PREFIX) / '24_raw_rescue'
+            # While a read-ratio removal round is pending, discovery reruns with the
+            # options it last ran with, whatever this invocation was given.  An
+            # existing summary means stage 24 does not run discovery again, so the
+            # record stays as it is; otherwise it is written before discovery, so
+            # an interrupted discovery resumes with the same method and options.
+            round_state = json.loads(read_ratio_round.read_text()) if read_ratio_round.exists() else {}
+            pending = round_state.get('applied') and not round_state.get('refit_complete')
+            options = rescue_args
+            if pending and rescue_record.exists():
+                options = json.loads(rescue_record.read_text())['options']
+            discovers = not (rescue_dir / 'summary.json').exists()
+            if discovers and not print_args:
+                rescue_record.write_text(json.dumps(dict(method=raw_rescue_method, options=options)) + '\n')
             rescue_cmd = [
                 'python', os.path.join(skype_folder_loc, '24_raw_nclose_rescue.py'),
                 os.path.abspath(PREFIX), '--method', raw_rescue_method,
@@ -332,7 +374,12 @@ def run_skype(CELL_LINE, PREFIX, ctg_paf, ctg_aln_paf, utg_paf, utg_aln_paf,
                 '--censat-bed', RCS_BED, '--repeat-bed', RPT_BED,
                 '--ppc-paf', PPC_PAF_LOC, '-t', THREAD,
             ]
-            subprocess_run(rescue_cmd + rescue_args, check=True)
+            # Junctions the read-ratio filter removed in stage 01 (pre-fit) or after
+            # the fit are not rescued again from reads.
+            for exclude_list in (read_ratio_prefit, read_ratio_applied):
+                if exclude_list.exists():
+                    rescue_cmd.extend(['--exclude-events', str(exclude_list)])
+            subprocess_run(rescue_cmd + options, check=True)
             if not print_args:
                 summary = json.loads((rescue_dir / 'summary.json').read_text())
                 round_path = rescue_dir / 'round.json'
@@ -352,7 +399,7 @@ def run_skype(CELL_LINE, PREFIX, ctg_paf, ctg_aln_paf, utg_paf, utg_aln_paf,
                     run_fit(10)
                     round_path.write_text(json.dumps(dict(applied=True, refit_complete=True, rounds=1), indent=2)+'\n')
 
-        if skype_start_at <= 25:
+        def run_cluster():
             core_num = psutil.cpu_count(logical=False)
             julia_thread = thread if core_num is None else min(int(thread), core_num)
             # Julia runs from the SKYPE folder, so every path is absolute.
@@ -363,6 +410,81 @@ def run_skype(CELL_LINE, PREFIX, ctg_paf, ctg_aln_paf, utg_paf, utg_aln_paf,
                 os.path.abspath(TEL_BED), os.path.abspath(CHR_FAI), os.path.abspath(RCS_BED),
                 os.path.abspath(PREFIX), "-t", str(julia_thread), "--mode", output_mode,
             ], check=True, cwd=skype_folder_loc)
+
+        def run_report():
+            subprocess_run([
+                "python", os.path.join(skype_folder_loc, "30_virtual_sky.py"),
+                PPC_PAF_LOC, MAIN_STAT_NORM_LOC,
+                TEL_BED, CHR_FAI, PREFIX, CELL_LINE,
+            ], check=True)
+            subprocess_run([
+                "python", os.path.join(skype_folder_loc, "31_depth_analysis.py"),
+                RCS_BED, PPC_PAF_LOC, MAIN_STAT_NORM_LOC,
+                TEL_BED, CHR_FAI, CYT_BED, PREFIX, "-t", THREAD
+            ] + PROGRESS, check=True)
+
+        def run_posthoc(tag=None):
+            cmd = [
+                'python', os.path.join(skype_folder_loc, 'nclose_read_ratio.py'), 'posthoc',
+                os.path.abspath(PREFIX), '--unitig-fasta', unitig_fasta,
+                '--reference', alignasm_ref, '--bam', READ_BAM_LOC,
+                '--main-stat', MAIN_STAT_NORM_LOC, '-t', THREAD,
+            ]
+            subprocess_run(cmd + (['--tag', tag] if tag else []), check=True)
+
+        def run_read_ratio_round():
+            """(B): one post-fit check; over-weighted NCloses leave and all stages rerun.
+
+            Stage 31 attributes the fitted weights to NCloses (nclose_report*.tsv),
+            so the check follows it.
+            """
+            nonlocal unitig_fasta
+            stage01_summary = read_ratio_dir / 'stage01_summary.json'
+            if not stage01_summary.exists() or print_args:
+                return
+            if unitig_fasta is None:
+                # A later-stage restart may omit it; stage 01 recorded the FASTA it measured.
+                unitig_fasta = json.loads(stage01_summary.read_text()).get('unitig_fasta')
+                if unitig_fasta is None:
+                    raise SkypeArgumentError('The read-ratio check needs the unitig FASTA of stage 01 (--unitig-fasta)')
+            state = json.loads(read_ratio_round.read_text()) if read_ratio_round.exists() else {}
+            if state.get('refit_complete'):
+                # A restart after the round redid the fit.  There is one removal round per
+                # stage-01 run, so the new weights are checked and reported only.
+                logging.info('Read-ratio round already done for this stage-01 output; '
+                             'checking the refitted weights (report only; restart at stage 1 to remove)')
+                run_posthoc('restart')
+                return
+            if not state.get('applied'):
+                run_posthoc()
+                summary = json.loads((read_ratio_dir / 'posthoc_summary.json').read_text())
+                if not summary['flagged']:
+                    read_ratio_round.write_text(json.dumps(dict(applied=False, refit_complete=True, removed=0), indent=2)+'\n')
+                    return
+                shutil.copyfile(read_ratio_dir / 'posthoc_remove.tsv', read_ratio_applied)
+                read_ratio_round.write_text(json.dumps(dict(applied=True, refit_complete=False, removed=summary['flagged']), indent=2)+'\n')
+            logging.info('Read-ratio post-fit check removes NClose(s); rerunning stages 01--31 once')
+            # Stage 01 is redone with the options it was run with, also when this
+            # invocation resumed the round at a later stage.
+            run_preprocess(read_ratio_applied, options=None if skype_start_at <= 1 else
+                           load_stage_options(PREFIX, "01") + load_stage_options(PREFIX, "10"))
+            run_fit(10)
+            run_rescue()
+            run_cluster()
+            run_report()
+            # Report-only check of the refit; there is no second removal round.
+            run_posthoc('refit')
+            state = json.loads(read_ratio_round.read_text())
+            state['refit_complete'] = True
+            read_ratio_round.write_text(json.dumps(state, indent=2)+'\n')
+
+        run_fit(skype_start_at)
+
+        if skype_start_at <= 24:
+            run_rescue()
+
+        if skype_start_at <= 25:
+            run_cluster()
 
         if skype_start_at <= 30:
             subprocess_run([
@@ -377,6 +499,8 @@ def run_skype(CELL_LINE, PREFIX, ctg_paf, ctg_aln_paf, utg_paf, utg_aln_paf,
                 RCS_BED, PPC_PAF_LOC, MAIN_STAT_NORM_LOC,
                 TEL_BED, CHR_FAI, CYT_BED, PREFIX, "-t", THREAD
             ] + PROGRESS, check=True)
+            if not benchmark_vcf_loc:
+                run_read_ratio_round()
 
 
 def build_parser():
