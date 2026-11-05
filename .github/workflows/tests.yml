@@ -62,6 +62,7 @@ jobs:
             vcfpy
             pysam
             psutil
+            numba
             _x86_64-microarch-level=3
 
       - name: Install NNLS fallback solver
