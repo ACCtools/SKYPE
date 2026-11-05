@@ -43,9 +43,11 @@ jobs:
           cache-environment: true
           cache-downloads: true
           # Avoid restoring an x86-64-v4 cache on x86-64-v3 runners.
+          # adelie 1.1.52 (pip, below) requires numpy<2; pinning it here keeps pip from
+          # replacing numpy under a pandas built for numpy>=2.0.2.
           create-args: >-
             python=3.12
-            numpy
+            numpy=1.26
             scipy
             threadpoolctl
             pip
@@ -58,6 +60,8 @@ jobs:
             tqdm
             graph-tool
             vcfpy
+            pysam
+            psutil
             _x86_64-microarch-level=3
 
       - name: Install NNLS fallback solver
