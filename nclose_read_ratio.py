@@ -69,6 +69,8 @@ from scipy.integrate import quad
 from scipy.optimize import linprog
 from scipy.special import pdtr
 
+import depth_scale
+
 CTG_NAM = 0
 CTG_LEN = 1
 CTG_STR = 2
@@ -1454,14 +1456,32 @@ def _node_key(text):
         return None
 
 
-def _report_weights(prefix):
-    """Fitted NClose weight (N) per sorted node key, the max over fit stages.
+def report_unit_ratio(prefix, main_stat_path):
+    """(report 1N / (median depth / 2), report 1N, its source) of stage 31's NClose CN.
+
+    Stage 31 writes ``nclose_cn`` in the copy unit of depth_scale.json: the
+    B-allele-fraction 1N when stage 00 estimated one, otherwise median depth / 2.
+    This module measures local copy numbers, reads per copy and its 0.2N cut in
+    median depth / 2, the threshold unit of depth_scale.  depth_scale.copy_unit
+    on the same non-chrM depths returns the unit stage 31 used, so multiplying a
+    reported CN by the ratio puts it in this module's unit.  The ratio is
+    exactly 1 when the report used median depth / 2.
+    """
+    rows, half = load_depth(main_stat_path)
+    depth = [window[2] for windows in rows.values() for window in windows]
+    unit, source = depth_scale.copy_unit(str(prefix), depth)
+    return unit / half, unit, source
+
+
+def _report_weights(prefix, scale=1.0):
+    """Fitted NClose weight per sorted node key, the max over fit stages.
 
     Weights are attributed to NCloses by stage 31 (nclose_report*.tsv).  Stage
     31 reports NCloses of identical BND geometry under one canonical key and
     lists the others as its sources (nclose_sources*.tsv); each source NClose
     carries that weight.  A report older than the NClose set it would describe
-    is refused.
+    is refused.  ``scale`` multiplies every reported CN (report_unit_ratio
+    converts stage 31's copy unit into median depth / 2).
     """
     weights = defaultdict(float)
     per_stage = defaultdict(dict)
@@ -1486,7 +1506,7 @@ def _report_weights(prefix):
                 if key is None or len(key) != 2:
                     continue
                 try:
-                    value = max(0.0, float(row["nclose_cn"]))
+                    value = max(0.0, float(row["nclose_cn"])) * scale
                 except ValueError:
                     value = 0.0
                 stage_weight[key] = max(stage_weight.get(key, 0.0), value)
@@ -1538,7 +1558,9 @@ def posthoc(prefix, *, unitig_fasta, reference_fasta, bam_path, main_stat_path, 
         extra_sequences=load_rescue_templates(prefix))
     results, site_reason = summarize(ends, sites)
     write_tables(outdir / f"posthoc{suffix}", ends, sites, site_reason, read_calls)
-    weights, per_stage = _report_weights(prefix)
+    # Fitted weights in the unit of j, the exposure and the 0.2N cut (median depth / 2).
+    to_threshold, report_unit, report_unit_source = report_unit_ratio(prefix, main_stat_path)
+    weights, per_stage = _report_weights(prefix, to_threshold)
     scale_sd = scale_scatter(sites, site_reason)
     rows, removals = [], []
     for nclose, est in results.items():
@@ -1567,8 +1589,9 @@ def posthoc(prefix, *, unitig_fasta, reference_fasta, bam_path, main_stat_path, 
     table = POSTHOC_TSV.replace(".tsv", f"{suffix}.tsv")
     write_rows(prefix / table, POSTHOC_COLUMNS, rows)
     write_rows(outdir / table, POSTHOC_COLUMNS, rows)
-    summary = dict(preset=preset, n_unit=n_unit, scale_sd=scale_sd, ncloses=len(results),
-                   flagged=len(removals),
+    summary = dict(preset=preset, n_unit=n_unit, report_unit=report_unit,
+                   report_unit_source=report_unit_source, report_to_n_unit=to_threshold,
+                   scale_sd=scale_sd, ncloses=len(results), flagged=len(removals),
                    removable_at_stage01=sum(r["removable_at_stage01"] for r in removals))
     if not tag:
         write_rows(outdir / REMOVE_TSV, POSTHOC_COLUMNS, removals)

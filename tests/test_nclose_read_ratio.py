@@ -521,6 +521,70 @@ class ReportWeightTests(unittest.TestCase):
         self.assertEqual(weights[(2, 3)], 1.5)
         self.assertEqual(per_stage[(2, 3)], {"raw": 1.5})
 
+    def test_scale_converts_every_reported_weight(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            prefix = Path(tmp)
+            (prefix / "01_nclose_data.pkl").write_bytes(b"")
+            os.utime(prefix / "01_nclose_data.pkl", (1, 1))
+            (prefix / "nclose_report.tsv").write_text(
+                "nclose_id\tnclose_cn\tkind\tnclose_key\n"
+                "SKYPE.nclose.1\t1.5\tbnd\t1:0\n")
+            (prefix / "nclose_report_cluster.tsv").write_text(
+                "nclose_id\tnclose_cn\tkind\tnclose_key\n"
+                "SKYPE.nclose.1\t3.0\tbnd\t1:0\n")
+            (prefix / "nclose_sources.tsv").write_text(
+                "source_nclose_key\tsource_nclose_id\tnclose_id\tcanonical_nclose_key\tis_alias\n"
+                "3:2\t.\tSKYPE.nclose.1\t0:1\t1\n")
+            weights, per_stage = rr._report_weights(prefix, 2 / 3)
+        self.assertAlmostEqual(weights[(0, 1)], 2.0)
+        self.assertAlmostEqual(per_stage[(0, 1)]["raw"], 1.0)
+        self.assertAlmostEqual(per_stage[(2, 3)]["raw"], 1.0)
+
+
+class ReportUnitTests(unittest.TestCase):
+    """Stage 31's NClose CN (copy unit) is converted into median depth / 2."""
+
+    DEPTHS = [10.0, 20.0, 30.0, 40.0, 50.0]   # median 30: median depth / 2 = 15
+
+    def write_stat(self, prefix):
+        import gzip
+        path = prefix / "main.win.stat.gz"
+        with gzip.open(path, "wt") as handle:
+            handle.write("#chr\tst\tnd\tlength\tcovsite\ttotaldepth\tcov\tmeandepth\n")
+            for i, depth in enumerate(self.DEPTHS):
+                st = i * 100_000
+                handle.write(f"chr1\t{st}\t{st + 100_000}\t100000\t100000\t0\t1\t{depth}\n")
+            handle.write("chrM\t0\t16569\t16569\t16569\t0\t1\t9999.0\n")
+        return path
+
+    def test_baf_unit_is_converted_to_median_half(self):
+        import depth_scale
+        with tempfile.TemporaryDirectory() as tmp:
+            prefix = Path(tmp)
+            stat = self.write_stat(prefix)
+            depth_scale.write(str(prefix), str(stat), self.DEPTHS, {}, {"N": 10.0})
+            ratio, unit, source = rr.report_unit_ratio(prefix, stat)
+        self.assertEqual((unit, source), (10.0, "baf"))
+        self.assertAlmostEqual(ratio, 10.0 / 15.0)
+        # A weight of 30 depth reported by stage 31 as 3.0 (in 1N = 10) is 2.0 here.
+        self.assertAlmostEqual(3.0 * ratio, 30.0 / 15.0)
+
+    def test_without_depth_scale_json_the_report_is_already_in_median_half(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            prefix = Path(tmp)
+            stat = self.write_stat(prefix)
+            self.assertEqual(rr.report_unit_ratio(prefix, stat), (1.0, 15.0, "median"))
+
+    def test_json_of_another_depth_table_falls_back_like_stage_31(self):
+        import depth_scale
+        with tempfile.TemporaryDirectory() as tmp:
+            prefix = Path(tmp)
+            stat = self.write_stat(prefix)
+            depth_scale.write(str(prefix), str(stat), [1.0, 2.0, 3.0], {}, {"N": 10.0})
+            with self.assertLogs(level="WARNING"):
+                ratio, _, source = rr.report_unit_ratio(prefix, stat)
+        self.assertEqual((ratio, source), (1.0, "median"))
+
 
 class PosthocTests(unittest.TestCase):
     def test_poisson_lower_tail(self):
