@@ -139,9 +139,9 @@ function drawSectorFrame(sector, innerRadius, outerRadius, scale) {
   context.stroke();
 
   const thresholds = [
-    [0.5 * state.data.median_depth, "#3977d4"],
-    [2 * state.data.median_depth, "#dc4b56"],
-  ];
+    [state.data.copy_unit, "#3977d4"],
+    [4 * state.data.copy_unit, "#dc4b56"],
+  ].filter(([depth]) => depth <= state.data.scale_max);
   for (const [depth, color] of thresholds) {
     context.strokeStyle = color;
     context.globalAlpha = 0.72;
@@ -384,8 +384,8 @@ function updateTooltip(hit, screenX, screenY) {
       ["Reference depth", formatDepth(reference)],
       ["Predicted depth", formatDepth(predicted)],
       ["Difference", formatDepth(predicted - reference)],
-      ["Reference CN", formatDepth(reference / state.data.median_depth * 2)],
-      ["Predicted CN", formatDepth(predicted / state.data.median_depth * 2)],
+      ["Reference CN", formatDepth(reference / state.data.copy_unit)],
+      ["Predicted CN", formatDepth(predicted / state.data.copy_unit)],
     ]);
     if (predictedRaw !== predicted) {
       html += tooltipRows([["Raw prediction", formatDepth(predictedRaw)]]);
@@ -531,7 +531,8 @@ fetch("/api/depth", { cache: "no-store" })
     datasetSummary.textContent = `${data.clean_bins.toLocaleString("en-US")} / `
       + `${data.total_bins.toLocaleString("en-US")} clean bins displayed · `
       + `${data.ignored_bins.toLocaleString("en-US")} ignored · `
-      + `${data.reference} · median depth ${formatDepth(data.median_depth)}`;
+      + `${data.reference} · median depth ${formatDepth(data.median_depth)} · `
+      + `1N ${formatDepth(data.copy_unit)} (${data.copy_unit_source === "baf" ? "BAF" : "median / 2"})`;
     loading.hidden = true;
     resizeCanvas();
   })

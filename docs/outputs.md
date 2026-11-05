@@ -22,13 +22,16 @@ separate reporting rules.
 | `cn_data.pkl` | Four lists of normalized support values | Analyze CN distributions using the units described below. |
 | `virtual_sky.png`, `virtual_sky.pdf` | Whole-genome diagram | Inspect fitted chromosome paths above 0.2N, large Type 4 events, virtual inversions and centromere fragments (`cen frag` row). |
 | `karyotype.txt` | One displayed path or event | ISCN-style labels and normalized depth, including `i(<chr>)(p10/q10)` rows for centromere fragments. |
+| `depth_scale.json` | One record | Stage-00 GC correction diagnostics, the B-allele-fraction 1N with its status, and the 1N (`copy_unit`) used for the copy numbers of this run. |
+| `depth_scale/` | Het sites, rows, segments | `het_sites.tsv.gz`, `het_rows.tsv.gz` and `segments.tsv` behind the B-allele-fraction 1N. |
 
 Karyotype mode adds `_filter` and `_cluster` result sets; see
 [karyotype-mode result sets](#karyotype-mode-result-sets).
 
 Reports include zero-weight entries. Native variant displays apply the strict
 `CN > 0.1` threshold after aggregation; compound summary displays apply it to
-the structure's own CN. Positive support in a report does not by itself mean
+the structure's own CN. Display thresholds are measured in median depth / 2,
+whatever 1N the reported copy numbers use. Positive support in a report does not by itself mean
 that an event passes the display threshold or establishes biological accuracy.
 
 A zero fitted coefficient means no contribution in the current candidate
@@ -46,7 +49,7 @@ Let `w[s]` be a structure's original weight, `count[s, j]` its use count for
 original NClose `j`, and `N` the reporting normalization unit:
 
 ```text
-N = median read depth excluding chrM / 2
+N = copy_unit of depth_scale.json (median read depth excluding chrM / 2 without it)
 structure_CN[s] = w[s] / N
 NClose_CN[j] = sum(w[s] × count[s, j] for all structures s) / N
 ```

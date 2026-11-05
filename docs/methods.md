@@ -76,7 +76,7 @@ completion checks, option routing and partial restarts.
 
 | Stage | Main responsibility |
 | --- | --- |
-| 00 | Depth normalization when a reference-depth correction is supplied. |
+| 00 | Depth normalization when a reference-depth correction is supplied, per-sample GC correction and the B-allele-fraction depth per copy (1N). |
 | 01 and preprocessing helpers | Unitig/telomere processing, NClose classification and filtering, raw-read validation and compound candidate discovery. |
 | 10 | Breakend graph construction and candidate chromosome-path search. |
 | 11 | Reference-ratio outlier and Type 4 feature preparation. |
@@ -271,6 +271,37 @@ Stage 00 smooths the log CHM13 correction factors with a Gaussian sigma of one
 100 kb bin, reflect edges and truncation at four sigma. It preserves the chrY
 and large-CEN-SAT exemptions and does not smooth across coordinate gaps or
 chromosome boundaries. Sample depth itself is not convolved.
+
+Stage 00 then removes the sample's own GC response, the part the CHM13 reference
+library does not share ([depth_gc.py](../depth_gc.py)). Log2 depth is modeled as a
+segment level plus a curve of the 100 kb window GC
+(`public_data/chm13v2.0_gc.win.tsv.gz`): segments come from an exact optimal
+partition of the corrected depth, refined over rounds, and the curve is the
+median per 0.01 GC bin with at least 30 windows from 10 segments, flat beyond the
+supported GC range. The curve is shrunk by its agreement between the two halves of
+the chromosomes and applied to every window except chrY and large CEN-SAT
+exemptions; the median depth of all windows is kept. Too few training windows, a
+failed or unreproducible fit, or a GC table of another reference leave the depth
+uncorrected with the reason in `depth_scale.json`; `--no-gc-correction` skips it.
+
+The depth per copy (1N) comes from depth and B-allele fractions
+([baf_ploidy.py](../baf_ploidy.py)), not from the assumption that the median window
+holds two copies. Heterozygous sites are counted from the sample BAM in the middle
+20 kb of each fitted window, outside segmental duplications and CEN-SAT. Windows
+are segmented by depth, het-site rate and allele fraction; segments that are
+balanced (1:1), one third, one quarter or credibly LOH anchor the scale, and 1N is
+the largest depth scale at which they sit on whole copy numbers (the fewest copies
+consistent with the anchors). A whole-genome doubling therefore stays invisible.
+The 1N, its status (`supported`, `ambiguous_scale`, `scale_sensitive`, `poor_fit`,
+`insufficient_anchors`, `insufficient_data`) and diagnostics are written to
+`depth_scale.json`. Stages 30 and 31 use this 1N for every copy number they show or
+report whenever it exists, whatever its status, and median depth / 2 otherwise; all
+cuts on small values (0.1N, 0.2N, 5% of the median) stay in median depth / 2. A
+`depth_scale.json` whose row count, median or sum of depths differs from the depth
+table a stage reads is ignored, and stage 00 removes the old file before it runs. The
+depth viewer (`skype_view.py`) uses the same 1N for its 1N and 4N rings and CN values
+when the depths it shows (`B.npy`) are those of the recorded table.
+`--no-baf-n` skips the estimate.
 
 Stages 21–22 construct a reference-depth vector for each candidate feature.
 Paths, independent Type 4, MERGE_TYPE4, AMP and centromere fragments have

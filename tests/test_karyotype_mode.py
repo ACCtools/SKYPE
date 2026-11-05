@@ -140,6 +140,23 @@ class PipelineStageTests(unittest.TestCase):
         forwarded = [arg for arg in preprocess if arg.startswith("--option_skype=")]
         self.assertEqual(forwarded, ["--option_skype=--verbose"])
 
+    def test_stage00_options_are_consumed_by_the_orchestrator(self):
+        with tempfile.TemporaryDirectory() as prefix:
+            calls = self.run_commands(prefix, ref_stat="ref.win.stat.gz",
+                                      option_skype="--no-gc-correction --no_baf_n --verbose")
+            default = self.run_commands(prefix, ref_stat="ref.win.stat.gz")
+        args, _ = self.command(calls, "00_depth_norm.py")
+        self.assertEqual(args[-2:], ["--no-gc-correction", "--no-baf-n"])
+        self.assertEqual(args[args.index("--prefix") + 1], prefix)
+        self.assertEqual(args[args.index("--bam") + 1], "/depth/CELL.bam")
+        self.assertEqual(args[args.index("-t") + 1], "4")
+        args, _ = self.command(default, "00_depth_norm.py")
+        self.assertNotIn("--no-gc-correction", args)
+        self.assertNotIn("--no-baf-n", args)
+        preprocess, _ = self.command(calls, "01_Preprocess_NClose.py")
+        forwarded = [arg for arg in preprocess if arg.startswith("--option_skype=")]
+        self.assertEqual(forwarded, ["--option_skype=--verbose"])
+
     def test_removed_depth_options_are_rejected_before_every_restart(self):
         with tempfile.TemporaryDirectory() as prefix:
             for start in (0, 22, 25, 31):

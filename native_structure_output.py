@@ -107,7 +107,7 @@ def display_events(context, nodes, centromeres, min_cn=0.1):
                                weight=structure["raw_weight"], weight_N=structure["weight_N"],
                                source_id=structure["structure_id"], nclose_ids=ids, weight_scope="STRUCTURE"))
     for structure in context.structures.values():
-        if structure["kind"] != "CENTROMERE" or structure["weight_N"] <= min_cn:
+        if structure["kind"] != "CENTROMERE" or not context.above(structure["raw_weight"], min_cn):
             continue
         chrom = structure["chrom"]
         info = centromeres[chrom]

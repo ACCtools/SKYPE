@@ -5,6 +5,7 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from skype_utils import *
 from circos_plotting import render_total_coverage_circos
 from skype_vcf_writer import write_vcf_record_with_fallback
+import depth_scale
 from structure_nclose import (
     build_stage_weight_contexts, load_or_build_structure_model,
     save_structure_model, write_structure_reports,
@@ -429,7 +430,7 @@ def build_vcf_header(contig_lengths, report_suffix=''):
         ("NCLOSE_KEYS", ".", "String", "Original NClose node-index pairs, encoded as first:second"),
         ("NCLOSE_IDS", ".", "String", f"NClose IDs after exact native BND identity reuse, linked to nclose_report{report_suffix}.tsv; source pairs are in nclose_sources{report_suffix}.tsv"),
         ("WEIGHT_METHOD", 1, "String", "STRUCTURE_SUM: sum of original structure weights times exported event occurrence counts"),
-        ("MODEL_WEIGHT", 1, "Float", "Sum of unique fitted feature occurrence contributions normalized by median depth divided by two"),
+        ("MODEL_WEIGHT", 1, "Float", "Sum of unique fitted feature occurrence contributions normalized by the depth per copy (1N of depth_scale.json; median depth divided by two without it)"),
         ("MODEL_FEATURE_COUNT", 1, "Integer", "Number of distinct positive fitted columns contributing to this BND"),
         ("MODEL_OCCURRENCE_COUNT", 1, "Integer", "Number of contributing model occurrences across positive columns, after duplicate parent descriptions are removed"),
         ("VIRTUAL_WEIGHT", 1, "Float", "Sum of virtual-inversion structure occurrence contributions; added to MODEL_WEIGHT"),
@@ -855,7 +856,9 @@ def record_has_same_chrom_contiguous_span_path(record, prefix, weights, meandept
     return False
 
 def build_virtual_inv_events(prefix, meandepth, contig_lengths, min_depth_N=0.0, weights=None,
-                             span_min_depth_N=None):
+                             span_min_depth_N=None, copy_unit=None):
+    """Virtual inversions as (chrom, st, nd, expected depth, copy number, name). The depth
+    cuts are in median depth / 2; the copy number is in copy_unit (default the same)."""
     result_path = f'{prefix}/{RAW_TRANSLOCATION_RESULT_PKL}'
     if not os.path.isfile(result_path) or meandepth <= 0:
         return []
@@ -887,9 +890,9 @@ def build_virtual_inv_events(prefix, meandepth, contig_lengths, min_depth_N=0.0,
         expected_depth = estimate_raw_virtual_inv_depth(record, report_row)
         if expected_depth is None:
             continue
-        depth_N = expected_depth / meandepth * 2
-        if depth_N < min_depth_N:
+        if expected_depth / meandepth * 2 < min_depth_N:
             continue
+        depth_N = expected_depth / (copy_unit or meandepth / 2)
 
         chrom_a, point_a, chrom_b, point_b = record_display_points(record, report_row)
         if chrom_a not in contig_lengths or chrom_b not in contig_lengths:
@@ -987,6 +990,11 @@ BREAKEND_REMARKABLE_CN = meandepth * BREAKEND_REMARKABLE_CN_RATIO
 TELOMERE_REMARKABLE_CN = meandepth * TELOMERE_REMARKABLE_CN_RATIO
 N = meandepth / 2
 NCLOSE_SIM_DIFF_THRESHOLD = 0.1 * N
+# Copy numbers shown to the user use the stage-00 1N (depth_scale.json); N above stays
+# median depth / 2 for every cut that only asks whether a value is small.
+COPY_UNIT, COPY_UNIT_SOURCE = depth_scale.copy_unit(PREFIX, df['meandepth'])
+logging.info(f"Copy-number unit 1N = {COPY_UNIT:.4f} ({COPY_UNIT_SOURCE}); "
+             f"thresholds use median depth / 2 = {N:.4f}")
 
 chr_order_list = extract_groups(list(df['chr']))
 
@@ -1472,7 +1480,7 @@ def build_vcf_annotation_cn(weights, sanitized_to_keys):
     detail_cn_by_key = defaultdict(dict)
     detail_evaluated_sides_by_key = defaultdict(set)
     detail_known_sides_by_key = defaultdict(set)
-    n_unit = float(N) if N else 0.0
+    n_unit = float(COPY_UNIT) if COPY_UNIT else 0.0
 
     def weight_to_cn(weight):
         if n_unit == 0:
@@ -1758,14 +1766,14 @@ def draw_circos_plot(fig_prefix='', context=None, events=None):
 
             event_type = 'breakend'
             if chr_nam1 != chr_nam2 and v > BREAKEND_REMARKABLE_CN:
-                transloc_val_list.append(v / meandepth * 2)
+                transloc_val_list.append(v / COPY_UNIT)
             elif chr_nam1 == chr_nam2 and contig_data[idx1][CTG_DIR] != contig_data[idx2][CTG_DIR]:
                 event_type = 'inversion'
                 ecdna_component = min(v, ecdna_inv_cn[k])
                 if ecdna_component > 0:
                     v -= ecdna_component
                 if v > BREAKEND_REMARKABLE_CN:
-                    inv_val_list.append(v / meandepth * 2)
+                    inv_val_list.append(v / COPY_UNIT)
         
             if v > BREAKEND_REMARKABLE_CN:
                 bnd_cn_data.append([(chr_nam1, pos1), (chr_nam2, pos2), v, event_type])
@@ -1778,13 +1786,14 @@ def draw_circos_plot(fig_prefix='', context=None, events=None):
                 event["weight"],
                 'indel',
             ])
-            indel_val_list.append(event["weight"] / meandepth * 2)
+            indel_val_list.append(event["weight"] / COPY_UNIT)
 
         for chrom, st, nd, raw_weight, _, _ in build_amplicon_events(weights):
             bnd_cn_data.append([(chrom, st), (chrom, nd), raw_weight, 'amplicon'])
 
         virtual_inv_events = build_virtual_inv_events(
-            PREFIX, meandepth, chr_len, min_depth_N=BREAKEND_REMARKABLE_CN / N, weights=weights
+            PREFIX, meandepth, chr_len, min_depth_N=BREAKEND_REMARKABLE_CN / N, weights=weights,
+            copy_unit=COPY_UNIT,
         )
         for chrom, st, nd, expected_depth, depth_N, _ in virtual_inv_events:
             bnd_cn_data.append([(chrom, st), (chrom, nd), expected_depth, 'virtual_inv'])
@@ -1828,7 +1837,7 @@ def draw_circos_plot(fig_prefix='', context=None, events=None):
     for chrom, labels in need_label.items():
         for node_id, direction in labels:
             cn = telo_cn[node_id]
-            new_telo_val_list.append(cn / meandepth * 2)
+            new_telo_val_list.append(cn / COPY_UNIT)
             # The original renderer evaluated this lookup inside the
             # out-of-range try/except and therefore skipped absent nodes.
             if node_id not in telo_zorder_dict:
@@ -1856,6 +1865,7 @@ def draw_circos_plot(fig_prefix='', context=None, events=None):
         predicted_depth=predicted_B,
         prediction_labels=color_label,
         mean_depth=meandepth,
+        copy_unit=COPY_UNIT,
         fragment_depth_per_chrom=fragment_depth_per_chrom,
         centromere_fragment_meta=cen_fragment_meta,
         breakend_links=bnd_cn_data,
@@ -1900,7 +1910,8 @@ if not pipeline_input_is_vcf(pipeline_input_config):
         with open(f"{PREFIX}/{RAW_TRANSLOCATION_RESULT_PKL}", "rb") as handle:
             virtual_records = {int(record["pair_id"]): record for record in pkl.load(handle)}
     contexts = build_stage_weight_contexts(
-        structure_model, stage_weights, stage_virtuals, virtual_records, contig_data, N)
+        structure_model, stage_weights, stage_virtuals, virtual_records, contig_data, COPY_UNIT,
+        threshold_unit=N)
     native_context = contexts['']
     native_display_events = display_events(native_context, contig_data, cen_fragment_meta)
     for stage_suffix in stage_suffixes:
@@ -1955,7 +1966,7 @@ else:
         nclose_event_catalog,
         nclose_path_usage,
         nclose_filter_status,
-        N,
+        COPY_UNIT,
         nclose_stage_weights,
         False,
     )

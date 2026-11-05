@@ -92,6 +92,7 @@ Files are written to the selected SKYPE output directory.
 | `virtual_sky.png`, `virtual_sky.pdf` | Virtual SKY diagram of fitted chromosome paths, colored by chromosome of origin and labeled with normalized copy number. |
 | `karyotype.txt` | Tab-separated ISCN-style karyotype labels and their normalized depth (`N`). |
 | `SV_benchmark_result.vcf` | VCF-input records annotated with `SKYPE_CN` and `SKYPE_STATUS`. |
+| `depth_scale.json` | Stage-00 GC correction and the depth per copy (1N) used for the copy numbers above. |
 
 Karyotype mode (the default) also refits the matrix after greedy NClose
 filtering and after karyotype clustering, and writes `_filter` and `_cluster`
@@ -111,8 +112,16 @@ Native outputs share this calculation:
 ```text
 NClose CN = sum(structure weight × NClose occurrence count) / N
 BND CN = sum(structure weight × source NClose occurrence count × BND occurrences in that source) / N
-N = median read depth excluding chrM / 2
+N = depth per copy (1N) recorded in depth_scale.json
 ```
+
+Stage 00 estimates `N` from the sample's B-allele fractions (allelic states such as
+1:1, 1:2 and loss of heterozygosity must sit on whole copy numbers), because the median
+depth is not two copies in a near-triploid or near-tetraploid sample. Without that
+estimate, `N` is the median read depth excluding chrM / 2. Every cut that only asks
+whether a value is small, such as `CN > 0.1` and the 0.2N display filters, keeps the
+median read depth / 2 as its unit, so a different `N` changes the reported copy numbers
+but not which events are shown.
 
 For example, a path with normalized weight `3` and a virtual inversion with
 normalized weight `2` each using NClose A once give A a total of `5`. A virtual
@@ -125,7 +134,8 @@ counts keep different internal chains separate even if their outer endpoints mat
 
 These values are support estimates, not read VAFs. Structure CN, NClose CN and
 the predicted depth of a reference segment describe different quantities.
-Contributions are summed before the native output threshold (`CN > 0.1`).
+Contributions are summed before the native output threshold (`CN > 0.1` in median
+depth / 2 units).
 VCF geometry merging and reciprocal BND mate records can make its
 record count differ from the original NClose count.
 

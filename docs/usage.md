@@ -154,6 +154,18 @@ needs BAM analysis. Use ACCtools' top-level `-t`, `-d` and `--progress` options
 for execution settings. Input PAFs, `--vcf-input` and reference/depth paths are
 owned by the orchestrator and are not accepted as native extra options.
 
+Stage 00 options (`hs1` only, where a reference depth profile is supplied):
+
+| Option inside `--option_skype` | Default | Meaning |
+| --- | --- | --- |
+| `--no-gc-correction` | Disabled | Keep the reference-normalized depth without the per-sample GC correction. |
+| `--no-baf-n` | Disabled | Do not estimate 1N from B-allele fractions; copy numbers use median depth / 2. |
+
+The B-allele-fraction 1N reads the sample BAM next to the depth file
+(`<cell line>.sorted.bam` or `<cell line>.bam`, indexed) and adds a few minutes with
+`-t` processes. Without a usable BAM the reason is recorded in `depth_scale.json`
+and copy numbers use median depth / 2.
+
 Stage 01 saves routed stage-01/10 settings in `skype_options.json`. A fresh
 stage-01 run replaces those settings. Stage 10 normally reuses them; an explicit
 nonempty `--option_skype` on a stage-10 restart replaces its graph options for
@@ -241,6 +253,7 @@ For VCF-input results, also pass the original `--benchmark_vcf_loc`.
 
 | Change or task | Restart point |
 | --- | --- |
+| GC correction or 1N options | `0` |
 | Stage-01 options, anchor cutoff or compound-candidate construction | `1` |
 | Graph options with prepared preprocessing inputs | `10` |
 | Candidate matrix/column membership rebuild | `22`, with current upstream depth artifacts |

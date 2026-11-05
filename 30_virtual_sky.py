@@ -5,6 +5,7 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from skype_utils import *
 from karyotype_mode import STAGE_SUFFIXES, karyotype_mode_enabled
+import depth_scale
 
 import numpy as np
 import pandas as pd
@@ -880,7 +881,9 @@ def record_has_same_chrom_contiguous_span_path(record, prefix, weights, meandept
             return True
     return False
 
-def build_virtual_inv_events(prefix, meandepth, chrom_lengths, min_depth_N=0.0, weights=None):
+def build_virtual_inv_events(prefix, meandepth, chrom_lengths, min_depth_N=0.0, weights=None, copy_unit=None):
+    """Virtual inversions to draw. The depth cut is in median depth / 2; the shown copy
+    number is in copy_unit (default the same)."""
     result_path = f'{prefix}/{RAW_TRANSLOCATION_RESULT_PKL}'
     if not os.path.isfile(result_path) or meandepth <= 0:
         return []
@@ -910,9 +913,9 @@ def build_virtual_inv_events(prefix, meandepth, chrom_lengths, min_depth_N=0.0, 
         expected_depth = estimate_raw_virtual_inv_depth(record, report_row)
         if expected_depth is None:
             continue
-        depth_N = expected_depth / meandepth * 2
-        if depth_N < min_depth_N:
+        if expected_depth / meandepth * 2 < min_depth_N:
             continue
+        depth_N = expected_depth / (copy_unit or meandepth / 2)
 
         chrom_a, point_a, chrom_b, point_b = record_display_points(record, report_row)
         if chrom_a not in chrom_lengths or chrom_b not in chrom_lengths:
@@ -1259,13 +1262,13 @@ def build_karyotype_diagram(fig_prefix : str = '', filter_depth_N : float = TARG
             event["event_type"],
             event["st"],
             event["nd"],
-            event["weight"] / meandepth * 2,
+            event["weight"] / COPY_UNIT,
             chrom,
             indel_event_source_label(event),
         ))
 
     virtual_inv_display = build_virtual_inv_events(
-        PREFIX, meandepth, chr_len, min_depth_N=filter_depth_N, weights=weights
+        PREFIX, meandepth, chr_len, min_depth_N=filter_depth_N, weights=weights, copy_unit=COPY_UNIT
     )
         
     loc2weight = dict(zip(tot_loc_list, weights))
@@ -1301,10 +1304,10 @@ def build_karyotype_diagram(fig_prefix : str = '', filter_depth_N : float = TARG
                 chrom = paf_loc.split('/')[-2]
                 side = paf_loc.split('/')[-1].split('.')[0]
                 info = cen_fragment_meta[chrom]
-                fragment_display.append((chrom, side, info["mid"], info["chr_len"], w / meandepth * 2))
+                fragment_display.append((chrom, side, info["mid"], info["chr_len"], w / COPY_UNIT))
 
     path_depth_n = {
-        path: float(loc2weight[path] / meandepth * 2)
+        path: float(loc2weight[path] / COPY_UNIT)
         for path in karyotypes_data
     }
     path_karyotype = {}
@@ -1366,6 +1369,10 @@ CELL_LINE = args.cell_line_name
 df = pd.read_csv(main_stat_loc, compression='gzip', comment='#', sep='\t', names=['chr', 'st', 'nd', 'length', 'covsite', 'totaldepth', 'cov', 'meandepth'])
 df = df.query('chr != "chrM"')
 meandepth = np.median(df['meandepth'])
+# Shown copy numbers use the stage-00 1N (depth_scale.json); depth cuts stay in median / 2.
+COPY_UNIT, COPY_UNIT_SOURCE = depth_scale.copy_unit(PREFIX, df['meandepth'])
+logging.info(f"Copy-number unit 1N = {COPY_UNIT:.4f} ({COPY_UNIT_SOURCE}); "
+             f"thresholds use median depth / 2 = {meandepth / 2:.4f}")
 chr_len = find_chr_len(CHROMOSOME_INFO_FILE_PATH)
 
 RATIO_OUTLIER_FOLDER = f"{PREFIX}/11_ref_ratio_outliers/"

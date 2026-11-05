@@ -100,9 +100,9 @@ def aggregate_bnd_calls(context, memberships, min_cn=0.1):
     result = []
     for endpoints, call in sorted(grouped.items()):
         rows = call["rows"]
-        weight = fsum(r["contribution_N"] for r in rows)
-        if weight <= min_cn:
+        if not context.above(fsum(r["contribution"] for r in rows), min_cn):
             continue
+        weight = fsum(r["contribution_N"] for r in rows)
         parents = sorted({r["structure_id"] for r in rows})
         own = {r["structure_id"]: r["structure_weight_N"] for r in rows}
         model = [r for r in rows if r["feature_index"] is not None]
