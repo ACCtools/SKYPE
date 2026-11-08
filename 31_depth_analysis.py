@@ -993,8 +993,9 @@ NCLOSE_SIM_DIFF_THRESHOLD = 0.1 * N
 # Copy numbers shown to the user use the stage-00 1N (depth_scale.json); N above stays
 # median depth / 2 for every cut that only asks whether a value is small.
 COPY_UNIT, COPY_UNIT_SOURCE = depth_scale.copy_unit(PREFIX, df['meandepth'])
+COPY_UNIT_NOTE = depth_scale.unit_note(PREFIX, COPY_UNIT, COPY_UNIT_SOURCE, meandepth)
 logging.info(f"Copy-number unit 1N = {COPY_UNIT:.4f} ({COPY_UNIT_SOURCE}); "
-             f"thresholds use median depth / 2 = {N:.4f}")
+             f"thresholds use median depth / 2 = {N:.4f}; {COPY_UNIT_NOTE}")
 
 chr_order_list = extract_groups(list(df['chr']))
 
@@ -1866,6 +1867,7 @@ def draw_circos_plot(fig_prefix='', context=None, events=None):
         prediction_labels=color_label,
         mean_depth=meandepth,
         copy_unit=COPY_UNIT,
+        copy_unit_note=COPY_UNIT_NOTE,
         fragment_depth_per_chrom=fragment_depth_per_chrom,
         centromere_fragment_meta=cen_fragment_meta,
         breakend_links=bnd_cn_data,

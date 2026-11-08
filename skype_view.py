@@ -234,6 +234,9 @@ def load_viewer_data(run_dir: str | os.PathLike[str]) -> ViewerData:
         "median_depth": median_depth,
         "copy_unit": copy_unit,
         "copy_unit_source": copy_unit_source,
+        "copy_unit_note": depth_scale.unit_note(
+            resolved, copy_unit, copy_unit_source, median_depth
+        ),
         "scale_max": 3.0 * median_depth,
         "chromosomes": chromosomes,
     }

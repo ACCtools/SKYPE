@@ -203,6 +203,7 @@ def render_total_coverage_circos(
     prediction_labels: np.ndarray,
     mean_depth: float,
     copy_unit: float | None = None,
+    copy_unit_note: str | None = None,
     fragment_depth_per_chrom: Mapping[str, tuple[str, float]] | None = None,
     centromere_fragment_meta: Mapping[str, Mapping[str, int]] | None = None,
     breakend_links: Sequence[
@@ -219,6 +220,7 @@ def render_total_coverage_circos(
     ``mean_depth`` (the median depth) sets the depth axis; ``copy_unit`` (1N,
     default ``mean_depth / 2``) sets the grey grid of whole copy numbers, the 1N
     and 4N levels, the loss/gain colours and the breakend CN colour scale.
+    ``copy_unit_note`` (depth_scale.unit_note) is printed in the lower left corner.
     """
 
     one_copy = mean_depth / 2 if copy_unit is None else copy_unit
@@ -458,6 +460,8 @@ def render_total_coverage_circos(
         handlelength=2,
     )
     circos.ax.add_artist(breakend_legend)
+    if copy_unit_note:
+        fig.text(0.02, 0.02, copy_unit_note, fontsize=7, ha="left", va="bottom", color="dimgray")
 
     pdf_path = os.path.join(output_prefix, f"total_cov{fig_prefix}.pdf")
     png_path = os.path.join(output_prefix, f"total_cov{fig_prefix}.png")

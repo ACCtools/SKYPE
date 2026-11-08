@@ -61,7 +61,19 @@ the depth.
      scale_sensitive       N moves by > 25% with SIGMA_C x 0.75 or x 1.25
      supported
    Warnings (status unchanged): BAF conflict > 20%, fit < 0.6, germline het rate (90th
-   percentile) < 2.5 x LOH_RATE.
+   percentile) < 2.5 x LOH_RATE, scale not identified (below).
+   Every status with an N keeps that N as the copy unit; the status describes the fit.
+7. Fit quality and scale identifiability, recorded separately (status unchanged):
+     fit_quality        adequate when a candidate met the anchor-fit gates of 5., otherwise
+                        low (poor_fit). Subclonal states or noise are common reasons; a low
+                        fit alone does not say the scale is wrong.
+     scale_identified   the anchor fit at N against the other scale families: the E minima,
+                        N / 2, 2 N and median / 2, each a factor >= 1.1 from N (scale_rivals).
+                        False when a scale with fewer copies comes within FIT_MARGIN of N's
+                        anchor fit or a scale with more copies exceeds it by > AMBIG_GAP
+                        (scale_margin_fewer_copies, scale_margin_more_copies).
+     sensitivity_wide   N at SIGMA_C x 0.5 .. 2 as a ratio to N (diagnostic only).
+   Segments that fit no allowed state get C and minor = NaN in the segment table.
 Limits: whole-genome doubling (every allele count shares a factor) gives an N that is that
 factor too large; subclonal anchors over ~10% of the anchor length are fitted as clonal at
 the smaller N.
@@ -95,6 +107,8 @@ AMBIG_GAP = 0.03
 MIN_ANCHOR = 0.05
 MIN_ANCHOR_SEGS = 3
 SENS_FACTORS, SENS_MAX = (0.75, 1.25), 0.25
+SENS_WIDE = (0.5, 0.67, 1.33, 1.67, 2.0)
+SAME_SCALE = 1.1
 CONFLICT_WARN, FIT_WARN, REF_WARN = 0.20, 0.60, 2.5
 EPS_GRID = (0.02, 0.05, 0.10, 0.15, 0.20, 0.30)
 MAX_SITES = 20000
@@ -538,10 +552,45 @@ def fit_scale(s, bc, cred, median_depth, sigma_c=SIGMA_C):
 
     top = sorted(cand, key=lambda i: (-A[i], -F[i]))[:5]
     return refine(pick), {
+        '_candidates': [(float(grid[i]), float(A[i]), float(H[i]), float(F[i])) for i in cand],
         'adequate': bool(ok), 'N_alternative': refine(alt) if alt is not None else None,
         'anchor_fit_alternative': float(A[alt]) if alt is not None else None,
         'candidates': [(round(float(grid[i]), 3), round(float(A[i]), 3), round(float(H[i]), 3), round(float(F[i]), 3),
                         round(float((D / grid[i] * w).sum() / w.sum()), 2)) for i in top]}
+
+
+def scale_rivals(N, scored, median_depth):
+    """The other scale families of N: `scored` holds (1N, relation, anchor fit, het-anchor fit,
+    fit fraction) of the E minima of fit_scale (relation 'candidate'), N / 2, 2 N and median / 2,
+    all scored at SIGMA_C. A scale within a factor SAME_SCALE of N is the same family and is
+    left out. Returns the rivals (dicts, best anchor fit first) and the anchor-fit margin of N
+    (scored[0], relation 'N') over the best rival with fewer copies (larger 1N) and over the
+    best rival with more copies (smaller 1N); a margin is None when that side has no rival."""
+    a0 = scored[0][2]
+    rivals = sorted(({'N': n, 'relation': k, 'anchor_fit': a, 'het_anchor_fit': h, 'fit_fraction': f,
+                      'median_copies': median_depth / n}
+                     for n, k, a, h, f in scored[1:] if abs(np.log(n / N)) >= np.log(SAME_SCALE)),
+                    key=lambda r: -r['anchor_fit'])
+    fewer = [r['anchor_fit'] for r in rivals if r['N'] > N]
+    more = [r['anchor_fit'] for r in rivals if r['N'] < N]
+    return rivals, a0 - max(fewer) if fewer else None, a0 - max(more) if more else None
+
+
+def identified(margin_fewer, margin_more, tol=1e-9):
+    """True when every scale with fewer copies explains >= FIT_MARGIN less anchor length than N
+    and no scale with more copies explains > AMBIG_GAP more (the gaps fit_scale selects with);
+    tol absorbs the rounding of the subtracted length fractions at the boundary."""
+    return ((margin_fewer is None or margin_fewer >= FIT_MARGIN - tol)
+            and (margin_more is None or margin_more >= -AMBIG_GAP - tol))
+
+
+def failing_rival(rivals, N, margin_fewer, margin_more):
+    """The rival that makes the scale unidentified (best anchor fit on the failing side, fewer
+    copies checked first), or None when the scale is identified."""
+    if identified(margin_fewer, margin_more):
+        return None
+    fewer_side = not identified(margin_fewer, None)
+    return next((r for r in rivals if (r['N'] > N) == fewer_side), None)
 
 
 def solve(st, curves, cal, median_depth):
@@ -564,14 +613,22 @@ def solve(st, curves, cal, median_depth):
     bc, minor = allele_costs(s, cv)
     cred = loh_credible(s, cal['rho'])
     N, fit = fit_scale(s, bc, cred, median_depth)
+    candidates = fit.pop('_candidates')
     D = s.depth.to_numpy()
-    cN, CN = costs(D, bc, np.array([N, N / 2, 2 * N]))
+    # Columns: N, N / 2, 2 N (anchor_fit_half / _double) and, when it is another scale family,
+    # median / 2 (a scale rival).
+    named = [(N / 2, 'N/2'), (2 * N, '2N')] + ([(median_depth / 2, 'median/2')]
+                                              if abs(np.log(median_depth / 2 / N)) >= np.log(SAME_SCALE) else [])
+    cN, CN = costs(D, bc, np.array([N] + [n for n, _ in named]))
     A, H, F, E, anc = scores(cN, CN, kind, cred, w)
-    A3, H3 = scores(cN, CN, kind, cred, w, ADEQ_COST)[:2]
+    A3, H3 = scores(cN[:, :3], CN[:, :3], kind, cred, w, ADEQ_COST)[:2]
     C = CN[:, 0]
     m = minor[np.arange(len(s)), C - 1].astype(float)
     m[kind == 'loh'] = np.where(cred[np.arange(len(s)), C - 1], 0, np.nan)[kind == 'loh']
-    s = s.assign(C=C, minor=m, cost=cN[:, 0], fits=cN[:, 0] < FIT_COST, anchor=anc[:, 0])
+    fits = cN[:, 0] < FIT_COST
+    # A segment that fits no allowed state has no call: its capped best state is bookkeeping.
+    s = s.assign(C=np.where(fits, C, np.nan), minor=np.where(fits, m, np.nan), cost=cN[:, 0], fits=fits,
+                 anchor=anc[:, 0])
     free, _ = allele_costs(s, cv, free=True)
     depth_ok = ((D[:, None] / N - np.arange(1, CMAX + 1)[None, :]) / SIGMA_C) ** 2 <= FIT_COST
     het = np.isin(kind, HET_KINDS)
@@ -583,12 +640,34 @@ def solve(st, curves, cal, median_depth):
     flags = (['poor_fit'] if not fit['adequate'] else []) \
         + (['ambiguous_scale'] if fit['N_alternative'] is not None else []) \
         + (['scale_sensitive'] if any(abs(x['change']) > SENS_MAX for x in sens) else [])
+    # Diagnostics only (status unchanged): a wider SIGMA_C range, reported as the ratio to N.
+    sens_wide = []
+    for f in SENS_WIDE:
+        Nf, _ = fit_scale(s, bc, cred, median_depth, SIGMA_C * f)
+        sens_wide.append({'sigma_c': SIGMA_C * f, 'N': Nf, 'ratio': Nf / N})
+    scored = [(N, 'N', float(A[0]), float(H[0]), float(F[0]))] \
+        + [(n, rel, float(A[j]), float(H[j]), float(F[j]))
+           for j, (n, rel) in enumerate(named, 1)] \
+        + [(n, 'candidate', a, h, f) for n, a, h, f in candidates]
+    rivals, margin_fewer, margin_more = scale_rivals(N, scored, median_depth)
+    ident = identified(margin_fewer, margin_more)
+    against = failing_rival(rivals, N, margin_fewer, margin_more)
+    shown = [r for r in rivals if r['relation'] != 'candidate']
+    for r in (r for r in rivals if r['relation'] == 'candidate'):
+        if len(shown) < 6 and all(abs(np.log(r['N'] / q['N'])) >= np.log(SAME_SCALE) for q in shown):
+            shown.append(r)
     cf = float(w[conflict].sum() / w[het].sum()) if het.any() else 0.0
     warn = ([f'BAF conflict {cf:.2f} > {CONFLICT_WARN}'] if cf > CONFLICT_WARN else []) \
         + ([f'fit {F[0]:.2f} < {FIT_WARN}'] if F[0] < FIT_WARN else []) \
         + ([f'germline het rate {cal["ref_het_rate"]:.2e} < {REF_WARN} x LOH_RATE']
-           if not cal['ref_het_rate'] >= REF_WARN * LOH_RATE else [])
+           if not cal['ref_het_rate'] >= REF_WARN * LOH_RATE else []) \
+        + ([f'scale not identified: {against["relation"]} 1N {against["N"]:.2f} anchor fit '
+            f'{against["anchor_fit"]:.2f} vs {A[0]:.2f}'] if against else [])
     diag.update(fit, N=N, status=flags[0] if flags else 'supported', flags=flags, warnings=warn,
+                fit_quality='adequate' if fit['adequate'] else 'low', scale_identified=ident,
+                scale_unidentified_by=against,
+                scale_margin_fewer_copies=margin_fewer, scale_margin_more_copies=margin_more,
+                scale_rivals=sorted(shown, key=lambda r: -r['anchor_fit']), sensitivity_wide=sens_wide,
                 ploidy=float((D / N * w).sum() / w.sum()), median_copies=median_depth / N,
                 anchor_fit=float(A[0]), het_anchor_fit=float(H[0]), fit_fraction=float(F[0]),
                 anchor_fit_3sd=float(A3[0]), het_anchor_fit_3sd=float(H3[0]),

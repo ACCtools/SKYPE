@@ -170,3 +170,41 @@ def recorded_copy_unit(prefix, coords, depth):
                         'copy numbers use median depth / 2')
         return None
     return _baf_unit(path, scale)
+
+
+def unit_note(prefix, unit, source, median_depth):
+    """One line for logs and figures: the 1N in use, the median copy number it gives and, for a
+    BAF 1N, the stage-00 status, fit quality and whether the scale is identified. Fields that a
+    json written before they existed lacks, or that are malformed, are left out."""
+    copies = median_depth / unit if unit else float('nan')
+    if source != 'baf':
+        return f'1N {unit:.2f} (median depth / 2; median {copies:.1f} copies)'
+    try:
+        with open(os.path.join(prefix, JSON_NAME)) as fh:
+            baf = json.load(fh).get('baf')
+    except (OSError, ValueError, AttributeError) as exc:
+        logging.warning(f'{prefix}/{JSON_NAME} is unreadable for the 1N note ({exc})')
+        baf = None
+    baf = baf if isinstance(baf, dict) else {}
+    parts = [f'BAF; median {copies:.1f} copies']
+    if isinstance(baf.get('status'), str):
+        parts.append(f'status {baf["status"]}')
+    quality = baf.get('fit_quality')
+    if not isinstance(quality, str):
+        quality = {True: 'adequate', False: 'low'}.get(baf.get('adequate')) if isinstance(baf.get('adequate'), bool) else None
+    if quality:
+        parts.append(f'fit {quality}')
+    if baf.get('scale_identified') is True:
+        parts.append('scale identified')
+    elif baf.get('scale_identified') is False:
+        rival = baf.get('scale_unidentified_by')
+        alt = ''
+        if isinstance(rival, dict) and isinstance(rival.get('relation'), str):
+            try:
+                n = float(rival.get('N'))
+            except (TypeError, ValueError, OverflowError):
+                n = float('nan')
+            if math.isfinite(n):
+                alt = f' (alt. {rival["relation"]} 1N {n:.2f})'
+        parts.append('scale not identified' + alt)
+    return f'1N {unit:.2f} ({"; ".join(parts)})'

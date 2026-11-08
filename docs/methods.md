@@ -294,8 +294,19 @@ the largest depth scale at which they sit on whole copy numbers (the fewest copi
 consistent with the anchors). A whole-genome doubling therefore stays invisible.
 The 1N, its status (`supported`, `ambiguous_scale`, `scale_sensitive`, `poor_fit`,
 `insufficient_anchors`, `insufficient_data`) and diagnostics are written to
-`depth_scale.json`. Stages 30 and 31 use this 1N for every copy number they show or
-report whenever it exists, whatever its status, and median depth / 2 otherwise; all
+`depth_scale.json`. The status describes the fit, not whether the scale holds:
+`poor_fit` (recorded also as `fit_quality: low`) means that no candidate met the
+anchor-fit gates; subclonal states and noise are common reasons, and a low fit alone
+does not make the scale wrong. Whether the scale is identified is recorded separately
+(`scale_identified`): the anchor fit at 1N is compared with that of the other scale
+families a factor of 1.1 or more away (other local minima, 1N / 2, 2 x 1N and median
+depth / 2; `scale_rivals`), and the scale counts as identified unless a scale
+with fewer copies comes within 0.10 of its anchor fit or one with more copies exceeds
+it by more than 0.03. N at a wider range of the copy-number tolerance is recorded as
+a diagnostic (`sensitivity_wide`). Stages 30 and 31 use this 1N for every copy number
+they show or report whenever it exists, whatever its status, and median depth / 2
+otherwise; they log the 1N with its status, fit quality and the median copy number,
+and the stage-31 Circos figure prints the same line. All
 cuts on small values (0.1N, 0.2N, 5% of the median) stay in median depth / 2. A
 `depth_scale.json` whose row count, median or sum of depths differs from the depth
 table a stage reads is ignored, and stage 00 removes the old file before it runs. The

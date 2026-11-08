@@ -1372,7 +1372,8 @@ meandepth = np.median(df['meandepth'])
 # Shown copy numbers use the stage-00 1N (depth_scale.json); depth cuts stay in median / 2.
 COPY_UNIT, COPY_UNIT_SOURCE = depth_scale.copy_unit(PREFIX, df['meandepth'])
 logging.info(f"Copy-number unit 1N = {COPY_UNIT:.4f} ({COPY_UNIT_SOURCE}); "
-             f"thresholds use median depth / 2 = {meandepth / 2:.4f}")
+             f"thresholds use median depth / 2 = {meandepth / 2:.4f}; "
+             f"{depth_scale.unit_note(PREFIX, COPY_UNIT, COPY_UNIT_SOURCE, meandepth)}")
 chr_len = find_chr_len(CHROMOSOME_INFO_FILE_PATH)
 
 RATIO_OUTLIER_FOLDER = f"{PREFIX}/11_ref_ratio_outliers/"

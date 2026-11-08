@@ -532,7 +532,8 @@ fetch("/api/depth", { cache: "no-store" })
       + `${data.total_bins.toLocaleString("en-US")} clean bins displayed · `
       + `${data.ignored_bins.toLocaleString("en-US")} ignored · `
       + `${data.reference} · median depth ${formatDepth(data.median_depth)} · `
-      + `1N ${formatDepth(data.copy_unit)} (${data.copy_unit_source === "baf" ? "BAF" : "median / 2"})`;
+      + (data.copy_unit_note
+        || `1N ${formatDepth(data.copy_unit)} (${data.copy_unit_source === "baf" ? "BAF" : "median / 2"})`);
     loading.hidden = true;
     resizeCanvas();
   })

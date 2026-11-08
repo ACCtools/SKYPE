@@ -72,6 +72,8 @@ class SkypeViewDataTest(unittest.TestCase):
         data = skype_view.load_viewer_data(run_dir)
         self.assertEqual(json.loads(data.json_bytes)["copy_unit"], 5.0)  # median 10 / 2
         self.assertEqual(json.loads(data.json_bytes)["copy_unit_source"], "median")
+        self.assertEqual(json.loads(data.json_bytes)["copy_unit_note"],
+                         "1N 5.00 (median depth / 2; median 2.0 copies)")
 
         def write_table(depth):
             with gzip.open(table, "wt") as handle:
@@ -86,6 +88,7 @@ class SkypeViewDataTest(unittest.TestCase):
         payload = json.loads(skype_view.load_viewer_data(run_dir).json_bytes)
         self.assertEqual((payload["copy_unit"], payload["copy_unit_source"]), (3.5, "baf"))
         self.assertEqual(payload["scale_max"], 30.0)
+        self.assertTrue(payload["copy_unit_note"].startswith("1N 3.50 (BAF; median "), payload["copy_unit_note"])
 
         # Stage 22 zeroes chrY of a sample without chrY; it never makes a zero depth positive.
         observed = np.full(31_185, 10, dtype=np.float32)

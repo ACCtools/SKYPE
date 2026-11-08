@@ -65,6 +65,15 @@ class BafPloidyTests(unittest.TestCase):
         self.assertGreater(median / 2 / N_TRUE, 1.3)   # median / 2 would be 1.5 N
         self.assertAlmostEqual(diag['ploidy'], 2.9, delta=0.15)
         self.assertTrue({'balanced', 'third', 'loh'} <= set(segments.state))
+        self.assertEqual(diag['fit_quality'], 'adequate')
+        self.assertTrue(diag['scale_identified'], diag['scale_rivals'])
+        self.assertIsNone(diag['scale_unidentified_by'])
+        self.assertGreaterEqual(diag['scale_margin_fewer_copies'], PB.FIT_MARGIN)
+        relations = {r['relation']: r for r in diag['scale_rivals']}
+        self.assertTrue({'N/2', '2N', 'median/2'} <= set(relations))
+        self.assertAlmostEqual(relations['N/2']['N'], N / 2)
+        self.assertEqual([x['sigma_c'] for x in diag['sensitivity_wide']],
+                         [PB.SIGMA_C * f for f in PB.SENS_WIDE])
 
     def test_near_diploid_matches_the_median(self):
         pieces = [(400, 1, 1)] * 10 + [(200, 2, 1)] * 3 + [(150, 1, 0)] * 3 + [(150, 2, 0)] * 2
@@ -72,6 +81,43 @@ class BafPloidyTests(unittest.TestCase):
         self.assertEqual(diag['status'], 'supported', diag)
         self.assertAlmostEqual(N / N_TRUE, 1.0, delta=0.03)
         self.assertAlmostEqual(median / 2 / N_TRUE, 1.0, delta=0.05)
+
+    def test_identified_uses_the_selection_gaps(self):
+        self.assertTrue(PB.identified(None, None))
+        self.assertTrue(PB.identified(PB.FIT_MARGIN, -PB.AMBIG_GAP))
+        self.assertTrue(PB.identified(0.5, 0.90 - 0.93))                # exactly the gap, after rounding
+        self.assertFalse(PB.identified(PB.FIT_MARGIN - 0.01, 0.2))    # fewer copies nearly as good
+        self.assertFalse(PB.identified(0.5, -PB.AMBIG_GAP - 0.01))     # more copies fit better
+
+    def test_scale_rivals_sides_and_window(self):
+        scored = [(10.0, 'N', 0.90, 0.9, 0.9), (5.0, 'N/2', 0.95, 0.9, 0.9), (20.0, '2N', 0.30, 0.3, 0.3),
+                  (9.5, 'median/2', 0.99, 0.9, 0.9), (10.8, 'candidate', 0.99, 0.9, 0.9),
+                  (14.0, 'candidate', 0.85, 0.8, 0.8)]
+        rivals, fewer, more = PB.scale_rivals(10.0, scored, 30.0)
+        self.assertEqual([(r['relation'], r['N']) for r in rivals],   # 9.5 and 10.8: same family as 10
+                         [('N/2', 5.0), ('candidate', 14.0), ('2N', 20.0)])
+        self.assertAlmostEqual(fewer, 0.90 - 0.85)
+        self.assertAlmostEqual(more, 0.90 - 0.95)
+        self.assertAlmostEqual(rivals[1]['median_copies'], 30.0 / 14.0)
+        self.assertEqual(PB.scale_rivals(10.0, scored[:1], 30.0), ([], None, None))
+
+    def test_failing_rival_is_on_the_failing_side(self):
+        rivals = [{'N': 5.0, 'anchor_fit': 1.0}, {'N': 20.0, 'anchor_fit': 0.8}]
+        self.assertIsNone(PB.failing_rival(rivals, 10.0, 0.5, 0.0))
+        # Fewer-copy margin exactly at FIT_MARGIN after rounding passes; the more-copy side fails.
+        self.assertEqual(PB.failing_rival(rivals, 10.0, 0.90 - 0.80, -0.10)['N'], 5.0)
+        self.assertEqual(PB.failing_rival(rivals, 10.0, 0.05, 0.5)['N'], 20.0)
+
+    def test_segments_that_fit_no_state_have_no_call(self):
+        # 2.5 copies with minor fraction 0.2 fits no whole state at the near-diploid scale.
+        pieces = ([(400, 1, 1)] * 10 + [(200, 2, 1)] * 3 + [(150, 1, 0)] * 3
+                  + [(150, 2, 0.5)] * 2)
+        (N, segments, diag), _ = run(pieces)
+        self.assertAlmostEqual(N / N_TRUE, 1.0, delta=0.03)
+        off = segments[~segments.fits]
+        self.assertGreater(len(off), 0)
+        self.assertTrue(off[['C', 'minor']].isna().all().all())
+        self.assertTrue(segments.loc[segments.fits & (segments.state != 'loh'), ['C', 'minor']].notna().all().all())
 
     def test_no_reference_state_gives_no_scale(self):
         pieces = [(300, 4, 1)] * 6 + [(300, 5, 1)] * 6

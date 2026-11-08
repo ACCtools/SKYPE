@@ -53,6 +53,45 @@ class CopyUnitTests(unittest.TestCase):
             with self.assertLogs(level='WARNING'):
                 self.assertEqual(depth_scale.copy_unit(prefix, DEPTH), (10.0, 'median'))  # unreadable
 
+    def test_poor_fit_baf_unit_is_used(self):
+        # poor_fit describes the fit, not the scale: its 1N stays the copy unit.
+        with tempfile.TemporaryDirectory() as prefix:
+            scale = depth_scale.write(prefix, 'depth.win.stat.gz', DEPTH, {'status': 'corrected'},
+                                      {'N': 7.0, 'status': 'poor_fit', 'fit_quality': 'low'})
+            self.assertEqual((scale['copy_unit'], scale['copy_unit_source']), (7.0, 'baf'))
+            self.assertEqual(depth_scale.copy_unit(prefix, DEPTH), (7.0, 'baf'))
+
+    def test_unit_note(self):
+        with tempfile.TemporaryDirectory() as prefix:
+            self.assertEqual(depth_scale.unit_note(prefix, 10.0, 'median', 20.0),
+                             '1N 10.00 (median depth / 2; median 2.0 copies)')
+            depth_scale.write(prefix, 'depth.win.stat.gz', DEPTH, {},
+                              {'N': 4.0, 'status': 'poor_fit', 'fit_quality': 'low', 'scale_identified': True})
+            self.assertEqual(depth_scale.unit_note(prefix, 4.0, 'baf', 20.0),
+                             '1N 4.00 (BAF; median 5.0 copies; status poor_fit; fit low; scale identified)')
+            depth_scale.write(prefix, 'depth.win.stat.gz', DEPTH, {},
+                              {'N': 8.0, 'status': 'ambiguous_scale', 'adequate': True, 'scale_identified': False,
+                               'scale_unidentified_by': {'relation': 'N/2', 'N': 4.0}})
+            self.assertEqual(depth_scale.unit_note(prefix, 8.0, 'baf', 20.0),
+                             '1N 8.00 (BAF; median 2.5 copies; status ambiguous_scale; fit adequate; '
+                             'scale not identified (alt. N/2 1N 4.00))')
+            # A json written before the fit-quality and identifiability fields existed.
+            depth_scale.write(prefix, 'depth.win.stat.gz', DEPTH, {}, {'N': 8.0, 'status': 'supported'})
+            self.assertEqual(depth_scale.unit_note(prefix, 8.0, 'baf', 20.0),
+                             '1N 8.00 (BAF; median 2.5 copies; status supported)')
+            # Malformed diagnostics do not stop a stage that has a valid unit.
+            path = Path(prefix) / depth_scale.JSON_NAME
+            for baf in ('invalid', [1], {'status': 3, 'adequate': 'x', 'scale_identified': False,
+                                         'scale_unidentified_by': {'relation': 'N/2', 'N': 'x'}},
+                        {'scale_identified': False, 'scale_unidentified_by': {'relation': 'N/2', 'N': 10 ** 309}}):
+                scale = json.loads(path.read_text())
+                scale['baf'] = baf
+                path.write_text(json.dumps(scale))
+                note = depth_scale.unit_note(prefix, 8.0, 'baf', 20.0)
+                self.assertTrue(note.startswith('1N 8.00 (BAF; median 2.5 copies'), note)
+            path.write_text('[]')
+            self.assertEqual(depth_scale.unit_note(prefix, 8.0, 'baf', 20.0), '1N 8.00 (BAF; median 2.5 copies)')
+
     def test_viewer_unit_checks_the_recorded_table_and_the_shown_depths(self):
         coords = [('chr1', 1), ('chr1', 100_001), ('chr1', 200_001)]
         shown = DEPTH[[2, 0, 1]]
@@ -203,6 +242,26 @@ class CircosUnitTests(unittest.TestCase):
                     prediction_coords=[('chr1', int(s)) for s in st], predicted_depth=np.full(10, 20.0),
                     prediction_labels=np.zeros(10), mean_depth=20.0, copy_unit=16.0)
         self.assertEqual(drawn, [(0.0, True), (16.0, True), (32.0, True), (48.0, True)])
+
+    def test_unit_note_is_printed_on_the_figure(self):
+        st = 1 + 100_000 * np.arange(10)
+        depth = pd.DataFrame({'chr': 'chr1', 'st': st, 'meandepth': 20.0})
+        texts = []
+
+        def save(fig, path, *args, **kwargs):
+            texts.append([t.get_text() for t in fig.texts])
+
+        note = '1N 5.82 (BAF; median 4.9 copies; status poor_fit; fit low; scale identified)'
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.object(circos_plotting.mpl.figure.Figure, 'savefig', save):
+            (Path(tmp) / 'cyto.bed').write_text('chr1\t0\t1000000\tp1\tgneg\n')
+            for given in (note, None):
+                circos_plotting.render_total_coverage_circos(
+                    output_prefix=tmp, fig_prefix='', chromosome_lengths={'chr1': 1_000_000},
+                    cytobands_path=str(Path(tmp) / 'cyto.bed'), observed_depth=depth,
+                    prediction_coords=[('chr1', int(s)) for s in st], predicted_depth=np.full(10, 20.0),
+                    prediction_labels=np.zeros(10), mean_depth=20.0, copy_unit=16.0, copy_unit_note=given)
+        self.assertEqual(texts, [[note], [note], [], []])   # pdf and png of each figure
 
     def test_median_unit_grid_is_the_former_seven_line_grid(self):
         for median in (20.0, 63.996, 57.831, 0.1 + 0.2, 1e-3, 12345.678):
