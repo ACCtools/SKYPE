@@ -7,12 +7,11 @@ Two units are kept apart:
   copy unit       the 1N of copy numbers shown to the user: Virtual SKY labels,
                   karyotype.txt, Circos levels and colours, and the CN values of the VCF,
                   BED and TSV reports. Stage 00 stores it in depth_scale.json: the
-                  B-allele-fraction 1N of baf_ploidy.py whenever that returned one with a
-                  status other than poor_fit, otherwise median depth / 2.
-A stage falls back to median depth / 2 when the json is missing or unreadable, was written
+                  B-allele-fraction 1N of baf_ploidy.py whenever that returned one (whatever
+                  its status), otherwise median depth / 2.
+A stage falls back to median depth / 2 when the json is missing or unreadable, or was written
 for another depth table (row count, median or sum of the depths differ from the table the stage
-read), or records a poor_fit BAF 1N as the copy unit (a json written before poor_fit was
-excluded). Stage 00 removes the json before it writes a new depth table.
+read). Stage 00 removes the json before it writes a new depth table.
 """
 import gzip
 import json
@@ -24,13 +23,6 @@ import numpy as np
 
 JSON_NAME = 'depth_scale.json'
 DETAIL_DIR = 'depth_scale'
-# BAF statuses whose 1N is not shown: poor_fit means no candidate met the fit thresholds.
-REJECTED_BAF_STATUSES = frozenset({'poor_fit'})
-
-
-def baf_rejected(baf_info):
-    """True when a stage-00 BAF result has a status whose 1N copy numbers must not use."""
-    return isinstance(baf_info, dict) and baf_info.get('status') in REJECTED_BAF_STATUSES
 
 
 def finite_or_none(x):
@@ -80,7 +72,7 @@ def write(prefix, depth_file, depth, gc_info, baf_info):
     table = fingerprint(depth)
     median = table['median_depth']
     n = baf_info.get('N')
-    use_baf = n is not None and math.isfinite(n) and n > 0 and not baf_rejected(baf_info)
+    use_baf = n is not None and math.isfinite(n) and n > 0
     scale = {
         'depth_file': os.path.abspath(depth_file),
         **table,
@@ -114,10 +106,6 @@ def _load(path):
 
 def _baf_unit(path, scale):
     if scale.get('copy_unit_source') != 'baf':
-        return None
-    if baf_rejected(scale.get('baf')):
-        logging.info(f'{path} holds a BAF 1N with status {scale["baf"]["status"]}; '
-                     'copy numbers use median depth / 2')
         return None
     unit = float(scale['copy_unit'])
     if not (math.isfinite(unit) and unit > 0):

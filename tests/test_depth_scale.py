@@ -53,34 +53,6 @@ class CopyUnitTests(unittest.TestCase):
             with self.assertLogs(level='WARNING'):
                 self.assertEqual(depth_scale.copy_unit(prefix, DEPTH), (10.0, 'median'))  # unreadable
 
-    def test_poor_fit_baf_unit_is_not_used(self):
-        with tempfile.TemporaryDirectory() as prefix:
-            scale = depth_scale.write(prefix, 'depth.win.stat.gz', DEPTH, {'status': 'corrected'},
-                                      {'N': 7.0, 'status': 'poor_fit'})
-            self.assertEqual((scale['copy_unit'], scale['copy_unit_source']), (10.0, 'median'))
-            self.assertEqual(scale['baf']['N'], 7.0)   # the estimate stays recorded
-            self.assertEqual(depth_scale.copy_unit(prefix, DEPTH), (10.0, 'median'))
-            for status in ('supported', 'ambiguous_scale', 'scale_sensitive'):
-                depth_scale.write(prefix, 'depth.win.stat.gz', DEPTH, {'status': 'corrected'},
-                                  {'N': 7.0, 'status': status})
-                self.assertEqual(depth_scale.copy_unit(prefix, DEPTH), (7.0, 'baf'))
-
-    def test_poor_fit_unit_recorded_by_an_earlier_stage_00_is_not_used(self):
-        # A json written before poor_fit was excluded holds the poor_fit 1N as its copy unit.
-        coords = [('chr1', 1), ('chr1', 100_001), ('chr1', 200_001)]
-        with tempfile.TemporaryDirectory() as prefix:
-            table = Path(prefix) / 'sample_normalized.win.stat.gz'
-            write_table(table, DEPTH)
-            self.write(prefix, 7.0, depth_file=str(table))
-            self.assertEqual(depth_scale.copy_unit(prefix, DEPTH), (7.0, 'baf'))
-            self.assertEqual(depth_scale.recorded_copy_unit(prefix, coords, DEPTH), 7.0)
-            path = Path(prefix) / depth_scale.JSON_NAME
-            scale = json.loads(path.read_text())
-            scale['baf']['status'] = 'poor_fit'
-            path.write_text(json.dumps(scale))
-            self.assertEqual(depth_scale.copy_unit(prefix, DEPTH), (10.0, 'median'))
-            self.assertIsNone(depth_scale.recorded_copy_unit(prefix, coords, DEPTH))
-
     def test_viewer_unit_checks_the_recorded_table_and_the_shown_depths(self):
         coords = [('chr1', 1), ('chr1', 100_001), ('chr1', 200_001)]
         shown = DEPTH[[2, 0, 1]]
