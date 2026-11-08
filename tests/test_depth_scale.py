@@ -180,6 +180,41 @@ class CircosUnitTests(unittest.TestCase):
                     prediction_labels=np.zeros(10), mean_depth=20.0, copy_unit=16.0)
         self.assertEqual(drawn, [(16.0, 'blue')])
 
+    def test_grey_grid_marks_whole_copy_numbers(self):
+        # 1N = 16 on a 3 x 20 = 60 axis: 0N, 1N, 2N and 3N; 4N = 64 is off the axis.
+        st = 1 + 100_000 * np.arange(10)
+        depth = pd.DataFrame({'chr': 'chr1', 'st': st, 'meandepth': 20.0})
+        drawn = []
+        line = circos_plotting.Track.line
+
+        def record(track, x, y, **kwargs):
+            if kwargs.get('color') == 'grey':
+                drawn.append((y[0], (x[0], x[1]) == (track.start, track.end)))
+            return line(track, x, y, **kwargs)
+
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.object(circos_plotting.Track, 'line', record), \
+                mock.patch.object(circos_plotting.Circos, 'plotfig', side_effect=RuntimeError('drawn')):
+            (Path(tmp) / 'cyto.bed').write_text('chr1\t0\t1000000\tp1\tgneg\n')
+            with self.assertRaisesRegex(RuntimeError, 'drawn'):
+                circos_plotting.render_total_coverage_circos(
+                    output_prefix=tmp, fig_prefix='', chromosome_lengths={'chr1': 1_000_000},
+                    cytobands_path=str(Path(tmp) / 'cyto.bed'), observed_depth=depth,
+                    prediction_coords=[('chr1', int(s)) for s in st], predicted_depth=np.full(10, 20.0),
+                    prediction_labels=np.zeros(10), mean_depth=20.0, copy_unit=16.0)
+        self.assertEqual(drawn, [(0.0, True), (16.0, True), (32.0, True), (48.0, True)])
+
+    def test_median_unit_grid_is_the_former_seven_line_grid(self):
+        for median in (20.0, 63.996, 57.831, 0.1 + 0.2, 1e-3, 12345.678):
+            vmax = circos_plotting.ABS_MAX_COVERAGE_RATIO * median
+            levels = circos_plotting.copy_grid_levels(median / 2, vmax)
+            np.testing.assert_allclose(levels, np.linspace(0, vmax, 7), rtol=1e-12, atol=0)
+            self.assertLessEqual(max(levels), vmax)
+
+    def test_grid_is_empty_for_an_unusable_unit(self):
+        for unit in (0.0, -1.0, float('nan'), float('inf')):
+            self.assertEqual(circos_plotting.copy_grid_levels(unit, 60.0), [])
+
 
 if __name__ == '__main__':
     unittest.main()

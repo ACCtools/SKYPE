@@ -135,6 +135,20 @@ def line_track_circos_color(
     line_track._plot_funcs.append(plot_fill_between)
 
 
+def copy_grid_levels(one_copy: float, vmax: float) -> list[float]:
+    """Depths of the whole copy numbers 0N, 1N, 2N, ... that lie on a 0..vmax axis.
+
+    A level that rounding puts a hair above ``vmax`` (6 x median / 2 on a
+    3 x median axis) is kept and clipped to ``vmax``, since pycirclize rejects
+    values outside the axis.
+    """
+
+    if not (np.isfinite(one_copy) and one_copy > 0 and np.isfinite(vmax) and vmax > 0):
+        return []
+    count = int(np.floor(vmax / one_copy + 1e-9))
+    return [min(k * one_copy, vmax) for k in range(count + 1)]
+
+
 def rebin_depth_dataframe(frame: pd.DataFrame, n: int) -> pd.DataFrame:
     """Rebin depth rows exactly as the stage-31 coverage renderer expects."""
 
@@ -203,8 +217,8 @@ def render_total_coverage_circos(
     the exact same tracks, colors, legends, sizing, and output format.
 
     ``mean_depth`` (the median depth) sets the depth axis; ``copy_unit`` (1N,
-    default ``mean_depth / 2``) sets the 1N and 4N levels, the loss/gain colours
-    and the breakend CN colour scale.
+    default ``mean_depth / 2``) sets the grey grid of whole copy numbers, the 1N
+    and 4N levels, the loss/gain colours and the breakend CN colour scale.
     """
 
     one_copy = mean_depth / 2 if copy_unit is None else copy_unit
@@ -252,7 +266,17 @@ def render_total_coverage_circos(
 
         cn_track = sector.add_track((60, 93))
         cn_track.axis()
-        cn_track.grid(y_grid_num=7, zorder=-2)
+        # Grey grid at every whole copy number (0N, 1N, 2N, ...) up to the axis
+        # top; with the median / 2 unit this is the former 7-line grid.
+        for level in copy_grid_levels(one_copy, ABS_MAX_COVERAGE_RATIO * mean_depth):
+            cn_track.line(
+                [cn_track.start, cn_track.end],
+                [level] * 2,
+                vmax=ABS_MAX_COVERAGE_RATIO * mean_depth,
+                color="grey",
+                alpha=0.5,
+                zorder=-2,
+            )
         max_start = max(sector_depth["st"])
         # A 1N or 4N level above the depth axis (3x median) is not drawn.
         for level, color in ((one_copy, "blue"), (4 * one_copy, "red")):
