@@ -101,6 +101,23 @@ class BafPloidyTests(unittest.TestCase):
         self.assertAlmostEqual(rivals[1]['median_copies'], 30.0 / 14.0)
         self.assertEqual(PB.scale_rivals(10.0, scored[:1], 30.0), ([], None, None))
 
+    def test_refine_keeps_the_grid_point_when_the_median_raises_the_cost(self):
+        # LOH at 2, 3, 4 and 5 copies of 10; the 5-copy segment sits 1% high. The weighted median
+        # of D / C is exactly 10, a higher mean cost than the grid minimum just above 10.
+        s = pd.DataFrame({'depth': [20.0, 30.0, 40.0, 50.5], 'bins': [400.0, 300.0, 200.0, 300.0],
+                          'state': ['loh'] * 4})
+        bc, cred = np.zeros((4, PB.CMAX)), np.ones((4, PB.CMAX), dtype=bool)
+        N, _ = PB.fit_scale(s, bc, cred, 30.0)
+        grid = np.exp(np.linspace(np.log(30.0 / PB.CMAX), np.log(30.0 * 1.2), 1500))
+
+        def mean_cost(n):
+            return float((PB.costs(s.depth.to_numpy(), bc, np.array([n]))[0][:, 0] * s.bins).sum() / s.bins.sum())
+
+        self.assertIn(N, set(grid.tolist()))
+        self.assertNotEqual(N, 10.0)
+        self.assertLess(mean_cost(N), mean_cost(10.0))
+        self.assertAlmostEqual(N, 10.0, delta=0.1)
+
     def test_failing_rival_is_on_the_failing_side(self):
         rivals = [{'N': 5.0, 'anchor_fit': 1.0}, {'N': 20.0, 'anchor_fit': 0.8}]
         self.assertIsNone(PB.failing_rival(rivals, 10.0, 0.5, 0.0))

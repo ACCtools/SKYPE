@@ -50,7 +50,8 @@ the depth.
    doubles every state, so N = the largest candidate whose anchor fit is within 0.10 of the
    best and for which >= 80% of the anchor and het-anchor length is within 3 sd: the fewest
    copies consistent with the anchors. N is refined as the length-weighted median of D/C
-   over the segments that fit.
+   over the segments that fit, kept only when it does not raise the length-weighted mean
+   cost (the quantity the candidate minimizes); otherwise N is the grid point.
 6. Status:
      insufficient_data     N = None: too few training rows or non-finite depth
      insufficient_anchors  N = None: too few usable or anchor segments
@@ -542,13 +543,16 @@ def fit_scale(s, bc, cred, median_depth, sigma_c=SIGMA_C):
     alt = max(better, key=lambda i: (A[i], i)) if better else None
 
     def refine(i):
-        c0, C0 = costs(D, bc, grid[[i]], sigma_c)
-        f0 = c0[:, 0] < FIT_COST
+        # Length-weighted median of D / C over the segments that fit at grid[i]; kept only when
+        # it does not raise the mean capped cost E that the candidate is a minimum of.
+        f0 = cost[:, i] < FIT_COST
         if not f0.any():
             return float(grid[i])
-        r = D[f0] / C0[f0, 0]
+        r = D[f0] / Cg[f0, i]
         o = np.argsort(r)
-        return float(r[o][np.searchsorted(np.cumsum(w[f0][o]) / w[f0].sum(), 0.5)])
+        n = float(r[o][np.searchsorted(np.cumsum(w[f0][o]) / w[f0].sum(), 0.5)])
+        e = float((costs(D, bc, np.array([n]), sigma_c)[0][:, 0] * w).sum() / w.sum())
+        return n if e <= E[i] else float(grid[i])
 
     top = sorted(cand, key=lambda i: (-A[i], -F[i]))[:5]
     return refine(pick), {
